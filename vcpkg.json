@@ -1,0 +1,7 @@
+{
+    "name": "velox",
+    "version-string": "0.5.0", 
+    "dependencies": [
+        "azure-storage-blobs-cpp"
+    ]
+}

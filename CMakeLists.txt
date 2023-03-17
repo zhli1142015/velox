@@ -537,11 +537,14 @@ include_directories(SYSTEM velox/external)
 
 # these were previously vendored in third-party/
 if(NOT VELOX_DISABLE_GOOGLETEST)
-  set(gtest_SOURCE AUTO)
-  resolve_dependency(gtest)
-  set(VELOX_GTEST_INCUDE_DIR
-      "${gtest_SOURCE_DIR}/googletest/include"
-      PARENT_SCOPE)
+set_source(GTest)
+resolve_dependency(GTest)
+foreach(tgt gtest gtest_main gmock gmock_main)
+    if (NOT TARGET ${tgt} AND TARGET GTest::${tgt})
+        add_library(${tgt} INTERFACE IMPORTED)
+        target_link_libraries(${tgt} INTERFACE GTest::${tgt})
+    endif() 
+endforeach(tgt)
 endif()
 
 set_source(xsimd)

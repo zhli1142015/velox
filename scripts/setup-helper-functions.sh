@@ -174,3 +174,28 @@ function cmake_install {
   ${SUDO} ninja -C "${BINARY_DIR}" install
 }
 
+run_command_with_retry() {
+  set +e
+  local command="$@"  
+  local max_retries=5 
+  local retry_delay=10
+
+  for ((i=1; i<=$max_retries; i++)); do
+    echo "Attempt $i: Running '$command'..."
+    eval "$command" 2>&1
+
+    if [ $? -eq 0 ]; then
+      set -e
+      echo "Command run successful."
+      return 0
+    else
+      echo "Command failed. Retrying in $retry_delay seconds..."
+      sleep $retry_delay
+      retry_delay=$((retry_delay + 10))
+    fi
+  done
+
+  set -e
+  echo "Maximum retries reached. Command still failed."
+  return 1
+}

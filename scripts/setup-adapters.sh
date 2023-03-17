@@ -25,6 +25,9 @@ DEPENDENCY_DIR=${DEPENDENCY_DIR:-$(pwd)}
 CMAKE_BUILD_TYPE="${BUILD_TYPE:-Release}"
 MACHINE=$(uname -m)
 
+OsVersion=$(lsb_release -r)
+OsVersionNumOnly=$(cut -f2 <<< "$OsVersion")
+
 function install_aws_deps {
   local AWS_REPO_NAME="aws/aws-sdk-cpp"
   local AWS_SDK_VERSION="1.11.321"
@@ -146,8 +149,6 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
    LINUX_DISTRIBUTION=$(. /etc/os-release && echo ${ID})
    if [[ "$LINUX_DISTRIBUTION" == "ubuntu" || "$LINUX_DISTRIBUTION" == "debian" ]]; then
       apt install -y --no-install-recommends libxml2-dev libgsasl7-dev uuid-dev
-      # Dependencies of GCS, probably a workaround until the docker image is rebuilt
-      apt install -y --no-install-recommends libc-ares-dev libcurl4-openssl-dev
       # Dependencies of Azure Storage Blob cpp
       apt install -y openssl
    else # Assume Fedora/CentOS
