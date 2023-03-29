@@ -27,6 +27,8 @@
 #include "velox/expression/Expr.h"
 #include "velox/expression/ExprToSubfieldFilter.h"
 
+DEFINE_bool(use_direct_buffer_input, true, "Use DirectBufferedInput");
+
 namespace facebook::velox::connector::hive {
 
 namespace {
@@ -662,17 +664,25 @@ std::unique_ptr<dwio::common::BufferedInput> createBufferedInput(
         ioStats,
         executor,
         readerOpts);
+  } else if (FLAGS_use_direct_buffer_input) {
+    return std::make_unique<dwio::common::DirectBufferedInput>(
+        fileHandle.file,
+        dwio::common::MetricsLog::voidLog(),
+        fileHandle.uuid.id(),
+        Connector::getTracker(
+            connectorQueryCtx->scanId(), readerOpts.loadQuantum()),
+        fileHandle.groupId.id(),
+        ioStats,
+        executor,
+        readerOpts);
+  } else {
+    return std::make_unique<dwio::common::BufferedInput>(
+        fileHandle.file,
+        readerOpts.getMemoryPool(),
+        dwio::common::MetricsLog::voidLog(),
+        ioStats.get(),
+        readerOpts.maxCoalesceDistance());
   }
-  return std::make_unique<dwio::common::DirectBufferedInput>(
-      fileHandle.file,
-      dwio::common::MetricsLog::voidLog(),
-      fileHandle.uuid.id(),
-      Connector::getTracker(
-          connectorQueryCtx->scanId(), readerOpts.loadQuantum()),
-      fileHandle.groupId.id(),
-      ioStats,
-      executor,
-      readerOpts);
 }
 
 namespace {

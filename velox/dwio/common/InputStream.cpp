@@ -153,6 +153,41 @@ void ReadFileInputStream::vread(
   }
 }
 
+void ReadFileInputStream::vread(
+    const std::vector<void*>& buffers,
+    const std::vector<Region>& regions,
+    const LogType purpose) {
+  const auto size = buffers.size();
+  // the default implementation of this is to do the read sequentially
+  DWIO_ENSURE_GT(size, 0, "invalid vread parameters");
+  DWIO_ENSURE_EQ(regions.size(), size, "mismatched region->buffer");
+
+  // convert buffer to IOBufs and convert regions to VReadIntervals
+  std::vector<folly::Range<char*>> ranges;
+  uint64_t offset = regions[0].offset;
+  uint64_t lastEnd = offset;
+  uint64_t curOffset = offset;
+  uint64_t length = 0;
+  for (size_t i = 0; i < size; ++i) {
+    // fill each buffer
+    const auto& r = regions[i];
+    curOffset = r.offset;
+    if (lastEnd != curOffset) {
+      ranges.push_back(folly::Range<char*>(nullptr, curOffset - lastEnd));
+    }
+    ranges.push_back(
+        folly::Range<char*>(static_cast<char*>(buffers[i]), r.length));
+    lastEnd = curOffset + r.length;
+    length += r.length;
+  }
+  auto readStartMicros = getCurrentTimeMicro();
+  read(ranges, offset, purpose);
+  if (stats_) {
+    stats_->incRawBytesRead(length);
+    stats_->incTotalScanTime((getCurrentTimeMicro() - readStartMicros) * 1000);
+  }
+}
+
 const std::string& InputStream::getName() const {
   return path_;
 }

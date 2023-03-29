@@ -34,6 +34,10 @@ namespace facebook::velox::filesystems::abfs {
 /// https://learn.microsoft.com/en-us/azure/databricks/storage/azure-storage.
 class AbfsFileSystem : public FileSystem {
  public:
+  static constexpr const char* kReaderAbfsLoadQuantum = "fs.azure.loadQuantum";
+
+  static constexpr const char* kReaderAbfsIoThreads = "fs.azure.ioThreads";
+
   explicit AbfsFileSystem(const std::shared_ptr<const Config>& config);
 
   std::string name() const override;

@@ -124,6 +124,14 @@ class InputStream {
       folly::Range<folly::IOBuf*> iobufs,
       const LogType purpose) = 0;
 
+  virtual void vread(
+      const std::vector<void*>& buffers,
+      const std::vector<velox::common::Region>& regions,
+      const LogType purpose) = 0;
+
+  // case insensitive find
+  static uint32_t ifind(const std::string& src, const std::string& target);
+
   const std::string& getName() const;
 
   virtual void logRead(uint64_t offset, uint64_t length, LogType purpose);
@@ -170,6 +178,11 @@ class ReadFileInputStream final : public InputStream {
   void vread(
       folly::Range<const velox::common::Region*> regions,
       folly::Range<folly::IOBuf*> iobufs,
+      const LogType purpose) override;
+
+  void vread(
+      const std::vector<void*>& buffers,
+      const std::vector<velox::common::Region>& regions,
       const LogType purpose) override;
 
   const std::shared_ptr<velox::ReadFile>& getReadFile() const {

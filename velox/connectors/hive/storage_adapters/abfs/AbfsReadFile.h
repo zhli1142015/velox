@@ -22,7 +22,13 @@
 namespace facebook::velox::filesystems::abfs {
 class AbfsReadFile final : public ReadFile {
  public:
-  explicit AbfsReadFile(const std::string& path, const std::string& connectStr);
+  constexpr static uint64_t kNaturalReadSize = 4 << 20; // 4M
+  constexpr static uint64_t kReadConcurrency = 8;
+  explicit AbfsReadFile(
+      const std::string& path,
+      const std::string& connectStr,
+      const int32_t loadQuantum,
+      const std::shared_ptr<folly::Executor> ioExecutor);
 
   void initialize(const FileOptions& options);
 
@@ -39,6 +45,8 @@ class AbfsReadFile final : public ReadFile {
       folly::Range<const common::Region*> regions,
       folly::Range<folly::IOBuf*> iobufs) const final;
 
+  void preadInternal(uint64_t offset, uint64_t length, char* pos) const;
+
   uint64_t size() const final;
 
   uint64_t memoryUsage() const final;
@@ -48,6 +56,26 @@ class AbfsReadFile final : public ReadFile {
   std::string getName() const final;
 
   uint64_t getNaturalReadSize() const final;
+
+  static uint64_t calculateSplitQuantum(
+      const uint64_t length,
+      const uint64_t loadQuantum);
+
+  static void splitRegion(
+      const uint64_t length,
+      const uint64_t loadQuantum,
+      std::vector<std::tuple<uint64_t, uint64_t>>& range);
+
+  static uint64_t getOffset(folly::Range<const common::Region*> regions);
+
+  static void convertRegionsToRanges(
+      folly::Range<const common::Region*> regions,
+      folly::Range<folly::IOBuf*> iobufs,
+      std::vector<folly::Range<char*>>& ranges);
+
+  std::string getEtag() const;
+
+  std::string getPath() const;
 
  protected:
   class Impl;

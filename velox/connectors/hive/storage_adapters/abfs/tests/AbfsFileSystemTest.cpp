@@ -46,7 +46,10 @@ class AbfsFileSystemTest : public testing::Test {
  public:
   static std::shared_ptr<const Config> hiveConfig(
       const std::unordered_map<std::string, std::string> configOverride = {}) {
-    std::unordered_map<std::string, std::string> config({});
+    std::unordered_map<std::string, std::string> config({
+        {connector::hive::HiveConfig::kLoadQuantum, "1024"},
+        {filesystems::abfs::AbfsFileSystem::kReaderAbfsIoThreads, "128"},
+    });
 
     // Update the default config map with the supplied configOverride map
     for (const auto& item : configOverride) {

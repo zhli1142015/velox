@@ -25,6 +25,7 @@
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
+#include "velox/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
 #include "velox/core/Config.h"
 
 namespace facebook::velox::filesystems::abfs {
@@ -43,17 +44,28 @@ class AbfsConfig {
     return abfsAccount.connectionString(config_->get(key).value());
   }
 
+  int32_t loadQuantum() const {
+    return config_->get<int32_t>(
+        AbfsFileSystem::kReaderAbfsLoadQuantum, AbfsReadFile::kNaturalReadSize);
+  }
+
+  int32_t ioThreadPoolSize() const {
+    return config_->get<int32_t>(AbfsFileSystem::kReaderAbfsIoThreads, 0);
+  }
+
  private:
   const Config* config_;
 };
 
 class AbfsReadFile::Impl {
-  constexpr static uint64_t kNaturalReadSize = 4 << 20; // 4M
-  constexpr static uint64_t kReadConcurrency = 8;
-
  public:
-  explicit Impl(const std::string& path, const std::string& connectStr) {
-    auto abfsAccount = AbfsAccount(path);
+  explicit Impl(
+      const std::string& path,
+      const std::string& connectStr,
+      const int32_t loadQuantum,
+      const std::shared_ptr<folly::Executor> ioExecutor)
+      : path_(path), loadQuantum_(loadQuantum), ioExecutor_(ioExecutor) {
+    auto abfsAccount = AbfsAccount(path_);
     fileName_ = abfsAccount.filePath();
     fileClient_ =
         std::make_unique<BlobClient>(BlobClient::CreateFromConnectionString(
@@ -74,6 +86,13 @@ class AbfsReadFile::Impl {
     try {
       auto properties = fileClient_->GetProperties();
       length_ = properties.Value.BlobSize;
+      auto eTagFull = properties.Value.ETag.ToString();
+      if (eTagFull.length() > 2) {
+        // Remove Quotes
+        eTag_ = eTagFull.substr(1, eTagFull.length() - 2);
+      } else {
+        eTag_ = "invalid";
+      }
     } catch (Azure::Storage::StorageException& e) {
       throwStorageExceptionWithOperationDetails("GetProperties", fileName_, e);
     }
@@ -100,16 +119,51 @@ class AbfsReadFile::Impl {
     for (auto& range : buffers) {
       length += range.size();
     }
-    std::string result(length, 0);
-    preadInternal(offset, length, static_cast<char*>(result.data()));
-    size_t resultOffset = 0;
-    for (auto range : buffers) {
-      if (range.data()) {
-        memcpy(range.data(), &(result.data()[resultOffset]), range.size());
+    if (ioExecutor_) {
+      size_t requestOffset = offset;
+      std::vector<folly::Future<folly::Unit>> futures;
+      for (auto region : buffers) {
+        const auto& buffer = region.data();
+        if (buffer) {
+          auto loadQuantum = calculateSplitQuantum(region.size(), loadQuantum_);
+          if (region.size() > loadQuantum) {
+            std::vector<std::tuple<uint64_t, uint64_t>> ranges;
+            splitRegion(region.size(), loadQuantum, ranges);
+            for (size_t idx = 0; idx < ranges.size(); idx++) {
+              auto cursor = std::get<0>(ranges[idx]);
+              auto length = std::get<1>(ranges[idx]);
+              auto future = folly::via(
+                  ioExecutor_.get(),
+                  [this, buffer, region, requestOffset, cursor, length]() {
+                    char* b = reinterpret_cast<char*>(buffer);
+                    preadInternal(requestOffset + cursor, length, b + cursor);
+                  });
+              futures.push_back(std::move(future));
+            }
+          } else {
+            auto future = folly::via(
+                ioExecutor_.get(), [this, requestOffset, buffer, region]() {
+                  preadInternal(requestOffset, region.size(), buffer);
+                });
+            futures.push_back(std::move(future));
+          }
+        }
+        requestOffset += region.size();
       }
-      resultOffset += range.size();
+      for (int64_t i = futures.size() - 1; i >= 0; --i) {
+        futures[i].wait();
+      }
+    } else {
+      std::string result(length, 0);
+      preadInternal(offset, length, static_cast<char*>(result.data()));
+      size_t resultOffset = 0;
+      for (auto range : buffers) {
+        if (range.data()) {
+          memcpy(range.data(), &(result.data()[resultOffset]), range.size());
+        }
+        resultOffset += range.size();
+      }
     }
-
     return length;
   }
 
@@ -117,12 +171,49 @@ class AbfsReadFile::Impl {
       folly::Range<const common::Region*> regions,
       folly::Range<folly::IOBuf*> iobufs) const {
     VELOX_CHECK_EQ(regions.size(), iobufs.size());
-    for (size_t i = 0; i < regions.size(); ++i) {
-      const auto& region = regions[i];
-      auto& output = iobufs[i];
-      output = folly::IOBuf(folly::IOBuf::CREATE, region.length);
-      pread(region.offset, region.length, output.writableData());
-      output.append(region.length);
+    if (ioExecutor_) {
+      std::vector<folly::Future<folly::Unit>> futures;
+      for (size_t i = 0; i < regions.size(); ++i) {
+        const auto& region = regions[i];
+        auto& output = iobufs[i];
+        output = folly::IOBuf(folly::IOBuf::CREATE, region.length);
+        auto loadQuantum = calculateSplitQuantum(region.length, loadQuantum_);
+        if (region.length > loadQuantum) {
+          std::vector<std::tuple<uint64_t, uint64_t>> ranges;
+          splitRegion(region.length, loadQuantum, ranges);
+          for (size_t idx = 0; idx < ranges.size(); idx++) {
+            auto cursor = std::get<0>(ranges[idx]);
+            auto length = std::get<1>(ranges[idx]);
+            auto future = folly::via(
+                ioExecutor_.get(), [this, region, &output, cursor, length]() {
+                  char* b = reinterpret_cast<char*>(output.writableData());
+                  preadInternal(region.offset + cursor, length, b + cursor);
+                });
+            futures.push_back(std::move(future));
+          }
+        } else {
+          auto future =
+              folly::via(ioExecutor_.get(), [this, region, &output]() {
+                char* b = reinterpret_cast<char*>(output.writableData());
+                preadInternal(region.offset, region.length, b);
+              });
+          futures.push_back(std::move(future));
+        }
+      }
+      for (int64_t i = futures.size() - 1; i >= 0; --i) {
+        futures[i].wait();
+      }
+      for (size_t i = 0; i < regions.size(); ++i) {
+        iobufs[i].append(regions[i].length);
+      }
+    } else {
+      for (size_t i = 0; i < regions.size(); ++i) {
+        const auto& region = regions[i];
+        auto& output = iobufs[i];
+        output = folly::IOBuf(folly::IOBuf::CREATE, region.length);
+        pread(region.offset, region.length, output.writableData());
+        output.append(region.length);
+      }
     }
   }
 
@@ -146,7 +237,14 @@ class AbfsReadFile::Impl {
     return kNaturalReadSize;
   }
 
- private:
+  std::string getEtag() const {
+    return eTag_;
+  }
+
+  std::string getPath() const {
+    return path_;
+  }
+
   void preadInternal(uint64_t offset, uint64_t length, char* position) const {
     // Read the desired range of bytes.
     Azure::Core::Http::HttpRange range;
@@ -161,7 +259,14 @@ class AbfsReadFile::Impl {
         reinterpret_cast<uint8_t*>(position), length);
   }
 
+ private:
+  const std::string path_;
+  const std::string connectStr_;
+  const int32_t loadQuantum_;
+  const std::shared_ptr<folly::Executor> ioExecutor_;
+  std::string fileSystem_;
   std::string fileName_;
+  std::string eTag_;
   std::unique_ptr<BlobClient> fileClient_;
 
   int64_t length_ = -1;
@@ -169,8 +274,10 @@ class AbfsReadFile::Impl {
 
 AbfsReadFile::AbfsReadFile(
     const std::string& path,
-    const std::string& connectStr) {
-  impl_ = std::make_shared<Impl>(path, connectStr);
+    const std::string& connectStr,
+    const int32_t loadQuantum,
+    const std::shared_ptr<folly::Executor> ioExecutor) {
+  impl_ = std::make_shared<Impl>(path, connectStr, loadQuantum, ioExecutor);
 }
 
 void AbfsReadFile::initialize(const FileOptions& options) {
@@ -218,10 +325,98 @@ uint64_t AbfsReadFile::getNaturalReadSize() const {
   return impl_->getNaturalReadSize();
 }
 
+std::string AbfsReadFile::getEtag() const {
+  return impl_->getEtag();
+}
+
+std::string AbfsReadFile::getPath() const {
+  return impl_->getPath();
+}
+
+void AbfsReadFile::preadInternal(uint64_t offset, uint64_t length, char* pos)
+    const {
+  return impl_->preadInternal(offset, length, pos);
+}
+
+// static
+uint64_t AbfsReadFile::calculateSplitQuantum(
+    const uint64_t length,
+    const uint64_t loadQuantum) {
+  if (length <= loadQuantum * kReadConcurrency) {
+    return loadQuantum;
+  } else {
+    return length / kReadConcurrency;
+  }
+}
+
+// static
+void AbfsReadFile::splitRegion(
+    const uint64_t length,
+    const uint64_t loadQuantum,
+    std::vector<std::tuple<uint64_t, uint64_t>>& range) {
+  uint64_t cursor = 0;
+  while (cursor + loadQuantum < length) {
+    range.emplace_back(cursor, loadQuantum);
+    cursor += loadQuantum;
+  }
+
+  if ((length - cursor) > (loadQuantum / 2)) {
+    range.emplace_back(cursor, (length - cursor));
+  } else {
+    auto last = range.back();
+    range.pop_back();
+    range.emplace_back(
+        std::get<0>(last), std::get<1>(last) + (length - cursor));
+  }
+}
+
+// static
+uint64_t AbfsReadFile::getOffset(folly::Range<const common::Region*> regions) {
+  uint64_t offset = regions[0].offset;
+  for (auto& r : regions) {
+    if (r.offset < offset) {
+      offset = r.offset;
+    }
+  }
+  return offset;
+}
+
+// static
+void AbfsReadFile::convertRegionsToRanges(
+    folly::Range<const common::Region*> regions,
+    folly::Range<folly::IOBuf*> iobufs,
+    std::vector<folly::Range<char*>>& ranges) {
+  uint64_t offset = AbfsReadFile::getOffset(regions);
+  uint64_t lastEnd = offset;
+  uint64_t curOffset = offset;
+  for (size_t i = 0; i < regions.size(); ++i) {
+    const auto& region = regions[i];
+    auto& output = iobufs[i];
+    // fill each buffer
+    curOffset = region.offset;
+    output = folly::IOBuf(folly::IOBuf::CREATE, region.length);
+    const auto& buffer = output.writableData();
+    if (lastEnd != curOffset) {
+      ranges.push_back(folly::Range<char*>(nullptr, curOffset - lastEnd));
+    }
+    ranges.push_back(
+        folly::Range<char*>(reinterpret_cast<char*>(buffer), region.length));
+    lastEnd = curOffset + region.length;
+    output.append(region.length);
+  }
+}
+
 class AbfsFileSystem::Impl {
  public:
   explicit Impl(const Config* config) : abfsConfig_(config) {
-    LOG(INFO) << "Init Azure Blob file system";
+    if (abfsConfig_.ioThreadPoolSize() > 0) {
+      ioExecutor_ = std::make_shared<folly::IOThreadPoolExecutor>(
+          abfsConfig_.ioThreadPoolSize());
+    }
+    LOG(INFO) << "Init Azure Blob file system"
+              << ", thread pool size:"
+              << std::to_string(abfsConfig_.ioThreadPoolSize())
+              << ", load quantum:" << abfsConfig_.loadQuantum();
   }
 
   ~Impl() {
@@ -231,6 +426,14 @@ class AbfsFileSystem::Impl {
   const std::string connectionString(const std::string& path) const {
     // Extract account name
     return abfsConfig_.connectionString(path);
+  }
+
+  const int32_t getLoadQuantum() const {
+    return abfsConfig_.loadQuantum();
+  }
+
+  const std::shared_ptr<folly::Executor>& getIOExecutor() const {
+    return ioExecutor_;
   }
 
  private:
@@ -251,8 +454,11 @@ std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
     std::string_view path,
     const FileOptions& options) {
   auto abfsfile = std::make_unique<AbfsReadFile>(
-      std::string(path), impl_->connectionString(std::string(path)));
-  abfsfile->initialize(options);
+      std::string(path),
+      impl_->connectionString(std::string(path)),
+      impl_->getLoadQuantum(),
+      impl_->getIOExecutor());
+  abfsfile->initialize();
   return abfsfile;
 }
 

@@ -62,12 +62,14 @@ void BufferedInput::load(const LogType logType) {
   buffers_.reserve(regions_.size());
 
   if (useVRead()) {
-    // Now we have all buffers and regions, load it in parallel
-    std::vector<folly::IOBuf> iobufs(regions_.size());
-    input_->vread(regions_, {iobufs.data(), iobufs.size()}, logType);
-    for (size_t i = 0; i < regions_.size(); ++i) {
-      copyIOBufToMemory(std::move(iobufs[i]), allocate(regions_[i]));
+    std::vector<void*> buffers;
+    buffers.reserve(regions_.size());
+    for (const auto& region : regions_) {
+      auto allocated = allocate(region);
+      buffers.push_back(allocated.data());
     }
+    // Now we have all buffers and regions, load it in parallel
+    input_->vread(buffers, regions_, logType);
   } else {
     for (const auto& region : regions_) {
       readToBuffer(region.offset, allocate(region), logType);
@@ -196,9 +198,11 @@ bool BufferedInput::tryMerge(Region& first, const Region& second) {
   // Duplicate regions (extension==0) is the only case allowed to merge for
   // useVRead()
   const int64_t extension = gap + second.length;
-  if (useVRead()) {
-    return extension == 0;
-  }
+  // We can use configs to control the merge behavior for vread,
+  // no need to block the case: "extension > 0" for vread.
+  // if (useVRead()) {
+  //   return extension == 0;
+  // }
 
   // compare with 0 since it's comparison in different types
   if (gap < 0 || gap <= maxMergeDistance_) {
