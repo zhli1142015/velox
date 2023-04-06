@@ -83,6 +83,9 @@ StreamingAggregation::StreamingAggregation(
     args_.push_back(channels);
     constantArgs_.push_back(constants);
   }
+  for (auto i = 0; i < aggregates_.size(); i++) {
+    aggregates_[i]->initialize(&driverCtx->queryConfig());
+  }
 
   if (aggregationNode->ignoreNullKeys()) {
     VELOX_NYI("Streaming aggregation doesn't support ignoring null keys yet");

@@ -21,6 +21,8 @@
 #include "velox/expression/FunctionSignature.h"
 #include "velox/vector/FlatVector.h"
 
+#include <iostream>
+
 namespace facebook::velox::functions::sparksql::aggregates {
 
 namespace {
@@ -57,6 +59,11 @@ struct BloomFilterAccumulator {
 template <typename T>
 class BloomFilterAggAggregate : public exec::Aggregate {
  public:
+  static constexpr const char* kMaxNumItems = "bloomFilter.max_num_items";
+  static constexpr const char* kMaxNumBits = "bloomFilter.max_num_bits";
+  static constexpr const char* kExpectedNumItems =
+      "bloomFilter.expected_num_items";
+
   explicit BloomFilterAggAggregate(const TypePtr& resultType)
       : Aggregate(resultType) {}
 
@@ -66,6 +73,17 @@ class BloomFilterAggAggregate : public exec::Aggregate {
 
   bool isFixedSize() const override {
     return false;
+  }
+
+  void initialize(const core::QueryConfig* config) override {
+    if (config) {
+      maxNumItems_ = config->get<int64_t>(kMaxNumItems, MAX_NUM_ITEMS);
+      maxNumBits_ = config->get<int64_t>(kMaxNumBits, MAX_NUM_BITS);
+      defaultEspectedNumItems_ =
+          config->get<int64_t>(kExpectedNumItems, DEFAULT_ESPECTED_NUM_ITEMS);
+      std::cout << "init maxNumItems_:" << std::to_string(maxNumItems_)
+                << std::endl; 
+    }
   }
 
   /// Initialize each group.
@@ -188,6 +206,9 @@ class BloomFilterAggAggregate : public exec::Aggregate {
   const int64_t DEFAULT_ESPECTED_NUM_ITEMS = 1000000;
   const int64_t MAX_NUM_ITEMS = 4000000;
   const int64_t MAX_NUM_BITS = 67108864;
+  int64_t defaultEspectedNumItems_ = DEFAULT_ESPECTED_NUM_ITEMS;
+  int64_t maxNumItems_ = MAX_NUM_ITEMS;
+  int64_t maxNumBits_ = MAX_NUM_BITS;
 
   void decodeArguments(
       const SelectivityVector& rows,
@@ -209,14 +230,15 @@ class BloomFilterAggAggregate : public exec::Aggregate {
           originalNumBits_ = originalEstimatedNumItems_ * 8;
         }
       } else {
-        originalEstimatedNumItems_ = DEFAULT_ESPECTED_NUM_ITEMS;
+        originalEstimatedNumItems_ = defaultEspectedNumItems_;
         originalNumBits_ = originalEstimatedNumItems_ * 8;
       }
     } else {
       VELOX_USER_FAIL("Function args size must be more than 0")
     }
-    estimatedNumItems_ = std::min(originalEstimatedNumItems_, MAX_NUM_ITEMS);
-    numBits_ = std::min(originalNumBits_, MAX_NUM_BITS);
+    estimatedNumItems_ = std::min(originalEstimatedNumItems_, maxNumItems_);
+    numBits_ = std::min(originalNumBits_, maxNumBits_);
+    std::cout << "maxNumItems_:" << std::to_string(maxNumItems_) << std::endl;
     capacity_ = numBits_ / 16;
   }
 

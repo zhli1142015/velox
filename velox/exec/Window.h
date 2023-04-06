@@ -174,6 +174,8 @@ class Window : public Operator {
   // buffers.
   HashStringAllocator stringAllocator_;
 
+  const core::QueryConfig& config_;
+
   // The below 3 vectors represent the ChannelIndex of the partition keys,
   // the order by keys and the concatenation of the 2. These keyInfo are
   // used for sorting by those key combinations during the processing.

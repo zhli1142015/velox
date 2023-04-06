@@ -28,7 +28,7 @@ class NtileFunction : public exec::WindowFunction {
   explicit NtileFunction(
       const std::vector<exec::WindowFunctionArg>& args,
       velox::memory::MemoryPool* pool)
-      : WindowFunction(BIGINT(), pool, nullptr) {
+      : WindowFunction(BIGINT(), pool, nullptr, nullptr) {
     if (args[0].constantValue) {
       auto argBuckets = args[0].constantValue;
       if (!argBuckets->isNullAt(0)) {
@@ -245,8 +245,9 @@ void registerNtile(const std::string& name) {
           const std::vector<exec::WindowFunctionArg>& args,
           const TypePtr& /*resultType*/,
           velox::memory::MemoryPool* pool,
-          HashStringAllocator*
-          /*stringAllocator*/) -> std::unique_ptr<exec::WindowFunction> {
+          HashStringAllocator* /*stringAllocator*/,
+          core::QueryConfig *
+          /*QueryConfig*/)-> std::unique_ptr<exec::WindowFunction> {
         return std::make_unique<NtileFunction>(args, pool);
       });
 }

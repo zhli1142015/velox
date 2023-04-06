@@ -127,6 +127,9 @@ HashAggregation::HashAggregation(
     constantLists.push_back(constants);
   }
 
+  for (auto i = 0; i < aggregates.size(); i++) {
+    aggregates[i]->initialize(&driverCtx->queryConfig());
+  }
   // Check that aggregate result type match the output type
   for (auto i = 0; i < aggregates.size(); i++) {
     const auto& aggResultType = aggregates[i]->resultType();

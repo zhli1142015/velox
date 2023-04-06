@@ -24,7 +24,8 @@ namespace {
 
 class CumeDistFunction : public exec::WindowFunction {
  public:
-  explicit CumeDistFunction() : WindowFunction(DOUBLE(), nullptr, nullptr) {}
+  explicit CumeDistFunction() : WindowFunction(
+    DOUBLE(), nullptr, nullptr, nullptr) {}
 
   void resetPartition(const exec::WindowPartition* partition) override {
     runningTotal_ = 0;
@@ -81,8 +82,9 @@ void registerCumeDist(const std::string& name) {
           const std::vector<exec::WindowFunctionArg>& /*args*/,
           const TypePtr& /*resultType*/,
           velox::memory::MemoryPool* /*pool*/,
-          HashStringAllocator*
-          /*stringAllocator*/) -> std::unique_ptr<exec::WindowFunction> {
+          HashStringAllocator* /*stringAllocator*/,
+          velox::core::QueryConfig *
+          /*QueryConfig*/) -> std::unique_ptr<exec::WindowFunction> {
         return std::make_unique<CumeDistFunction>();
       });
 }

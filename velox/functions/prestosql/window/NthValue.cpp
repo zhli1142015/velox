@@ -29,7 +29,7 @@ class NthValueFunction : public exec::WindowFunction {
       const std::vector<exec::WindowFunctionArg>& args,
       const TypePtr& resultType,
       velox::memory::MemoryPool* pool)
-      : WindowFunction(resultType, pool, nullptr) {
+      : WindowFunction(resultType, pool, nullptr, nullptr) {
     VELOX_CHECK_EQ(args.size(), 2);
     VELOX_CHECK_NULL(args[0].constantValue);
     valueIndex_ = args[0].index.value();
@@ -198,8 +198,9 @@ void registerNthValue(const std::string& name) {
           const std::vector<exec::WindowFunctionArg>& args,
           const TypePtr& resultType,
           velox::memory::MemoryPool* pool,
-          HashStringAllocator* /*stringAllocator*/)
-          -> std::unique_ptr<exec::WindowFunction> {
+          HashStringAllocator* /*stringAllocator*/,
+          core::QueryConfig *
+          /*QueryConfig*/) -> std::unique_ptr<exec::WindowFunction> {
         return std::make_unique<NthValueFunction>(args, resultType, pool);
       });
 }

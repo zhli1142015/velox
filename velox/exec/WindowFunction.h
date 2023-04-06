@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include "velox/core/QueryConfig.h"
 #include "velox/exec/WindowPartition.h"
 #include "velox/expression/FunctionSignature.h"
 #include "velox/vector/BaseVector.h"
@@ -35,10 +36,12 @@ class WindowFunction {
   explicit WindowFunction(
       TypePtr resultType,
       memory::MemoryPool* pool,
-      HashStringAllocator* stringAllocator)
+      HashStringAllocator* stringAllocator,
+      core::QueryConfig* config)
       : resultType_(std::move(resultType)),
         pool_(pool),
-        stringAllocator_(stringAllocator) {}
+        stringAllocator_(stringAllocator),
+        config_(config) {}
 
   virtual ~WindowFunction() = default;
 
@@ -101,7 +104,8 @@ class WindowFunction {
       const std::vector<WindowFunctionArg>& args,
       const TypePtr& resultType,
       memory::MemoryPool* pool,
-      HashStringAllocator* stringAllocator);
+      HashStringAllocator* stringAllocator,
+      core::QueryConfig* const config);
 
  protected:
   // This utility function can be used across WindowFunctions to set NULL for
@@ -117,6 +121,7 @@ class WindowFunction {
 
   // Used for setting null for empty frames.
   SelectivityVector invalidRows_;
+  core::QueryConfig* const config_;
 };
 
 /// Information from the Window operator that is useful for the function logic.
@@ -129,7 +134,8 @@ using WindowFunctionFactory = std::function<std::unique_ptr<WindowFunction>(
     const std::vector<WindowFunctionArg>& args,
     const TypePtr& resultType,
     memory::MemoryPool* pool,
-    HashStringAllocator* stringAllocator)>;
+    HashStringAllocator* stringAllocator,
+    core::QueryConfig* config)>;
 
 /// Register a window function with the specified name and signatures.
 /// Registering a function with the same name a second time overrides the first

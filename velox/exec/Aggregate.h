@@ -17,6 +17,7 @@
 
 #include "velox/common/memory/HashStringAllocator.h"
 #include "velox/core/PlanNode.h"
+#include "velox/core/QueryConfig.h"
 #include "velox/vector/BaseVector.h"
 
 namespace facebook::velox::exec {
@@ -74,6 +75,8 @@ class Aggregate {
   virtual bool isFixedSize() const {
     return true;
   }
+
+  virtual void initialize(const core::QueryConfig* config) {}
 
   void setAllocator(HashStringAllocator* allocator) {
     allocator_ = allocator;

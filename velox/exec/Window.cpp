@@ -57,7 +57,8 @@ Window::Window(
           windowNode->sources()[0]->outputType()->children(),
           pool())),
       decodedInputVectors_(numInputColumns_),
-      stringAllocator_(pool()) {
+      stringAllocator_(pool()),
+      config_(driverCtx->queryConfig()) {
   auto inputType = windowNode->sources()[0]->outputType();
   initKeyInfo(inputType, windowNode->partitionKeys(), {}, partitionKeyInfo_);
   initKeyInfo(
@@ -141,7 +142,8 @@ void Window::createWindowFunctions(
         functionArgs,
         windowNodeFunction.functionCall->type(),
         operatorCtx_->pool(),
-        &stringAllocator_));
+        &stringAllocator_,
+        const_cast<core::QueryConfig*>(&config_)));
 
     windowFrames_.push_back(
         createWindowFrame(windowNodeFunction.frame, inputType));
