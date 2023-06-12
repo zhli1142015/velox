@@ -466,9 +466,9 @@ StopReason Driver::runInternal(
               }
               RuntimeStatWriterScopeGuard statsWriterGuard(op);
               if (op->isFinished()) {
-                auto timer =
-                    createDeltaCpuWallTimer([op](const CpuWallTiming& timing) {
-                      op->stats().wlock()->finishTiming.add(timing);
+                auto timer = createDeltaCpuWallTimer(
+                    [nextOp](const CpuWallTiming& timing) {
+                      nextOp->stats().wlock()->finishTiming.add(timing);
                     });
                 RuntimeStatWriterScopeGuard statsWriterGuard(nextOp);
                 TestValue::adjust(
