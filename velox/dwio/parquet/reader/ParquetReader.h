@@ -108,7 +108,7 @@ class ReaderBase {
   const uint64_t directorySizeGuess_;
   const uint64_t filePreloadThreshold_;
   const dwio::common::ReaderOptions& options_;
-  std::unique_ptr<velox::dwio::common::BufferedInput> input_;
+  std::shared_ptr<velox::dwio::common::BufferedInput> input_;
   uint64_t fileLength_;
   std::unique_ptr<thrift::FileMetaData> fileMetaData_;
   RowTypePtr schema_;
@@ -116,8 +116,10 @@ class ReaderBase {
 
   const bool binaryAsString = false;
 
+  bool preloadFile_ = false;
+
   // Map from row group index to pre-created loading BufferedInput.
-  std::unordered_map<uint32_t, std::unique_ptr<dwio::common::BufferedInput>>
+  std::unordered_map<uint32_t, std::shared_ptr<dwio::common::BufferedInput>>
       inputs_;
 };
 
