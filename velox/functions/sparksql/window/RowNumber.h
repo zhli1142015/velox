@@ -17,6 +17,6 @@
 
 #include <string>
 
-namespace facebook::velox::functions::sparksql::windows {
-void registerWindowFunctions(const std::string& prefix);
-} // namespace facebook::velox::functions::sparksql::windows
+namespace facebook::velox::functions::window::sparksql {
+void registerRowNumber(const std::string& prefix);
+} // namespace facebook::velox::functions::window::sparksql

@@ -51,7 +51,6 @@ add_subdirectory(window)
 
 if(${VELOX_ENABLE_AGGREGATES})
   add_subdirectory(aggregates)
-  add_subdirectory(windows)
 endif()
 
 if(${VELOX_BUILD_TESTING})

@@ -19,7 +19,7 @@
 #include "velox/expression/FunctionSignature.h"
 #include "velox/vector/FlatVector.h"
 
-namespace facebook::velox::functions::sparksql::windows {
+namespace facebook::velox::functions::window::sparksql {
 
 namespace {
 
@@ -73,4 +73,4 @@ void registerRowNumber(const std::string& name) {
         return std::make_unique<RowNumberFunction>();
       });
 }
-} // namespace facebook::velox::functions::sparksql::windows
+} // namespace facebook::velox::functions::window::sparksql

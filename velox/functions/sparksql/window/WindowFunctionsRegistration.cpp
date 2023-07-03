@@ -15,11 +15,13 @@
  */
 #include "velox/functions/sparksql/window/WindowFunctionsRegistration.h"
 #include "velox/functions/lib/window/NthValue.h"
+#include "velox/functions/sparksql/window/RowNumber.h"
 
 namespace facebook::velox::functions::window::sparksql {
 
 void registerWindowFunctions(const std::string& prefix) {
   functions::window::registerIntegerNthValue(prefix + "nth_value");
+  registerRowNumber(prefix + "row_number");
 }
 
 } // namespace facebook::velox::functions::window::sparksql
