@@ -101,6 +101,8 @@ RowVectorPtr TableScan::getOutput() {
       // A point for test code injection.
       TestValue::adjust("facebook::velox::exec::TableScan::getOutput", this);
 
+      curStatus_ = "getOutput: checkPreload";
+      checkPreload();
       exec::Split split;
       curStatus_ = "getOutput: task->getSplitOrFuture";
       blockingReason_ = driverCtx_->task->getSplitOrFuture(
@@ -176,8 +178,8 @@ RowVectorPtr TableScan::getOutput() {
       if (connectorSplit->dataSource != nullptr) {
         curStatus_ = "getOutput: preloaded split";
         ++numPreloadedSplits_;
-        // The AsyncSource returns a unique_ptr to a shared_ptr. The unique_ptr
-        // will be nullptr if there was a cancellation.
+        // The AsyncSource returns a unique_ptr to a shared_ptr. The
+        // unique_ptr will be nullptr if there was a cancellation.
         numReadyPreloadedSplits_ += connectorSplit->dataSource->hasValue();
         auto preparedDataSource = connectorSplit->dataSource->move();
         stats_.wlock()->getOutputTiming.add(
@@ -232,8 +234,6 @@ RowVectorPtr TableScan::getOutput() {
     }
     curStatus_ = "getOutput: dataSource_->next";
     auto dataOptional = dataSource_->next(readBatchSize, blockingFuture_);
-    curStatus_ = "getOutput: checkPreload";
-    checkPreload();
 
     {
       curStatus_ = "getOutput: updating stats_.dataSourceReadWallNanos";
@@ -334,21 +334,19 @@ void TableScan::checkPreload() {
       !connector_->supportsSplitPreload()) {
     return;
   }
-  if (dataSource_->allPrefetchIssued()) {
-    maxPreloadedSplits_ = driverCtx_->task->numDrivers(driverCtx_->driver) *
-        maxSplitPreloadPerDriver_;
-    if (!splitPreloader_) {
-      splitPreloader_ =
-          [executor,
-           this](const std::shared_ptr<connector::ConnectorSplit>& split) {
-            preload(split);
+  maxPreloadedSplits_ = driverCtx_->task->numDrivers(driverCtx_->driver) *
+      maxSplitPreloadPerDriver_;
+  if (!splitPreloader_) {
+    splitPreloader_ =
+        [executor,
+         this](const std::shared_ptr<connector::ConnectorSplit>& split) {
+          preload(split);
 
-            executor->add([connectorSplit = split]() mutable {
-              connectorSplit->dataSource->prepare();
-              connectorSplit.reset();
-            });
-          };
-    }
+          executor->add([connectorSplit = split]() mutable {
+            connectorSplit->dataSource->prepare();
+            connectorSplit.reset();
+          });
+        };
   }
 }
 

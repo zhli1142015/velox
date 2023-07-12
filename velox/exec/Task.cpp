@@ -1475,18 +1475,21 @@ exec::Split Task::getSplitLocked(
     int32_t maxPreloadSplits,
     const ConnectorSplitPreloadFunc& preload) {
   int32_t readySplitIndex = -1;
-  if (maxPreloadSplits > 0) {
-    for (auto i = 0; i < splitsStore.splits.size() && i < maxPreloadSplits;
-         ++i) {
-      auto& connectorSplit = splitsStore.splits[i].connectorSplit;
-      if (!connectorSplit->dataSource) {
-        // Initializes split->dataSource.
-        preload(connectorSplit);
-        preloadingSplits_.emplace(connectorSplit);
-      } else if (
-          (readySplitIndex == -1) && (connectorSplit->dataSource->hasValue())) {
-        readySplitIndex = i;
-        preloadingSplits_.erase(connectorSplit);
+  if (maxPreloadSplits) {
+    auto size = splitsStore.splits.size();
+    if (taskStats_.firstSplitStartTimeMs != 0 || size > 1) {
+      auto start = taskStats_.firstSplitStartTimeMs == 0 ? 1 : 0;
+      for (auto i = start; i < size && i < maxPreloadSplits; ++i) {
+        auto& connectorSplit = splitsStore.splits[i].connectorSplit;
+        if (!connectorSplit->dataSource) {
+          // Initializes split->dataSource
+          preload(connectorSplit);
+          preloadingSplits_.emplace(connectorSplit);
+        } else if (
+            readySplitIndex == -1 && connectorSplit->dataSource->hasValue()) {
+          readySplitIndex = i;
+          preloadingSplits_.erase(connectorSplit);
+        }
       }
     }
   }
