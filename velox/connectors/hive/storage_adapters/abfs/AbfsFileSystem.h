@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include "BlobClientProviderFactory.h"
 #include "velox/common/file/FileSystems.h"
 
 namespace facebook::velox::filesystems::abfs {
@@ -37,6 +38,8 @@ class AbfsFileSystem : public FileSystem {
   static constexpr const char* kReaderAbfsLoadQuantum = "fs.azure.loadQuantum";
 
   static constexpr const char* kReaderAbfsIoThreads = "fs.azure.ioThreads";
+
+  static constexpr const char* kAbfsEndpoint = "fs.azure.abfs.endpoint";
 
   explicit AbfsFileSystem(const std::shared_ptr<const Config>& config);
 

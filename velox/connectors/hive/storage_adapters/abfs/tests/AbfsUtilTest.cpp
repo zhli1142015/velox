@@ -15,6 +15,7 @@
  */
 
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
+#include "velox/common/base/VeloxException.h"
 
 #include "gtest/gtest.h"
 
@@ -117,4 +118,74 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(
       abfsGermanyCloudAccount.credKey(),
       "fs.azure.account.key.test.dfs.core.cloudapi.de");
+
+  // Fabric
+  auto abfsDXTAccount =
+      AbfsAccount("abfss://test@dxt-onelake.dfs.fabric.microsoft.com/testPath");
+  EXPECT_EQ(abfsDXTAccount.scheme(), "abfss");
+  EXPECT_EQ(
+      abfsDXTAccount.accountNameWithSuffix(),
+      "dxt-onelake.dfs.fabric.microsoft.com");
+  EXPECT_EQ(abfsDXTAccount.accountName(), "dxt-onelake");
+  EXPECT_EQ(abfsDXTAccount.endpointSuffix(), "fabric.microsoft.com");
+  EXPECT_EQ(abfsDXTAccount.fileSystem(), "test");
+  EXPECT_EQ(abfsDXTAccount.filePath(), "testPath");
+  EXPECT_EQ(
+      abfsDXTAccount.credKey(),
+      "fs.azure.account.key.dxt-onelake.dfs.fabric.microsoft.com");
+
+  auto abfsMSITAccount = AbfsAccount(
+      "abfss://test@msit-onelake.blob.pbidedicated.windows.net/testPath");
+  EXPECT_EQ(abfsMSITAccount.scheme(), "abfss");
+  EXPECT_EQ(
+      abfsMSITAccount.accountNameWithSuffix(),
+      "msit-onelake.blob.pbidedicated.windows.net");
+  EXPECT_EQ(abfsMSITAccount.accountName(), "msit-onelake");
+  EXPECT_EQ(abfsMSITAccount.endpointSuffix(), "pbidedicated.windows.net");
+  EXPECT_EQ(abfsMSITAccount.fileSystem(), "test");
+  EXPECT_EQ(abfsMSITAccount.filePath(), "testPath");
+  EXPECT_EQ(
+      abfsMSITAccount.credKey(),
+      "fs.azure.account.key.msit-onelake.blob.pbidedicated.windows.net");
+
+abfss
+    : // velox@onelake-int-edog.dfs.pbidedicated.windows-int.net/velox.Lakehouse/Files/tpcds/queries/$queryName.sql")
+
+  auto abfsEDogAccount = AbfsAccount(
+      "abfss://velox@onelake-int-edog.dfs.pbidedicated.windows-int.net/velox.Lakehouse/Files/testPath");
+  EXPECT_EQ(abfsEDogAccount.scheme(), "abfss");
+  EXPECT_EQ(
+      abfsEDogAccount.accountNameWithSuffix(),
+      "onelake-int-edog.dfs.pbidedicated.windows-int.net");
+  EXPECT_EQ(abfsEDogAccount.accountName(), "onelake-int-edog");
+  EXPECT_EQ(abfsEDogAccount.endpointSuffix(), "pbidedicated.windows-int.net");
+  EXPECT_EQ(abfsEDogAccount.fileSystem(), "velox");
+  EXPECT_EQ(abfsEDogAccount.filePath(), "velox.Lakehouse/Files/testPath");
+  EXPECT_EQ(
+      abfsEDogAccount.credKey(),
+      "fs.azure.account.key.onelake-int-edog.dfs.pbidedicated.windows-int.net");
+}
+
+TEST(AbfsUtilsTest, CustomEndpoint) {
+  try {
+    auto abfsAccount =
+        AbfsAccount("abfs://testc@testa.dfs.core.window.net/test");
+    FAIL() << "Expected Velox exception";
+  } catch (facebook::velox::VeloxException const& err) {
+    EXPECT_EQ(
+        err.message(),
+        std::string(
+            "Endpoint core.window.net is not valid, please pass a default endpoint using spark.fs.azure.abfs.endpoint"));
+  }
+
+  auto abfsAccount =
+      AbfsAccount("abfs://testc@testa.dfs.core.window.net/test", "foo.bar.com");
+  EXPECT_EQ(abfsAccount.scheme(), "abfs");
+  EXPECT_EQ(abfsAccount.accountNameWithSuffix(), "testa.dfs.foo.bar.com");
+  EXPECT_EQ(abfsAccount.accountName(), "testa");
+  EXPECT_EQ(abfsAccount.endpointSuffix(), "foo.bar.com");
+  EXPECT_EQ(abfsAccount.fileSystem(), "testc");
+  EXPECT_EQ(abfsAccount.filePath(), "test");
+  EXPECT_EQ(
+      abfsAccount.credKey(), "fs.azure.account.key.testa.dfs.foo.bar.com");
 }

@@ -30,3 +30,19 @@ target_link_libraries(
           Azure::azure-storage-files-datalake)
 
 target_compile_options(velox_abfs_test PRIVATE -Wno-deprecated-declarations)
+
+add_executable(velox_blob_client_test BlobClientProviderTest)
+add_test(velox_blob_client_test velox_blob_client_test)
+target_link_libraries(
+  velox_blob_client_test
+  velox_file
+  velox_abfs
+  velox_core
+  velox_exec_test_lib
+  velox_hive_connector
+  velox_dwio_common_exception
+  velox_exec
+  gtest
+  gtest_main
+  Azure::azure-storage-blobs
+  Azure::azure-storage-files-datalake)

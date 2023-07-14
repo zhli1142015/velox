@@ -17,14 +17,19 @@
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
 
 namespace facebook::velox::filesystems::abfs {
-AbfsAccount::AbfsAccount(const std::string path) {
+AbfsAccount::AbfsAccount(
+    const std::string path,
+    const std::string abfsEndpoint) {
   auto file = std::string("");
+  auto containerBegin = 0;
   if (path.find(kAbfssScheme) == 0) {
     file = std::string(path.substr(8));
     scheme_ = kAbfssScheme.substr(0, 5);
+    containerBegin = 8;
   } else {
     file = std::string(path.substr(7));
     scheme_ = kAbfsScheme.substr(0, 4);
+    containerBegin = 7;
   }
 
   auto firstAt = file.find_first_of("@");
@@ -35,7 +40,27 @@ AbfsAccount::AbfsAccount(const std::string path) {
   accountNameWithSuffix_ = file.substr(firstAt + 1, firstSep - firstAt - 1);
   auto firstDot = accountNameWithSuffix_.find_first_of(".");
   accountName_ = accountNameWithSuffix_.substr(0, firstDot);
-  endpointSuffix_ = accountNameWithSuffix_.substr(firstDot + 5);
+
+  size_t position = accountNameWithSuffix_.find_last_of(
+      '.', accountNameWithSuffix_.size() - 1);
+  position = accountNameWithSuffix_.find_last_of(
+      '.', position - 1); // Find second last dot
+  position = accountNameWithSuffix_.find_last_of(
+      '.', position - 1); // Find third last dot
+
+  endpointSuffix_ = accountNameWithSuffix_.substr(position + 1);
+  if (kValidEndpoints.count(endpointSuffix_) == 0) {
+    if (!abfsEndpoint.empty()) {
+      LOG(INFO) << "Using configured endpoint " << abfsEndpoint;
+      endpointSuffix_ = abfsEndpoint;
+      accountNameWithSuffix_ =
+          accountNameWithSuffix_.substr(0, position + 1) + endpointSuffix_;
+    } else {
+      VELOX_FAIL(
+          "Endpoint {} is not valid, please pass a default endpoint using spark.fs.azure.abfs.endpoint",
+          endpointSuffix_);
+    }
+  }
   credKey_ = fmt::format("fs.azure.account.key.{}", accountNameWithSuffix_);
 }
 
@@ -74,5 +99,20 @@ const std::string AbfsAccount::connectionString(
       accountName(),
       accountKey,
       endpointSuffix());
+}
+
+const std::string AbfsAccount::blobURL(bool useHttps) const {
+  auto protocol = "https";
+  if (!useHttps) {
+    protocol = "http";
+  }
+
+  return fmt::format(
+      "{}://{}.blob.{}/{}/{}",
+      protocol,
+      accountName(),
+      endpointSuffix(),
+      fileSystem(),
+      filePath());
 }
 } // namespace facebook::velox::filesystems::abfs

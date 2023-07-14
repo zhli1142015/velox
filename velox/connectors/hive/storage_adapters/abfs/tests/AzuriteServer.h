@@ -29,14 +29,23 @@ namespace facebook::velox::filesystems::test {
 using namespace Azure::Storage::Blobs;
 static const std::string AzuriteServerExecutableName{"azurite-blob"};
 static const std::string AzuriteSearchPath{":/usr/bin/azurite"};
-static const std::string AzuriteAccountName{"test"};
+static const std::string AzuriteAccountName{"devstoreaccount1"};
 static const std::string AzuriteContainerName{"test"};
+static const std::string AzuriteSparkConfig = fmt::format(
+    "fs.azure.account.key.{}.dfs.core.windows.net",
+    AzuriteAccountName);
 // the default key of Azurite Server used for connection
 static const std::string AzuriteAccountKey{
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="};
 static const std::string AzuriteABFSEndpoint = fmt::format(
     "abfs://{}@{}.dfs.core.windows.net/",
     AzuriteContainerName,
+    AzuriteAccountName);
+static const std::string AzuriteInvalidAccountKey{""};
+static const std::string AzuriteInvalidConnectionString = fmt::format(
+    "DefaultEndpointsProtocol=http;AccountName={};AccountKey={};BlobEndpoint=http://127.0.0.1:10000/{};",
+    AzuriteAccountName,
+    AzuriteInvalidAccountKey,
     AzuriteAccountName);
 
 class AzuriteServer {

@@ -26,9 +26,9 @@ class AbfsReadFile final : public ReadFile {
   constexpr static uint64_t kReadConcurrency = 8;
   explicit AbfsReadFile(
       const std::string& path,
-      const std::string& connectStr,
       const int32_t loadQuantum,
-      const std::shared_ptr<folly::Executor> ioExecutor);
+      const std::shared_ptr<folly::Executor> ioExecutor,
+      const std::string abfsEndpoint);
 
   void initialize(const FileOptions& options);
 

@@ -26,7 +26,10 @@
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
+#include "velox/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
+#include "velox/connectors/hive/storage_adapters/abfs/BlobClientProviderFactory.h"
+#include "velox/connectors/hive/storage_adapters/abfs/ConnectionStringBlobClientProvider.h"
 #include "velox/connectors/hive/storage_adapters/abfs/tests/AzuriteServer.h"
 #include "velox/connectors/hive/storage_adapters/abfs/tests/MockBlobStorageFileClient.h"
 #include "velox/exec/tests/utils/PortUtil.h"
@@ -35,6 +38,8 @@
 using namespace facebook::velox;
 using namespace facebook::velox::filesystems;
 using namespace facebook::velox::filesystems::abfs;
+using namespace Azure::Storage::Blobs;
+
 using ::facebook::velox::common::Region;
 
 constexpr int kOneMB = 1 << 20;
@@ -54,7 +59,7 @@ class AbfsFileSystemTest : public testing::Test {
     // Update the default config map with the supplied configOverride map
     for (const auto& item : configOverride) {
       config[item.first] = item.second;
-      std::cout << "config " + item.first + " value " + item.second
+      std::cout << "config " + item.first + " ,value " + item.second
                 << std::endl;
     }
 
@@ -69,11 +74,19 @@ class AbfsFileSystemTest : public testing::Test {
     azuriteServer = std::make_shared<filesystems::test::AzuriteServer>(port);
     azuriteServer->start();
     auto tempFile = createFile();
-    azuriteServer->addFile(tempFile->getPath(), filePath);
+    azuriteServer->addFile(tempFile->path, filePath);
+    auto connectionStringProvider =
+        std::make_shared<ConnectionStringBlobClientProvider>(
+            facebook::velox::filesystems::test::AzuriteSparkConfig,
+            azuriteServer->connectionStr());
+    filesystems::abfs::BlobClientProviderFactory::registerProvider(
+        std::static_pointer_cast<filesystems::abfs::BlobClientProvider>(
+            connectionStringProvider));
   }
 
   void TearDown() override {
     azuriteServer->stop();
+    filesystems::abfs::BlobClientProviderFactory::deregisterProviders();
   }
 
   std::unique_ptr<WriteFile> openFileForWrite(
@@ -173,7 +186,7 @@ void readData(ReadFile* readFile) {
 
 TEST_F(AbfsFileSystemTest, readFile) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
   auto readFile = abfs.openFileForRead(fullFilePath);
@@ -206,7 +219,7 @@ TEST_F(AbfsFileSystemTest, openFileForReadWithInvalidOptions) {
 TEST_F(AbfsFileSystemTest, multipleThreadsWithReadFile) {
   std::atomic<bool> startThreads = false;
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
 
@@ -235,12 +248,12 @@ TEST_F(AbfsFileSystemTest, multipleThreadsWithReadFile) {
 }
 
 TEST_F(AbfsFileSystemTest, missingFile) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
   const std::string abfsFile =
       facebook::velox::filesystems::test::AzuriteABFSEndpoint + "test.txt";
-  AbfsFileSystem abfs{hiveConfig};
+  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
+        azuriteServer->connectionStr()}});
+  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
   VELOX_ASSERT_RUNTIME_THROW_CODE(
       abfs.openFileForRead(abfsFile), error_code::kFileNotFound, "404");
 }
@@ -287,7 +300,7 @@ TEST_F(AbfsFileSystemTest, OpenFileForWriteTest) {
 
 TEST_F(AbfsFileSystemTest, renameNotImplemented) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
   VELOX_ASSERT_THROW(
@@ -296,7 +309,7 @@ TEST_F(AbfsFileSystemTest, renameNotImplemented) {
 
 TEST_F(AbfsFileSystemTest, removeNotImplemented) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
   VELOX_ASSERT_THROW(abfs.remove("text"), "remove for abfs not implemented");
@@ -304,7 +317,7 @@ TEST_F(AbfsFileSystemTest, removeNotImplemented) {
 
 TEST_F(AbfsFileSystemTest, existsNotImplemented) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
   VELOX_ASSERT_THROW(abfs.exists("text"), "exists for abfs not implemented");
@@ -312,7 +325,7 @@ TEST_F(AbfsFileSystemTest, existsNotImplemented) {
 
 TEST_F(AbfsFileSystemTest, listNotImplemented) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
   VELOX_ASSERT_THROW(abfs.list("dir"), "list for abfs not implemented");
@@ -320,7 +333,7 @@ TEST_F(AbfsFileSystemTest, listNotImplemented) {
 
 TEST_F(AbfsFileSystemTest, mkdirNotImplemented) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
   VELOX_ASSERT_THROW(abfs.mkdir("dir"), "mkdir for abfs not implemented");
@@ -328,17 +341,55 @@ TEST_F(AbfsFileSystemTest, mkdirNotImplemented) {
 
 TEST_F(AbfsFileSystemTest, rmdirNotImplemented) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
         azuriteServer->connectionStr()}});
   AbfsFileSystem abfs{hiveConfig};
   VELOX_ASSERT_THROW(abfs.rmdir("dir"), "rmdir for abfs not implemented");
 }
 
-TEST_F(AbfsFileSystemTest, credNotFOund) {
+TEST_F(AbfsFileSystemTest, invalidAccountKey) {
+  auto connectionStringProvider =
+      std::make_shared<ConnectionStringBlobClientProvider>(
+          facebook::velox::filesystems::test::AzuriteSparkConfig,
+          facebook::velox::filesystems::test::AzuriteInvalidAccountKey);
+  filesystems::abfs::BlobClientProviderFactory::registerProvider(
+      std::static_pointer_cast<filesystems::abfs::BlobClientProvider>(
+          connectionStringProvider));
   const std::string abfsFile =
       std::string("abfs://test@test1.dfs.core.windows.net/test");
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig({});
-  AbfsFileSystem abfs{hiveConfig};
-  VELOX_ASSERT_THROW(
-      abfs.openFileForRead(abfsFile), "Failed to find storage credentials");
+  auto abfs =
+      std::make_shared<facebook::velox::filesystems::abfs::AbfsFileSystem>(
+          hiveConfig());
+  try {
+    auto readFile = abfs->openFileForRead(fullFilePath);
+    FAIL() << "Expected VeloxException";
+  } catch (VeloxException const& err) {
+    EXPECT_TRUE(err.message().find("401") != std::string::npos);
+  }
+}
+
+TEST(AbfsReadFileTest, splitRegion) {
+  std::vector<std::tuple<uint64_t, uint64_t>> ranges;
+  filesystems::abfs::AbfsReadFile::splitRegion(5, 5, ranges);
+  EXPECT_EQ(1, ranges.size());
+  ranges.clear();
+  filesystems::abfs::AbfsReadFile::splitRegion(6, 5, ranges);
+  EXPECT_EQ(1, ranges.size());
+  ranges.clear();
+  filesystems::abfs::AbfsReadFile::splitRegion(8, 5, ranges);
+  EXPECT_EQ(2, ranges.size());
+  ranges.clear();
+  filesystems::abfs::AbfsReadFile::splitRegion(4, 5, ranges);
+  EXPECT_EQ(1, ranges.size());
+}
+
+TEST(AbfsReadFileTest, calculateSplitQuantum) {
+  auto res = filesystems::abfs::AbfsReadFile::calculateSplitQuantum(5, 5);
+  EXPECT_EQ(5, res);
+  res = filesystems::abfs::AbfsReadFile::calculateSplitQuantum(56, 5);
+  EXPECT_EQ(7, res);
+  res = filesystems::abfs::AbfsReadFile::calculateSplitQuantum(40, 5);
+  EXPECT_EQ(5, res);
+  res = filesystems::abfs::AbfsReadFile::calculateSplitQuantum(1, 5);
+  EXPECT_EQ(5, res);
 }

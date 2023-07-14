@@ -24,8 +24,8 @@
 #include "velox/common/file/File.h"
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
-#include "velox/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
+#include "velox/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
 #include "velox/core/Config.h"
 
 namespace facebook::velox::filesystems::abfs {
@@ -39,7 +39,8 @@ class AbfsConfig {
     auto abfsAccount = AbfsAccount(path);
     auto key = abfsAccount.credKey();
     VELOX_USER_CHECK(
-        config_->isValueExists(key), "Failed to find storage credentials");
+        config_->isValueExists(key),
+        "Failed to find storage connectionStr credentials");
 
     return abfsAccount.connectionString(config_->get(key).value());
   }
@@ -53,6 +54,10 @@ class AbfsConfig {
     return config_->get<int32_t>(AbfsFileSystem::kReaderAbfsIoThreads, 0);
   }
 
+  std::string abfsEndpoint() const {
+    return config_->get<std::string>(AbfsFileSystem::kAbfsEndpoint, "");
+  }
+
  private:
   const Config* config_;
 };
@@ -61,15 +66,13 @@ class AbfsReadFile::Impl {
  public:
   explicit Impl(
       const std::string& path,
-      const std::string& connectStr,
       const int32_t loadQuantum,
-      const std::shared_ptr<folly::Executor> ioExecutor)
+      const std::shared_ptr<folly::Executor> ioExecutor,
+      const std::string abfsEndpoint)
       : path_(path), loadQuantum_(loadQuantum), ioExecutor_(ioExecutor) {
-    auto abfsAccount = AbfsAccount(path_);
+    auto abfsAccount = AbfsAccount(path_, abfsEndpoint);
     fileName_ = abfsAccount.filePath();
-    fileClient_ =
-        std::make_unique<BlobClient>(BlobClient::CreateFromConnectionString(
-            connectStr, abfsAccount.fileSystem(), fileName_));
+    fileClient_ = BlobClientProviderFactory::getBlobClient(path, abfsAccount);
   }
 
   void initialize(const FileOptions& options) {
@@ -261,23 +264,21 @@ class AbfsReadFile::Impl {
 
  private:
   const std::string path_;
-  const std::string connectStr_;
   const int32_t loadQuantum_;
   const std::shared_ptr<folly::Executor> ioExecutor_;
-  std::string fileSystem_;
   std::string fileName_;
   std::string eTag_;
-  std::unique_ptr<BlobClient> fileClient_;
+  std::shared_ptr<BlobClient> fileClient_;
 
   int64_t length_ = -1;
 };
 
 AbfsReadFile::AbfsReadFile(
     const std::string& path,
-    const std::string& connectStr,
     const int32_t loadQuantum,
-    const std::shared_ptr<folly::Executor> ioExecutor) {
-  impl_ = std::make_shared<Impl>(path, connectStr, loadQuantum, ioExecutor);
+    const std::shared_ptr<folly::Executor> ioExecutor,
+    const std::string abfsEndpoint) {
+  impl_ = std::make_shared<Impl>(path, loadQuantum, ioExecutor, abfsEndpoint);
 }
 
 void AbfsReadFile::initialize(const FileOptions& options) {
@@ -416,7 +417,8 @@ class AbfsFileSystem::Impl {
     LOG(INFO) << "Init Azure Blob file system"
               << ", thread pool size:"
               << std::to_string(abfsConfig_.ioThreadPoolSize())
-              << ", load quantum:" << abfsConfig_.loadQuantum();
+              << ", load quantum:" << abfsConfig_.loadQuantum()
+              << ", ABFS endpoint " << abfsConfig_.abfsEndpoint();
   }
 
   ~Impl() {
@@ -434,6 +436,10 @@ class AbfsFileSystem::Impl {
 
   const std::shared_ptr<folly::Executor>& getIOExecutor() const {
     return ioExecutor_;
+  }
+
+  const std::string getAbfsEndpoint() const {
+    return abfsConfig_.abfsEndpoint();
   }
 
  private:
@@ -455,9 +461,9 @@ std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
     const FileOptions& options) {
   auto abfsfile = std::make_unique<AbfsReadFile>(
       std::string(path),
-      impl_->connectionString(std::string(path)),
       impl_->getLoadQuantum(),
-      impl_->getIOExecutor());
+      impl_->getIOExecutor(),
+      impl_->getAbfsEndpoint());
   abfsfile->initialize();
   return abfsfile;
 }
