@@ -74,6 +74,8 @@ class HashAggregation : public Operator {
 
   void updateEstimatedOutputRowSize();
 
+  void recordHashMode();
+
   std::shared_ptr<const core::AggregationNode> aggregationNode_;
 
   const bool isPartialOutput_;

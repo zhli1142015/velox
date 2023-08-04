@@ -190,6 +190,19 @@ void HashAggregation::updateRuntimeStats() {
       RuntimeMetric(hashTableStats.numTombstones);
 }
 
+void HashAggregation::recordHashMode() {
+  const auto mode = groupingSet_->hashMode();
+  auto lockedStats = stats_.wlock();
+  if (mode == BaseHashTable::HashMode::kHash) {
+    lockedStats->runtimeStats["hashtable.numHashMode"] = RuntimeMetric(1);
+  } else if (mode == BaseHashTable::HashMode::kArray) {
+    lockedStats->runtimeStats["hashtable.numArrayMode"] = RuntimeMetric(1);
+  } else if (mode == BaseHashTable::HashMode::kNormalizedKey) {
+    lockedStats->runtimeStats["hashtable.numNormalizedKeyMode"] =
+        RuntimeMetric(1);
+  }
+}
+
 void HashAggregation::prepareOutput(vector_size_t size) {
   if (output_) {
     VectorPtr output = std::move(output_);
@@ -382,6 +395,7 @@ RowVectorPtr HashAggregation::getDistinctOutput() {
 void HashAggregation::noMoreInput() {
   updateEstimatedOutputRowSize();
   groupingSet_->noMoreInput();
+  recordHashMode();
   Operator::noMoreInput();
   // Release the extra reserved memory right after processing all the inputs.
   pool()->release();

@@ -940,6 +940,15 @@ void HashBuild::addRuntimeStats() {
         RuntimeCounter(
             spillConfig()->spillLevel(spiller_->hashBits().begin())));
   }
+  // record table hash mode.
+  if (table_->hashMode() == BaseHashTable::HashMode::kHash) {
+    lockedStats->runtimeStats["hashtable.numHashMode"] = RuntimeMetric(1);
+  } else if (table_->hashMode() == BaseHashTable::HashMode::kArray) {
+    lockedStats->runtimeStats["hashtable.numArrayMode"] = RuntimeMetric(1);
+  } else if (table_->hashMode() == BaseHashTable::HashMode::kNormalizedKey) {
+    lockedStats->runtimeStats["hashtable.numNormalizedKeyMode"] =
+        RuntimeMetric(1);
+  }
 }
 
 BlockingReason HashBuild::isBlocked(ContinueFuture* future) {

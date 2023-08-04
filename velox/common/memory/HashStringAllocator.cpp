@@ -603,10 +603,12 @@ void HashStringAllocator::copyMultipartNoInline(
     return;
   }
   // Write the string as non-contiguous chunks.
-  ByteOutputStream stream(this, false, false);
-  auto position = newWrite(stream, numBytes);
-  stream.appendStringView(srcStr);
-  finishWrite(stream, 0);
+  if (!writeStream_) {
+    writeStream_ = std::make_unique<ByteOutputStream>(this, false, false);
+  }
+  auto position = newWrite(*writeStream_, numBytes);
+  writeStream_->appendStringView(srcStr);
+  finishWrite(*writeStream_, 0);
 
   // The stringView has a pointer to the first byte and the total
   // size. Read with contiguousString().

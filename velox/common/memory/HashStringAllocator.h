@@ -416,6 +416,8 @@ class HashStringAllocator : public StreamArena {
   Position startPosition_;
   Header* currentHeader_{nullptr};
 
+  std::unique_ptr<ByteOutputStream> writeStream_ = nullptr;
+
   // Pool for getting new slabs.
   memory::AllocationPool pool_;
 

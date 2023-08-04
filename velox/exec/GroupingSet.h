@@ -154,6 +154,10 @@ class GroupingSet {
 
   std::optional<int64_t> estimateOutputRowSize() const;
 
+  BaseHashTable::HashMode hashMode() const {
+    return table_ ? table_->hashMode() : BaseHashTable::HashMode::kArray;
+  }
+
  private:
   bool isDistinct() const {
     return aggregates_.empty();

@@ -584,7 +584,15 @@ void FlatVector<StringView>::setNoCopy(
     const StringView& value);
 
 template <>
-void FlatVector<bool>::set(vector_size_t idx, bool value);
+FOLLY_ALWAYS_INLINE void FlatVector<bool>::set(vector_size_t idx, bool value) {
+  VELOX_DCHECK_LT(idx, BaseVector::length_);
+  ensureValues();
+  VELOX_DCHECK(!values_->isView())
+  if (BaseVector::rawNulls_) {
+    BaseVector::setNull(idx, false);
+  }
+  bits::setBit(reinterpret_cast<uint64_t*>(rawValues_), idx, value);
+}
 
 template <>
 void FlatVector<StringView>::copy(

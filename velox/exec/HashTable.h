@@ -736,7 +736,18 @@ class HashTable : public BaseHashTable {
   void rehash(bool initNormalizedKeys);
   void storeKeys(HashLookup& lookup, vector_size_t row);
 
-  void storeRowPointer(uint64_t index, uint64_t hash, char* row);
+  FOLLY_ALWAYS_INLINE void
+  storeRowPointer(uint64_t index, uint64_t hash, char* row) {
+    if (hashMode_ == HashMode::kArray) {
+      reinterpret_cast<char**>(table_)[index] = row;
+      return;
+    }
+    const int64_t offset = bucketOffset(index);
+    auto* bucket = bucketAt(offset);
+    const auto slotIndex = index & (sizeof(TagVector) - 1);
+    bucket->setTag(slotIndex, hashTag(hash));
+    bucket->setPointer(slotIndex, row);
+  }
 
   // Allocates new tables for tags and payload pointers. The size must
   // a power of 2.

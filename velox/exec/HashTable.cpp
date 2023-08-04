@@ -25,6 +25,12 @@
 #include "velox/exec/OperatorUtils.h"
 #include "velox/vector/VectorTypeUtils.h"
 
+DEFINE_int32(capacity_scale_up_factor, 1, "Capacity scale up factor");
+DEFINE_bool(
+    reuse_normalized_key_slot_for_hash_mode,
+    true,
+    "If true, use normalized key slot to cache hashes.");
+
 using facebook::velox::common::testutil::TestValue;
 
 namespace facebook::velox::exec {
@@ -73,7 +79,8 @@ HashTable<ignoreNullKeys>::HashTable(
       allowDuplicates,
       isJoinBuild,
       hasProbedFlag,
-      hashMode_ != HashMode::kHash,
+      FLAGS_reuse_normalized_key_slot_for_hash_mode ||
+          hashMode_ != HashMode::kHash,
       pool,
       stringArena);
   nextOffset_ = rows_->nextOffset();
@@ -311,22 +318,6 @@ void HashTable<ignoreNullKeys>::storeKeys(
 }
 
 template <bool ignoreNullKeys>
-void HashTable<ignoreNullKeys>::storeRowPointer(
-    uint64_t index,
-    uint64_t hash,
-    char* row) {
-  if (hashMode_ == HashMode::kArray) {
-    reinterpret_cast<char**>(table_)[index] = row;
-    return;
-  }
-  const int64_t offset = bucketOffset(index);
-  auto* bucket = bucketAt(offset);
-  const auto slotIndex = index & (sizeof(TagVector) - 1);
-  bucket->setTag(slotIndex, hashTag(hash));
-  bucket->setPointer(slotIndex, row);
-}
-
-template <bool ignoreNullKeys>
 char* HashTable<ignoreNullKeys>::insertEntry(
     HashLookup& lookup,
     uint64_t index,
@@ -340,6 +331,10 @@ char* HashTable<ignoreNullKeys>::insertEntry(
     // the word below the row. Space was reserved in the allocation
     // unless we have given up on normalized keys.
     RowContainer::normalizedKey(group) = lookup.normalizedKeys[row]; // NOLINT
+  }
+  if (FLAGS_reuse_normalized_key_slot_for_hash_mode &&
+      hashMode_ == HashMode::kHash) {
+    RowContainer::normalizedKey(group) = lookup.hashes[row]; // NOLINT
   }
   ++numDistinct_;
   lookup.newGroups.push_back(row);
@@ -463,32 +458,9 @@ void HashTable<ignoreNullKeys>::groupProbe(HashLookup& lookup) {
     return;
   }
   ProbeState state1;
-  ProbeState state2;
-  ProbeState state3;
-  ProbeState state4;
   int32_t probeIndex = 0;
   int32_t numProbes = lookup.rows.size();
   auto rows = lookup.rows.data();
-  for (; probeIndex + 4 <= numProbes; probeIndex += 4) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 1];
-    state2.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 2];
-    state3.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 3];
-    state4.preProbe(*this, lookup.hashes[row], row);
-
-    state1.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state2.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state3.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state4.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-
-    fullProbe<false>(lookup, state1, false);
-    fullProbe<false>(lookup, state2, true);
-    fullProbe<false>(lookup, state3, true);
-    fullProbe<false>(lookup, state4, true);
-  }
   for (; probeIndex < numProbes; ++probeIndex) {
     int32_t row = rows[probeIndex];
     state1.preProbe(*this, lookup.hashes[row], row);
@@ -605,13 +577,13 @@ void HashTable<ignoreNullKeys>::joinProbe(HashLookup& lookup) {
   ProbeState state4;
   for (; probeIndex + 4 <= numProbes; probeIndex += 4) {
     int32_t row = rows[probeIndex];
+    int32_t row1 = rows[probeIndex + 1];
+    int32_t row2 = rows[probeIndex + 2];
+    int32_t row3 = rows[probeIndex + 3];
     state1.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 1];
-    state2.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 2];
-    state3.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 3];
-    state4.preProbe(*this, lookup.hashes[row], row);
+    state2.preProbe(*this, lookup.hashes[row1], row1);
+    state3.preProbe(*this, lookup.hashes[row2], row2);
+    state4.preProbe(*this, lookup.hashes[row3], row3);
     state1.firstProbe(*this, 0);
     state2.firstProbe(*this, 0);
     state3.firstProbe(*this, 0);
@@ -763,10 +735,14 @@ void HashTable<ignoreNullKeys>::checkSize(
       numTombstones_,
       hashMode_);
 
+  VELOX_CHECK(
+      FLAGS_capacity_scale_up_factor == 1 ||
+          bits::isPowerOfTwo(FLAGS_capacity_scale_up_factor),
+      "capacity scale up factor should be power of 2");
   const int64_t newNumDistincts = numNew + numDistinct_;
   if (table_ == nullptr || capacity_ == 0) {
     const auto newSize = newHashTableEntries(numDistinct_, numNew);
-    allocateTables(newSize);
+    allocateTables(newSize * FLAGS_capacity_scale_up_factor);
     if (numDistinct_ > 0) {
       rehash(initNormalizedKeys);
     }
@@ -780,7 +756,7 @@ void HashTable<ignoreNullKeys>::checkSize(
     // NOTE: we need to plus one here as number itself could be power of two.
     const auto newCapacity = bits::nextPowerOfTwo(
         std::max(newNumDistincts, capacity_ - numTombstones_) + 1);
-    allocateTables(newCapacity);
+    allocateTables(newCapacity * FLAGS_capacity_scale_up_factor);
     rehash(initNormalizedKeys);
   }
 }
@@ -797,6 +773,14 @@ bool HashTable<ignoreNullKeys>::hashRows(
     for (auto i = 0; i < rows.size(); ++i) {
       hashes[i] =
           mixNormalizedKey(RowContainer::normalizedKey(rows[i]), sizeBits_);
+    }
+    return true;
+  }
+
+  if (!initNormalizedKeys && hashMode_ == HashMode::kHash &&
+      FLAGS_reuse_normalized_key_slot_for_hash_mode) {
+    for (auto i = 0; i < rows.size(); ++i) {
+      hashes[i] = RowContainer::normalizedKey(rows[i]);
     }
     return true;
   }
@@ -824,6 +808,13 @@ bool HashTable<ignoreNullKeys>::hashRows(
     for (auto i = 0; i < rows.size(); ++i) {
       RowContainer::normalizedKey(rows[i]) = hashes[i];
       hashes[i] = mixNormalizedKey(hashes[i], sizeBits_);
+    }
+  }
+
+  if (hashMode_ == HashMode::kHash && initNormalizedKeys &&
+      FLAGS_reuse_normalized_key_slot_for_hash_mode) {
+    for (auto i = 0; i < rows.size(); ++i) {
+      RowContainer::normalizedKey(rows[i]) = hashes[i];
     }
   }
   return true;
@@ -1281,7 +1272,9 @@ void HashTable<ignoreNullKeys>::setHashMode(HashMode mode, int32_t numNew) {
     for (auto& hasher : hashers_) {
       hasher->resetStats();
     }
-    rows_->disableNormalizedKeys();
+    if (!FLAGS_reuse_normalized_key_slot_for_hash_mode) {
+      rows_->disableNormalizedKeys();
+    }
     capacity_ = 0;
     // Makes tables of the right size and rehashes.
     checkSize(numNew, true);
