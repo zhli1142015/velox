@@ -447,8 +447,8 @@ void registerFunctions(const std::string& prefix) {
       {prefix + "timestamp_millis"});
 
   // Register bloom filter function
-  registerFunction<BloomFilterMightContainFunction, bool, Varbinary, int64_t>(
-      {prefix + "might_contain"});
+  exec::registerStatefulVectorFunction(
+      prefix + "might_contain", mightContainSignatures(), makeMightContain);
 
   registerArrayMinMaxFunctions(prefix);
 

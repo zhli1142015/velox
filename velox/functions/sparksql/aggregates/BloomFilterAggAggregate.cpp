@@ -207,6 +207,9 @@ class BloomFilterAggAggregate : public exec::Aggregate {
   }
 
  private:
+  // Spark kMaxNumBits is 67108864.
+  const int64_t kMaxNumBits = 67'108'864;
+
   void decodeArguments(
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args) {
