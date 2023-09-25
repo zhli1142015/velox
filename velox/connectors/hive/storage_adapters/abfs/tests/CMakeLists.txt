@@ -26,6 +26,7 @@ target_link_libraries(
           velox_exec
           gtest
           gtest_main
+          rt
           Azure::azure-storage-blobs
           Azure::azure-storage-files-datalake)
 
@@ -44,5 +45,25 @@ target_link_libraries(
   velox_exec
   gtest
   gtest_main
+  Azure::azure-storage-blobs)
+target_compile_options(
+  velox_blob_client_test PRIVATE -Wno-deprecated-declarations)
+
+add_executable(vegas_file_system_test VegasFileSystemTest AzuriteServer.cpp)
+add_test(vegas_file_system_test vegas_file_system_test)
+target_link_libraries(
+  vegas_file_system_test
+  velox_file
+  velox_abfs
+  velox_core
+  velox_exec_test_lib
+  velox_hive_connector
+  velox_dwio_common_exception
+  velox_exec
+  gtest
+  gtest_main
+  rt
   Azure::azure-storage-blobs
   Azure::azure-storage-files-datalake)
+target_compile_options(
+  vegas_file_system_test PRIVATE -Wno-deprecated-declarations)

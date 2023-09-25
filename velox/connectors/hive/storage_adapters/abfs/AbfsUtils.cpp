@@ -48,17 +48,24 @@ AbfsAccount::AbfsAccount(
   position = accountNameWithSuffix_.find_last_of(
       '.', position - 1); // Find third last dot
 
-  endpointSuffix_ = accountNameWithSuffix_.substr(position + 1);
-  if (kValidEndpoints.count(endpointSuffix_) == 0) {
-    if (!abfsEndpoint.empty()) {
-      LOG(INFO) << "Using configured endpoint " << abfsEndpoint;
-      endpointSuffix_ = abfsEndpoint;
-      accountNameWithSuffix_ =
-          accountNameWithSuffix_.substr(0, position + 1) + endpointSuffix_;
-    } else {
-      VELOX_FAIL(
-          "Endpoint {} is not valid, please pass a default endpoint using spark.fs.azure.abfs.endpoint",
-          endpointSuffix_);
+  if (!abfsEndpoint.empty()) {
+    LOG(INFO) << "Using configured endpoint " << abfsEndpoint;
+    endpointSuffix_ = abfsEndpoint;
+    accountNameWithSuffix_ =
+        accountNameWithSuffix_.substr(0, position + 1) + endpointSuffix_;
+  } else {
+    endpointSuffix_ = accountNameWithSuffix_.substr(position + 1);
+    if (kValidEndpoints.count(endpointSuffix_) == 0) {
+      if (!abfsEndpoint.empty()) {
+        LOG(INFO) << "Using configured endpoint " << abfsEndpoint;
+        endpointSuffix_ = abfsEndpoint;
+        accountNameWithSuffix_ =
+            accountNameWithSuffix_.substr(0, position + 1) + endpointSuffix_;
+      } else {
+        VELOX_FAIL(
+            "Endpoint {} is not valid, please pass a default endpoint using spark.fs.azure.abfs.endpoint",
+            endpointSuffix_);
+      }
     }
   }
   credKey_ = fmt::format("fs.azure.account.key.{}", accountNameWithSuffix_);

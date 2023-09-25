@@ -18,8 +18,21 @@ add_library(velox_abfs RegisterAbfsFileSystem.cpp BlobClientProviderFactory.cpp
                        ConnectionStringBlobClientProvider.cpp)
 
 if(VELOX_ENABLE_ABFS)
-  target_sources(velox_abfs PRIVATE AbfsFileSystem.cpp AbfsUtils.cpp
-                                    AbfsWriteFile.cpp)
+  target_sources(
+    velox_abfs
+    PRIVATE AbfsFileSystem.cpp
+            AbfsWriteFile.cpp
+            AbfsUtils.cpp
+            VegasReadFile.cpp
+            vegas/VegasExecBase.cpp
+            vegas/VegasJournalBase.cpp
+            vegas/v1/VegasExecV1.cpp
+            vegas/v1/VegasJournalV1.cpp
+            vegas/client/VegasCacheClient.cpp
+            vegas/client/VegasCacheConfig.cpp
+            vegas/client/VegasMessageQueue.cpp
+            vegas/client/VegasUxSocket.cpp
+            vegas/client/SysUtils.cpp)
   target_link_libraries(
     velox_abfs
     PUBLIC velox_file
@@ -30,6 +43,7 @@ if(VELOX_ENABLE_ABFS)
            Azure::azure-storage-files-datalake
            Folly::folly
            glog::glog
+           rt
            fmt::fmt)
 
   if(${VELOX_BUILD_TESTING})

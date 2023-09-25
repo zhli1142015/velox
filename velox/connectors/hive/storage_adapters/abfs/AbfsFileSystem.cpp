@@ -26,6 +26,7 @@
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
 #include "velox/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
+#include "velox/connectors/hive/storage_adapters/abfs/VegasReadFile.h"
 #include "velox/core/Config.h"
 
 namespace facebook::velox::filesystems::abfs {
@@ -52,6 +53,14 @@ class AbfsConfig {
 
   int32_t ioThreadPoolSize() const {
     return config_->get<int32_t>(AbfsFileSystem::kReaderAbfsIoThreads, 0);
+  }
+
+  bool isVegasEnabled() const {
+    return config_->get<bool>(AbfsFileSystem::kVegasEnabled, false);
+  }
+
+  int32_t vegasCacheSize() const {
+    return config_->get<int32_t>(AbfsFileSystem::kVegasCacheSize, 0);
   }
 
   std::string abfsEndpoint() const {
@@ -418,7 +427,9 @@ class AbfsFileSystem::Impl {
               << ", thread pool size:"
               << std::to_string(abfsConfig_.ioThreadPoolSize())
               << ", load quantum:" << abfsConfig_.loadQuantum()
-              << ", ABFS endpoint " << abfsConfig_.abfsEndpoint();
+              << ", ABFS endpoint:" << abfsConfig_.abfsEndpoint()
+              << ", Vegas enabled:" << abfsConfig_.isVegasEnabled()
+              << ", Vegas cache size:" << abfsConfig_.vegasCacheSize();
   }
 
   ~Impl() {
@@ -438,6 +449,14 @@ class AbfsFileSystem::Impl {
     return ioExecutor_;
   }
 
+  const bool isVegasEnabled() const {
+    return abfsConfig_.isVegasEnabled();
+  }
+
+  const int32_t vegasCacheSize() const {
+    return abfsConfig_.vegasCacheSize();
+  }
+
   const std::string getAbfsEndpoint() const {
     return abfsConfig_.abfsEndpoint();
   }
@@ -450,6 +469,10 @@ class AbfsFileSystem::Impl {
 AbfsFileSystem::AbfsFileSystem(const std::shared_ptr<const Config>& config)
     : FileSystem(config) {
   impl_ = std::make_shared<Impl>(config.get());
+  isVegasEnabled_ = impl_->isVegasEnabled() && impl_->vegasCacheSize() > 0;
+  if (isVegasEnabled_) {
+    vegasConfig_ = std::make_shared<vegas::VegasCacheConfig>(config.get());
+  }
 }
 
 std::string AbfsFileSystem::name() const {
@@ -458,7 +481,17 @@ std::string AbfsFileSystem::name() const {
 
 std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
     std::string_view path,
-    const FileOptions& options) {
+    const FileOptions& /*unused*/) {
+  if (isVegasEnabled_) {
+    auto vegasfile = std::make_unique<VegasReadFile>(
+        std::string(path),
+        impl_->getLoadQuantum(),
+        impl_->getIOExecutor(),
+        impl_->getAbfsEndpoint(),
+        vegasConfig_);
+    vegasfile->initialize();
+    return vegasfile;
+  }
   auto abfsfile = std::make_unique<AbfsReadFile>(
       std::string(path),
       impl_->getLoadQuantum(),

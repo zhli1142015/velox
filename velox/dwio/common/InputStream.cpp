@@ -81,11 +81,14 @@ void ReadFileInputStream::read(
     throw std::invalid_argument("Buffer is null");
   }
   logRead(offset, length, purpose);
+  uint64_t ssdBytesRead = 0;
   auto readStartMicros = getCurrentTimeMicro();
-  std::string_view data_read = readFile_->pread(offset, length, buf);
+  std::string_view data_read = readFile_->pread(
+      offset, length, buf, ssdBytesRead, splitOffset_, splitLength_);
   if (stats_) {
     stats_->incRawBytesRead(length);
     stats_->incTotalScanTime((getCurrentTimeMicro() - readStartMicros) * 1000);
+    stats_->ssdRead().increment(ssdBytesRead);
   }
 
   DWIO_ENSURE_EQ(
@@ -107,7 +110,12 @@ void ReadFileInputStream::read(
     LogType logType) {
   const int64_t bufferSize = totalBufferSize(buffers);
   logRead(offset, bufferSize, logType);
-  auto size = readFile_->preadv(offset, buffers);
+  uint64_t ssdBytesRead = 0;
+  auto size = readFile_->preadv(
+      offset, buffers, ssdBytesRead, splitOffset_, splitLength_);
+  if (stats_) {
+    stats_->ssdRead().increment(ssdBytesRead);
+  }
   DWIO_ENSURE_EQ(
       size,
       bufferSize,
@@ -145,11 +153,14 @@ void ReadFileInputStream::vread(
       size_t(0),
       [&](size_t acc, const auto& r) { return acc + r.length; });
   logRead(regions[0].offset, length, purpose);
+
+  uint64_t ssdBytesRead = 0;
   auto readStartMicros = getCurrentTimeMicro();
-  readFile_->preadv(regions, iobufs);
+  readFile_->preadv(regions, iobufs, ssdBytesRead, splitOffset_, splitLength_);
   if (stats_) {
     stats_->incRawBytesRead(length);
     stats_->incTotalScanTime((getCurrentTimeMicro() - readStartMicros) * 1000);
+    stats_->ssdRead().increment(ssdBytesRead);
   }
 }
 

@@ -189,8 +189,18 @@ class ReadFileInputStream final : public InputStream {
     return readFile_;
   }
 
+  void setSplitOffset(const uint64_t offset) {
+    splitOffset_ = offset;
+  }
+
+  void setSplitLength(const uint64_t length) {
+    splitLength_ = length;
+  }
+
  private:
   std::shared_ptr<velox::ReadFile> readFile_;
+  uint64_t splitOffset_;
+  uint64_t splitLength_;
 };
 
 } // namespace facebook::velox::dwio::common

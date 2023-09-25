@@ -53,10 +53,31 @@ class ReadFile {
   virtual std::string_view pread(uint64_t offset, uint64_t length, void* buf)
       const = 0;
 
+  virtual std::string_view pread(
+      uint64_t offset,
+      uint64_t length,
+      void* FOLLY_NONNULL buf,
+      uint64_t& cacheReadBytes,
+      const uint64_t splitOffset,
+      const uint64_t splitLength) const {
+    cacheReadBytes = 0;
+    return pread(offset, length, buf);
+  }
+
   // Same as above, but returns owned data directly.
   //
   // This method should be thread safe.
   virtual std::string pread(uint64_t offset, uint64_t length) const;
+
+  virtual std::string pread(
+      uint64_t offset,
+      uint64_t length,
+      uint64_t& cacheReadBytes,
+      const uint64_t splitOffset,
+      const uint64_t splitLength) const {
+    cacheReadBytes = 0;
+    return pread(offset, length);
+  }
 
   // Reads starting at 'offset' into the memory referenced by the
   // Ranges in 'buffers'. The buffers are filled left to right. A
@@ -66,6 +87,16 @@ class ReadFile {
   virtual uint64_t preadv(
       uint64_t /*offset*/,
       const std::vector<folly::Range<char*>>& /*buffers*/) const;
+
+  virtual uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers,
+      uint64_t& cacheReadBytes,
+      const uint64_t splitOffset,
+      const uint64_t splitLength) const {
+    cacheReadBytes = 0;
+    return preadv(offset, buffers);
+  }
 
   // Vectorized read API. Implementations can coalesce and parallelize.
   // The offsets don't need to be sorted.
@@ -80,6 +111,16 @@ class ReadFile {
       folly::Range<const common::Region*> regions,
       folly::Range<folly::IOBuf*> iobufs) const;
 
+  virtual void preadv(
+      folly::Range<const common::Region*> regions,
+      folly::Range<folly::IOBuf*> iobufs,
+      uint64_t& cacheReadBytes,
+      const uint64_t splitOffset,
+      const uint64_t splitLength) const {
+    cacheReadBytes = 0;
+    return preadv(regions, iobufs);
+  }
+
   // Like preadv but may execute asynchronously and returns the read
   // size or exception via SemiFuture. Use hasPreadvAsync() to check
   // if the implementation is in fact asynchronous.
@@ -93,6 +134,16 @@ class ReadFile {
     } catch (const std::exception& e) {
       return folly::makeSemiFuture<uint64_t>(e);
     }
+  }
+
+  virtual folly::SemiFuture<uint64_t> preadvAsync(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers,
+      uint64_t& cacheReadBytes,
+      const uint64_t splitOffset,
+      const uint64_t splitLength) const {
+    cacheReadBytes = 0;
+    return preadvAsync(offset, buffers);
   }
 
   // Returns true if preadvAsync has a native implementation that is

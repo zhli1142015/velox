@@ -144,6 +144,14 @@ class BufferedInput {
 
   virtual uint64_t nextFetchSize() const;
 
+  void setSplitOffset(const uint64_t offset) {
+    input_->setSplitOffset(offset);
+  }
+
+  void setSplitLength(const uint64_t length) {
+    input_->setSplitLength(length);
+  }
+
  protected:
   std::shared_ptr<ReadFileInputStream> input_;
   memory::MemoryPool& pool_;

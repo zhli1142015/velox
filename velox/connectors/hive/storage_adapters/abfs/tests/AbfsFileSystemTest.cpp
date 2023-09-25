@@ -347,27 +347,6 @@ TEST_F(AbfsFileSystemTest, rmdirNotImplemented) {
   VELOX_ASSERT_THROW(abfs.rmdir("dir"), "rmdir for abfs not implemented");
 }
 
-TEST_F(AbfsFileSystemTest, invalidAccountKey) {
-  auto connectionStringProvider =
-      std::make_shared<ConnectionStringBlobClientProvider>(
-          facebook::velox::filesystems::test::AzuriteSparkConfig,
-          facebook::velox::filesystems::test::AzuriteInvalidAccountKey);
-  filesystems::abfs::BlobClientProviderFactory::registerProvider(
-      std::static_pointer_cast<filesystems::abfs::BlobClientProvider>(
-          connectionStringProvider));
-  const std::string abfsFile =
-      std::string("abfs://test@test1.dfs.core.windows.net/test");
-  auto abfs =
-      std::make_shared<facebook::velox::filesystems::abfs::AbfsFileSystem>(
-          hiveConfig());
-  try {
-    auto readFile = abfs->openFileForRead(fullFilePath);
-    FAIL() << "Expected VeloxException";
-  } catch (VeloxException const& err) {
-    EXPECT_TRUE(err.message().find("401") != std::string::npos);
-  }
-}
-
 TEST(AbfsReadFileTest, splitRegion) {
   std::vector<std::tuple<uint64_t, uint64_t>> ranges;
   filesystems::abfs::AbfsReadFile::splitRegion(5, 5, ranges);

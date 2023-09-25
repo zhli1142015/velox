@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
 #include <folly/executors/ThreadedExecutor.h>
 #include <folly/futures/Future.h>
@@ -30,7 +31,9 @@ class AbfsReadFile final : public ReadFile {
       const std::shared_ptr<folly::Executor> ioExecutor,
       const std::string abfsEndpoint);
 
-  void initialize(const FileOptions& options);
+  ~AbfsReadFile() = default;
+
+  void initialize();
 
   std::string_view pread(uint64_t offset, uint64_t length, void* buf)
       const final;

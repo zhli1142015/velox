@@ -17,6 +17,7 @@
 
 #include "BlobClientProviderFactory.h"
 #include "velox/common/file/FileSystems.h"
+#include "velox/connectors/hive/storage_adapters/abfs/vegas/client/VegasCacheConfig.h"
 
 namespace facebook::velox::filesystems::abfs {
 
@@ -36,6 +37,10 @@ namespace facebook::velox::filesystems::abfs {
 class AbfsFileSystem : public FileSystem {
  public:
   static constexpr const char* kReaderAbfsLoadQuantum = "fs.azure.loadQuantum";
+
+  static constexpr const char* kVegasEnabled = "vegas.useCache";
+
+  static constexpr const char* kVegasCacheSize = "vegas.cacheSize";
 
   static constexpr const char* kReaderAbfsIoThreads = "fs.azure.ioThreads";
 
@@ -83,6 +88,10 @@ class AbfsFileSystem : public FileSystem {
  protected:
   class Impl;
   std::shared_ptr<Impl> impl_;
+
+ private:
+  bool isVegasEnabled_{false};
+  std::shared_ptr<vegas::VegasCacheConfig> vegasConfig_;
 };
 
 void registerAbfsFileSystem();

@@ -244,7 +244,8 @@ void SplitReader::createReader() {
   }
   auto baseFileInput = createBufferedInput(
       *fileHandle, baseReaderOpts_, connectorQueryCtx_, ioStats_, executor_);
-
+  baseFileInput->setSplitOffset(hiveSplit_->start);
+  baseFileInput->setSplitLength(hiveSplit_->length);
   baseReader_ = dwio::common::getReaderFactory(baseReaderOpts_.getFileFormat())
                     ->createReader(std::move(baseFileInput), baseReaderOpts_);
 }
