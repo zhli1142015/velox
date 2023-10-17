@@ -24,6 +24,7 @@
 #include "velox/functions/prestosql/JsonFunctions.h"
 #include "velox/functions/prestosql/StringFunctions.h"
 #include "velox/functions/sparksql/ArrayMinMaxFunction.h"
+#include "velox/functions/sparksql/ArrayFunctions.h"
 #include "velox/functions/sparksql/ArraySort.h"
 #include "velox/functions/sparksql/Bitwise.h"
 #include "velox/functions/sparksql/DateTimeFunctions.h"
@@ -116,6 +117,12 @@ void registerExpressionGeneralFunctions(const std::string& prefix) {
       makeUnscaledValue());
 }
 } // namespace
+
+template <typename T>
+inline void registerArrayUnionFunctions(const std::string& prefix) {
+  registerFunction<sparksql::ArrayUnionFunction, Array<T>, Array<T>, Array<T>>(
+      {prefix + "array_union"});
+}
 
 void registerFunctions(const std::string& prefix) {
   registerAllSpecialFormGeneralFunctions();
@@ -289,6 +296,18 @@ void registerFunctions(const std::string& prefix) {
   registerArrayMinMaxFunctions(prefix);
   // Register expression general functions.
   registerExpressionGeneralFunctions(prefix);
+
+  registerArrayUnionFunctions<int8_t>(prefix);
+  registerArrayUnionFunctions<int16_t>(prefix);
+  registerArrayUnionFunctions<int32_t>(prefix);
+  registerArrayUnionFunctions<int64_t>(prefix);
+  registerArrayUnionFunctions<int128_t>(prefix);
+  registerArrayUnionFunctions<float>(prefix);
+  registerArrayUnionFunctions<double>(prefix);
+  registerArrayUnionFunctions<bool>(prefix);
+  registerArrayUnionFunctions<Timestamp>(prefix);
+  registerArrayUnionFunctions<Date>(prefix);
+  registerArrayUnionFunctions<Varbinary>(prefix);
 }
 
 } // namespace sparksql
