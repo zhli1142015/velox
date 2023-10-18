@@ -431,5 +431,43 @@ TEST_F(DateTimeFunctionsTest, addMonths) {
       addMonths("2023-07-10", kMax),
       fmt::format("Integer overflow in add_months(2023-07-10, {})", kMax));
 }
+
+TEST_F(DateTimeFunctionsTest, quarter) {
+  const auto quarter = [&](std::optional<Timestamp> date) {
+    return evaluateOnce<int32_t>("quarter(c0)", date);
+  };
+  EXPECT_EQ(std::nullopt, quarter(std::nullopt));
+  EXPECT_EQ(1, quarter(Timestamp(0, 0)));
+  EXPECT_EQ(4, quarter(Timestamp(-1, 9000)));
+  EXPECT_EQ(4, quarter(Timestamp(4000000000, 0)));
+  EXPECT_EQ(4, quarter(Timestamp(4000000000, 123000000)));
+  EXPECT_EQ(2, quarter(Timestamp(990000000, 321000000)));
+  EXPECT_EQ(3, quarter(Timestamp(998423705, 321000000)));
+
+  setQueryTimeZone("Pacific/Apia");
+
+  EXPECT_EQ(std::nullopt, quarter(std::nullopt));
+  EXPECT_EQ(4, quarter(Timestamp(0, 0)));
+  EXPECT_EQ(4, quarter(Timestamp(-1, Timestamp::kMaxNanos)));
+  EXPECT_EQ(4, quarter(Timestamp(4000000000, 0)));
+  EXPECT_EQ(4, quarter(Timestamp(4000000000, 123000000)));
+  EXPECT_EQ(2, quarter(Timestamp(990000000, 321000000)));
+  EXPECT_EQ(3, quarter(Timestamp(998423705, 321000000)));
+}
+
+TEST_F(DateTimeFunctionsTest, quarterDate) {
+  const auto quarter = [&](std::optional<int32_t> date) {
+    return evaluateOnce<int32_t, int32_t>("quarter(c0)", {date}, {DATE()});
+  };
+  EXPECT_EQ(std::nullopt, quarter(std::nullopt));
+  EXPECT_EQ(1, quarter(0));
+  EXPECT_EQ(4, quarter(-1));
+  EXPECT_EQ(4, quarter(-40));
+  EXPECT_EQ(2, quarter(110));
+  EXPECT_EQ(3, quarter(200));
+  EXPECT_EQ(1, quarter(18262));
+  EXPECT_EQ(1, quarter(-18262));
+}
+
 } // namespace
 } // namespace facebook::velox::functions::sparksql::test
