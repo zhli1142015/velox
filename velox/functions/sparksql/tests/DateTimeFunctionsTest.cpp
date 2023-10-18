@@ -469,5 +469,41 @@ TEST_F(DateTimeFunctionsTest, quarterDate) {
   EXPECT_EQ(1, quarter(-18262));
 }
 
+TEST_F(DateTimeFunctionsTest, month) {
+  const auto month = [&](std::optional<Timestamp> date) {
+    return evaluateOnce<int32_t>("month(c0)", date);
+  };
+  EXPECT_EQ(std::nullopt, month(std::nullopt));
+  EXPECT_EQ(1, month(Timestamp(0, 0)));
+  EXPECT_EQ(12, month(Timestamp(-1, 9000)));
+  EXPECT_EQ(10, month(Timestamp(4000000000, 0)));
+  EXPECT_EQ(10, month(Timestamp(4000000000, 123000000)));
+  EXPECT_EQ(8, month(Timestamp(998474645, 321000000)));
+  EXPECT_EQ(8, month(Timestamp(998423705, 321000000)));
+
+  setQueryTimeZone("Pacific/Apia");
+
+  EXPECT_EQ(std::nullopt, month(std::nullopt));
+  EXPECT_EQ(12, month(Timestamp(0, 0)));
+  EXPECT_EQ(12, month(Timestamp(-1, Timestamp::kMaxNanos)));
+  EXPECT_EQ(10, month(Timestamp(4000000000, 0)));
+  EXPECT_EQ(10, month(Timestamp(4000000000, 123000000)));
+  EXPECT_EQ(8, month(Timestamp(998474645, 321000000)));
+  EXPECT_EQ(8, month(Timestamp(998423705, 321000000)));
+}
+
+TEST_F(DateTimeFunctionsTest, monthDate) {
+  const auto month = [&](std::optional<int32_t> date) {
+    return evaluateOnce<int32_t, int32_t>("month(c0)", {date}, {DATE()});
+  };
+  EXPECT_EQ(std::nullopt, month(std::nullopt));
+  EXPECT_EQ(1, month(0));
+  EXPECT_EQ(12, month(-1));
+  EXPECT_EQ(11, month(-40));
+  EXPECT_EQ(2, month(40));
+  EXPECT_EQ(1, month(18262));
+  EXPECT_EQ(1, month(-18262));
+}
+
 } // namespace
 } // namespace facebook::velox::functions::sparksql::test

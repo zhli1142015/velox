@@ -400,4 +400,31 @@ struct QuarterFunction : public InitSessionTimezone<T>,
   }
 };
 
+template <typename T>
+struct MonthFunction : public InitSessionTimezone<T>,
+                       public TimestampWithTimezoneSupport<T> {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE int32_t getMonth(const std::tm& time) {
+    return 1 + time.tm_mon;
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      int32_t& result,
+      const arg_type<Timestamp>& timestamp) {
+    result = getMonth(getDateTime(timestamp, this->timeZone_));
+  }
+
+  FOLLY_ALWAYS_INLINE void call(int32_t& result, const arg_type<Date>& date) {
+    result = getMonth(getDateTime(date));
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      int32_t& result,
+      const arg_type<TimestampWithTimezone>& timestampWithTimezone) {
+    auto timestamp = this->toTimestamp(timestampWithTimezone);
+    result = getMonth(getDateTime(timestamp, nullptr));
+  }
+};
+
 } // namespace facebook::velox::functions::sparksql
