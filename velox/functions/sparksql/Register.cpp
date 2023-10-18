@@ -279,9 +279,9 @@ void registerFunctions(const std::string& prefix) {
       {prefix + "day", prefix + "dayofmonth"});
   registerFunction<DayFunction, int32_t, Date>(
       {prefix + "day", prefix + "dayofmonth"});
-  registerFunction<DayOfYearFunction, int64_t, Timestamp>(
+  registerFunction<DayOfYearFunction, int32_t, Timestamp>(
       {prefix + "doy", prefix + "dayofyear"});
-  registerFunction<DayOfYearFunction, int64_t, Date>(
+  registerFunction<DayOfYearFunction, int32_t, Date>(
       {prefix + "doy", prefix + "dayofyear"});
 
   registerFunction<DayOfWeekFunction, int32_t, Timestamp>(

@@ -450,4 +450,31 @@ struct DayFunction : public InitSessionTimezone<T>,
   }
 };
 
+template <typename T>
+struct DayOfYearFunction : public InitSessionTimezone<T>,
+                           public TimestampWithTimezoneSupport<T> {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE int32_t getDayOfYear(const std::tm& time) {
+    return time.tm_yday + 1;
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      int32_t& result,
+      const arg_type<Timestamp>& timestamp) {
+    result = getDayOfYear(getDateTime(timestamp, this->timeZone_));
+  }
+
+  FOLLY_ALWAYS_INLINE void call(int32_t& result, const arg_type<Date>& date) {
+    result = getDayOfYear(getDateTime(date));
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      int32_t& result,
+      const arg_type<TimestampWithTimezone>& timestampWithTimezone) {
+    auto timestamp = this->toTimestamp(timestampWithTimezone);
+    result = getDayOfYear(getDateTime(timestamp, nullptr));
+  }
+};
+
 } // namespace facebook::velox::functions::sparksql

@@ -291,12 +291,35 @@ TEST_F(DateTimeFunctionsTest, dateSub) {
 
 TEST_F(DateTimeFunctionsTest, dayOfYear) {
   const auto day = [&](std::optional<int32_t> date) {
-    return evaluateOnce<int64_t, int32_t>("dayofyear(c0)", {date}, {DATE()});
+    return evaluateOnce<int32_t, int32_t>("dayofyear(c0)", {date}, {DATE()});
   };
   EXPECT_EQ(std::nullopt, day(std::nullopt));
   EXPECT_EQ(100, day(parseDate("2016-04-09")));
   EXPECT_EQ(235, day(parseDate("2023-08-23")));
   EXPECT_EQ(1, day(parseDate("1970-01-01")));
+}
+
+TEST_F(DateTimeFunctionsTest, dayOfYearTimestamp) {
+  const auto day = [&](std::optional<Timestamp> date) {
+    return evaluateOnce<int32_t>("dayofyear(c0)", date);
+  };
+  EXPECT_EQ(std::nullopt, day(std::nullopt));
+  EXPECT_EQ(1, day(Timestamp(0, 0)));
+  EXPECT_EQ(365, day(Timestamp(-1, 9000)));
+  EXPECT_EQ(273, day(Timestamp(1632989700, 0)));
+  EXPECT_EQ(274, day(Timestamp(1633076100, 0)));
+  EXPECT_EQ(279, day(Timestamp(1633508100, 0)));
+  EXPECT_EQ(304, day(Timestamp(1635668100, 0)));
+
+  setQueryTimeZone("Pacific/Apia");
+
+  EXPECT_EQ(std::nullopt, day(std::nullopt));
+  EXPECT_EQ(365, day(Timestamp(0, 0)));
+  EXPECT_EQ(365, day(Timestamp(-1, 9000)));
+  EXPECT_EQ(273, day(Timestamp(1632989700, 0)));
+  EXPECT_EQ(274, day(Timestamp(1633076100, 0)));
+  EXPECT_EQ(279, day(Timestamp(1633508100, 0)));
+  EXPECT_EQ(304, day(Timestamp(1635668100, 0)));
 }
 
 TEST_F(DateTimeFunctionsTest, dayOfMonth) {
