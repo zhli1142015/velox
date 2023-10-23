@@ -366,6 +366,12 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   /// without actually freeing the used memory.
   virtual uint64_t freeBytes() const = 0;
 
+  /// Try shrinking up to the specified amount of free memory via memory
+  /// manager.
+  virtual uint64_t shrinkManaged(
+      MemoryPool* requestor,
+      uint64_t targetBytes = 0) = 0;
+
   /// Invoked to free up to the specified amount of free memory by reducing
   /// this memory pool's capacity without actually freeing any used memory. The
   /// function returns the actually freed memory capacity in bytes. If
@@ -631,6 +637,8 @@ class MemoryPoolImpl : public MemoryPool {
 
   uint64_t reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats)
       override;
+
+  uint64_t shrinkManaged(MemoryPool* requestor, uint64_t targetBytes) override;
 
   uint64_t shrink(uint64_t targetBytes = 0) override;
 
