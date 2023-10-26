@@ -64,6 +64,7 @@ add_library(
   ProbeOperatorState.cpp
   RowsStreamingWindowBuild.cpp
   RowsStreamingWindowPartition.cpp
+  RollUpHashAggregate.cpp
   RowContainer.cpp
   RowNumber.cpp
   SortBuffer.cpp

@@ -47,6 +47,7 @@ GroupingSet::GroupingSet(
     std::vector<AggregateInfo>&& aggregates,
     bool ignoreNullKeys,
     bool isPartial,
+    bool isRollUp,
     bool isRawInput,
     const std::vector<vector_size_t>& globalGroupingSets,
     const std::optional<column_index_t>& groupIdChannel,
@@ -58,6 +59,7 @@ GroupingSet::GroupingSet(
       hashers_(std::move(hashers)),
       isGlobal_(hashers_.empty()),
       isPartial_(isPartial),
+      isRollUp_(isRollUp),
       isRawInput_(isRawInput),
       queryConfig_(operatorCtx->task()->queryCtx()->queryConfig()),
       aggregates_(std::move(aggregates)),
@@ -128,6 +130,7 @@ std::unique_ptr<GroupingSet> GroupingSet::createForMarkDistinct(
       /*aggregates*/ std::vector<AggregateInfo>{},
       /*ignoreNullKeys*/ false,
       /*isPartial*/ false,
+      /*isRollUp*/ false,
       /*isRawInput*/ false,
       /*globalGroupingSets*/ std::vector<vector_size_t>{},
       /*groupIdColumn*/ std::nullopt,
@@ -830,9 +833,13 @@ const HashLookup& GroupingSet::hashLookup() const {
 }
 
 void GroupingSet::ensureInputFits(const RowVectorPtr& input) {
-  // Spilling is considered if this is a final or single aggregation and
-  // spillPath is set.
-  if (isPartial_ || spillConfig_ == nullptr) {
+  // Spilling is considered if this is a final or single or rollup aggregation
+  // and spillPath is set.
+
+  if (spillConfig_ == nullptr) {
+    return;
+  }
+  if (isPartial_ && !isRollUp_) {
     return;
   }
 

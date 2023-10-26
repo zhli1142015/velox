@@ -34,6 +34,7 @@
 #include "velox/exec/NestedLoopJoinProbe.h"
 #include "velox/exec/OrderBy.h"
 #include "velox/exec/PartitionedOutput.h"
+#include "velox/exec/RollUpHashAggregate.h"
 #include "velox/exec/RowNumber.h"
 #include "velox/exec/StreamingAggregation.h"
 #include "velox/exec/TableScan.h"
@@ -499,8 +500,13 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
         operators.push_back(std::make_unique<StreamingAggregation>(
             id, ctx.get(), aggregationNode));
       } else {
-        operators.push_back(
-            std::make_unique<HashAggregation>(id, ctx.get(), aggregationNode));
+        if (aggregationNode->useRollUpAggregate()) {
+          operators.push_back(std::make_unique<RollUpHashAggregate>(
+              id, ctx.get(), aggregationNode));
+        } else {
+          operators.push_back(std::make_unique<HashAggregation>(
+              id, ctx.get(), aggregationNode));
+        }
       }
     } else if (
         auto expandNode =

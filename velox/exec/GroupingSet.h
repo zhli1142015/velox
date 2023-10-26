@@ -35,6 +35,7 @@ class GroupingSet {
       std::vector<AggregateInfo>&& aggregates,
       bool ignoreNullKeys,
       bool isPartial,
+      bool isRollUp,
       bool isRawInput,
       const std::vector<vector_size_t>& globalGroupingSets,
       const std::optional<column_index_t>& groupIdChannel,
@@ -275,6 +276,7 @@ class GroupingSet {
   std::vector<std::unique_ptr<VectorHasher>> hashers_;
   const bool isGlobal_;
   const bool isPartial_;
+  const bool isRollUp_;
   const bool isRawInput_;
   const core::QueryConfig& queryConfig_;
 

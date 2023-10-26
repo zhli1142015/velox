@@ -436,6 +436,7 @@ PlanBuilder& PlanBuilder::tableWrite(
         aggregatesAndNames.names, // ignoreNullKeys
         aggregatesAndNames.aggregates,
         false,
+        false,
         planNode_);
   }
 
@@ -638,6 +639,7 @@ core::PlanNodePtr PlanBuilder::createIntermediateOrFinalAggregation(
       partialAggNode->aggregateNames(),
       aggregates,
       partialAggNode->ignoreNullKeys(),
+      false, // useRollUpAggregation
       planNode_);
 }
 
@@ -843,6 +845,31 @@ PlanBuilder& PlanBuilder::aggregation(
       globalGroupingSets,
       groupId,
       ignoreNullKeys,
+      false, // useRollUpAggregation
+      planNode_);
+  return *this;
+}
+
+PlanBuilder& PlanBuilder::rollupAggregation(
+    const std::vector<std::string>& groupingKeys,
+    const std::vector<std::string>& aggregates,
+    bool ignoreNullKeys,
+    const std::vector<std::vector<TypePtr>>& rawInputTypes) {
+  auto step = core::AggregationNode::Step::kPartial;
+  const std::vector<core::FieldAccessTypedExprPtr> emptyVector;
+  const std::vector<std::string> emptyMask;
+  auto numAggregates = aggregates.size();
+  auto aggregatesAndNames = createAggregateExpressionsAndNames(
+      aggregates, emptyMask, step, rawInputTypes);
+  planNode_ = std::make_shared<core::AggregationNode>(
+      nextPlanNodeId(),
+      step,
+      fields(groupingKeys),
+      emptyVector,
+      aggregatesAndNames.names,
+      aggregatesAndNames.aggregates,
+      ignoreNullKeys,
+      true /* useRollUpAggregation */,
       planNode_);
   return *this;
 }
@@ -863,6 +890,7 @@ PlanBuilder& PlanBuilder::streamingAggregation(
       aggregatesAndNames.names,
       aggregatesAndNames.aggregates,
       ignoreNullKeys,
+      false, // useRollUpAggregation
       planNode_);
   return *this;
 }

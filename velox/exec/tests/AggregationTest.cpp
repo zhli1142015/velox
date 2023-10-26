@@ -479,6 +479,7 @@ TEST_F(AggregationTest, missingFunctionOrSignature) {
               std::vector<std::string>{"agg"},
               aggregates,
               false,
+              false,
               std::move(source));
         })
         .planNode();
@@ -541,6 +542,7 @@ TEST_F(AggregationTest, missingLambdaFunction) {
                         std::vector<core::FieldAccessTypedExprPtr>{},
                         std::vector<std::string>{"agg"},
                         aggregates,
+                        false,
                         false,
                         std::move(source));
                   })

@@ -101,6 +101,7 @@ void HashAggregation::initialize() {
       std::move(aggregateInfos),
       aggregationNode_->ignoreNullKeys(),
       isPartialOutput_,
+      false, // isRollUp
       isRawInput(aggregationNode_->step()),
       aggregationNode_->globalGroupingSets(),
       groupIdChannel,

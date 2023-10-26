@@ -188,6 +188,7 @@ TEST_F(PlanFragmentTest, aggregationCanSpill) {
         testData.isDistinct ? emptyAggregateNames : aggregateNames,
         testData.isDistinct ? emptyAggregates : aggregates,
         false,
+        false,
         valueNode_);
     auto queryCtx = getSpillQueryCtx(
         testData.isSpillEnabled,

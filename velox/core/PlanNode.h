@@ -531,6 +531,7 @@ class AggregationNode : public PlanNode {
       const std::vector<std::string>& aggregateNames,
       const std::vector<Aggregate>& aggregates,
       bool ignoreNullKeys,
+      bool useRollUpAggregation,
       PlanNodePtr source);
 
   /// @param globalGroupingSets Group IDs of the global grouping sets produced
@@ -552,10 +553,15 @@ class AggregationNode : public PlanNode {
       const std::vector<vector_size_t>& globalGroupingSets,
       const std::optional<FieldAccessTypedExprPtr>& groupId,
       bool ignoreNullKeys,
+      bool useRollUpAggregation,
       PlanNodePtr source);
 
   const std::vector<PlanNodePtr>& sources() const override {
     return sources_;
+  }
+
+  bool useRollUpAggregate() const {
+    return useRollUpAggregation_;
   }
 
   const RowTypePtr& outputType() const override {
@@ -608,7 +614,11 @@ class AggregationNode : public PlanNode {
   }
 
   std::string_view name() const override {
-    return "Aggregation";
+    if (useRollUpAggregation_) {
+      return "RollUpAggregation";
+    } else {
+      return "Aggregation";
+    }
   }
 
   bool canSpill(const QueryConfig& queryConfig) const override;
@@ -619,6 +629,10 @@ class AggregationNode : public PlanNode {
 
   bool isSingle() const {
     return step_ == Step::kSingle;
+  }
+
+  bool isPartial() const {
+    return step_ == Step::kPartial;
   }
 
   folly::dynamic serialize() const override;
@@ -640,6 +654,7 @@ class AggregationNode : public PlanNode {
 
   const std::vector<PlanNodePtr> sources_;
   const RowTypePtr outputType_;
+  const bool useRollUpAggregation_;
 };
 
 inline std::ostream& operator<<(

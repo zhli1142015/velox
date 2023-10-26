@@ -377,6 +377,7 @@ PlanNodePtr toVeloxPlan(
       names,
       std::move(aggregates),
       false, // ignoreNullKeys
+      false, // useRollUpAggregation
       source);
 }
 

@@ -666,6 +666,12 @@ class PlanBuilder {
   ///
   PlanBuilder& expand(const std::vector<std::vector<std::string>>& projections);
 
+  PlanBuilder& rollupAggregation(
+      const std::vector<std::string>& groupingKeys,
+      const std::vector<std::string>& aggregates,
+      bool ignoreNullKeys,
+      const std::vector<std::vector<TypePtr>>& rawInputTypes);
+
   /// Add a LocalMergeNode using specified ORDER BY clauses.
   ///
   /// For example,

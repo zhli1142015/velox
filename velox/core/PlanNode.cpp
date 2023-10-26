@@ -111,6 +111,7 @@ AggregationNode::AggregationNode(
     const std::vector<vector_size_t>& globalGroupingSets,
     const std::optional<FieldAccessTypedExprPtr>& groupId,
     bool ignoreNullKeys,
+    bool useRollUpAggregation,
     PlanNodePtr source)
     : PlanNode(id),
       step_(step),
@@ -125,7 +126,8 @@ AggregationNode::AggregationNode(
       outputType_(getAggregationOutputType(
           groupingKeys_,
           aggregateNames_,
-          aggregates_)) {
+          aggregates_)),
+      useRollUpAggregation_(useRollUpAggregation) {
   // Empty grouping keys are used in global aggregation:
   //    SELECT sum(c) FROM t
   // Empty aggregates are used in distinct:
@@ -133,6 +135,26 @@ AggregationNode::AggregationNode(
   // Sometimes there are no grouping keys and no aggregations:
   //    WITH a AS (SELECT sum(x) from t)
   //    SELECT y FROM a, UNNEST(array[1, 2,3]) as u(y)
+
+  if (useRollUpAggregation_) {
+    auto project = std::dynamic_pointer_cast<const core::ProjectNode>(source);
+    VELOX_CHECK(
+        nullptr != project,
+        "Child of RollUpAggregation should be a Project node");
+
+    // The last grouping key should point to a constant in child Project node
+    auto lastKey = groupingKeys_.back();
+    auto index = project->outputType()->as<TypeKind::ROW>().getChildIdx(
+        lastKey.get()->name());
+
+    auto zero = std::make_unique<ConstantTypedExpr>(BIGINT(), 0L);
+    auto constProjection = std::dynamic_pointer_cast<const ConstantTypedExpr>(
+        project->projections()[index]);
+    VELOX_CHECK(
+        nullptr != constProjection &&
+            zero->value().equals(constProjection->value()),
+        "Last projection of child Project should be constant value (0) for RollUpAggregation");
+  }
 
   std::unordered_set<std::string> groupingKeyNames;
   groupingKeyNames.reserve(groupingKeys.size());
@@ -175,6 +197,7 @@ AggregationNode::AggregationNode(
     const std::vector<std::string>& aggregateNames,
     const std::vector<Aggregate>& aggregates,
     bool ignoreNullKeys,
+    bool useRollUpAggregation,
     PlanNodePtr source)
     : AggregationNode(
           id,
@@ -186,6 +209,7 @@ AggregationNode::AggregationNode(
           {},
           std::nullopt,
           ignoreNullKeys,
+          useRollUpAggregation,
           source) {}
 
 namespace {
@@ -233,8 +257,8 @@ bool AggregationNode::canSpill(const QueryConfig& queryConfig) const {
   }
   // TODO: add spilling for pre-grouped aggregation later:
   // https://github.com/facebookincubator/velox/issues/3264
-  return (isFinal() || isSingle()) && preGroupedKeys().empty() &&
-      queryConfig.aggregationSpillEnabled();
+  return ((isPartial() && useRollUpAggregation_) || isFinal() || isSingle()) &&
+      preGroupedKeys().empty() && queryConfig.aggregationSpillEnabled();
 }
 
 void AggregationNode::addDetails(std::stringstream& stream) const {
@@ -330,6 +354,8 @@ folly::dynamic AggregationNode::serialize() const {
     obj["groupId"] = ISerializable::serialize(groupId_.value());
   }
   obj["ignoreNullKeys"] = ignoreNullKeys_;
+  obj["useRollUpAggregation"] = useRollUpAggregation_;
+
   return obj;
 }
 
@@ -439,6 +465,7 @@ PlanNodePtr AggregationNode::create(const folly::dynamic& obj, void* context) {
       globalGroupingSets,
       groupId,
       obj["ignoreNullKeys"].asBool(),
+      obj["useRollUpAggregation"].asBool(),
       deserializeSingleSource(obj, context));
 }
 

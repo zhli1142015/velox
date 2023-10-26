@@ -291,3 +291,20 @@ TEST_F(Substrait2VeloxPlanConversionTest, DISABLED_q6) {
       .splits(makeSplits(planConverter, planNode))
       .assertResults(expectedResult);
 }
+
+TEST_F(Substrait2VeloxPlanConversionTest, rollUpOptimisation) {
+  std::string subPlanPath =
+      getDataFilePath("velox/substrait/tests", "data/rollup_optimisation.json");
+  ::substrait::Plan substraitPlan;
+  JsonToProtoConverter::readFromFile(subPlanPath, substraitPlan);
+  // Convert to Velox PlanNode.
+  facebook::velox::substrait::SubstraitVeloxPlanConverter planConverter(
+      pool_.get());
+  auto planNode = planConverter.toVeloxPlan(substraitPlan);
+  ASSERT_EQ(
+      "-- Project[expressions: (n3_4:INTEGER, murmur3hash(42,\"n1_3\",\"n1_4\")), (n3_5:DOUBLE, \"n1_3\"), (n3_6:BIGINT, \"n1_4\"), (n3_7:BIGINT, \"n2_2\"), (n3_8:DECIMAL(18,6), \"n2_3\")] -> n3_4:INTEGER, n3_5:DOUBLE, n3_6:BIGINT, n3_7:BIGINT, n3_8:DECIMAL(18,6)\n"
+      "  -- RollUpAggregation[PARTIAL [n1_3, n1_4] n2_2 := count(\"n1_5\"), n2_3 := max(\"n1_6\") mask: n1_7] -> n1_3:DOUBLE, n1_4:BIGINT, n2_2:BIGINT, n2_3:DECIMAL(18,6)\n"
+      "    -- Project[expressions: (n1_3:DOUBLE, \"n0_1\"), (n1_4:BIGINT, 0), (n1_5:VARCHAR, \"n0_0\"), (n1_6:DECIMAL(18,6), check_overflow(decimal_multiply(try_cast 2.000000 as DECIMAL(1,0),\"n0_2\"),true,0)), (n1_7:BOOLEAN, greaterthan(\"n0_2\",10.000000))] -> n1_3:DOUBLE, n1_4:BIGINT, n1_5:VARCHAR, n1_6:DECIMAL(18,6), n1_7:BOOLEAN\n"
+      "      -- TableScan[table: hive_table] -> n0_0:VARCHAR, n0_1:DOUBLE, n0_2:DECIMAL(16,6)\n",
+      planNode->toString(true, true));
+}

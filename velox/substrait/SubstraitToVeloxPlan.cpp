@@ -172,6 +172,8 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
     aggOutNames.emplace_back(substraitParser_->makeNodeName(planNodeId_, idx));
   }
 
+  bool useRollUp = aggRel.use_roll_up_aggregate();
+
   auto aggregationNode = std::make_shared<core::AggregationNode>(
       nextPlanNodeId(),
       aggStep,
@@ -180,6 +182,7 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
       aggOutNames,
       aggregates,
       ignoreNullKeys,
+      useRollUp,
       childNode);
 
   if (aggRel.has_common()) {

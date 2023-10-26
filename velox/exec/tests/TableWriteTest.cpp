@@ -87,7 +87,8 @@ static std::shared_ptr<core::AggregationNode> generateAggregationNode(
       std::vector<core::FieldAccessTypedExprPtr>{},
       aggregateNames,
       aggregates,
-      false, // ignoreNullKeys
+      false, // ignoreNullKeys,
+      false,
       source);
 }
 
@@ -2724,6 +2725,7 @@ TEST_P(AllTableWriterTest, columnStatsDataTypes) {
       aggregateNames,
       aggregates,
       false, // ignoreNullKeys
+      false,
       PlanBuilder().values({input}).planNode());
 
   auto plan = PlanBuilder()
