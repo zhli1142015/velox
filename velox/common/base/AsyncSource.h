@@ -28,6 +28,8 @@
 #include "velox/common/future/VeloxPromise.h"
 #include "velox/common/testutil/TestValue.h"
 
+DECLARE_bool(account_for_off_thread_times);
+
 namespace facebook::velox {
 
 // A future-like object that prefabricates Items on an executor and
@@ -64,7 +66,10 @@ class AsyncSource {
     }
     std::unique_ptr<Item> item;
     try {
-      CpuWallTimer timer(timing_);
+      std::optional<CpuWallTimer> timer{
+          FLAGS_account_for_off_thread_times
+              ? std::optional<CpuWallTimer>{timing_}
+              : std::nullopt};
       item = make();
     } catch (std::exception&) {
       std::lock_guard<std::mutex> l(mutex_);
