@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "velox/exec/TableScan.h"
+#include <folly/synchronization/Baton.h>
 #include <atomic>
 #include "velox/common/base/Fs.h"
 #include "velox/common/base/tests/GTestUtils.h"
@@ -1349,6 +1350,37 @@ TEST_F(TableScanTest, multipleSplits) {
     } else {
       ASSERT_EQ(stats.count("preloadedSplits"), 0);
     }
+  }
+}
+
+TEST_F(TableScanTest, preloadingSplitClose) {
+  auto filePaths = makeFilePaths(100);
+  auto vectors = makeVectors(100, 100);
+  for (int32_t i = 0; i < vectors.size(); i++) {
+    writeToFile(filePaths[i]->path, vectors[i]);
+  }
+  createDuckDbTable(vectors);
+
+  auto executors = ioExecutor_.get();
+  std::vector<folly::Baton<>> batons(executors->numThreads());
+  // Simulate a busy IO thread pool by blocking all threads.
+  for (int32_t i = 0; i < executors->numThreads(); ++i) {
+    executors->add([&batons, i]() { batons[i].wait(); });
+  }
+  ASSERT_EQ(Task::numCreatedTasks(), Task::numDeletedTasks());
+  auto task = assertQuery(tableScanNode(), filePaths, "SELECT * FROM tmp", 2);
+  auto stats = getTableScanRuntimeStats(task);
+
+  // Verify that split preloading is enabled.
+  ASSERT_GT(stats.at("preloadedSplits").sum, 1);
+
+  task.reset();
+  // Once all task references are cleared, the count of deleted tasks should
+  // promptly match the count of created tasks.
+  ASSERT_EQ(Task::numCreatedTasks(), Task::numDeletedTasks());
+  // Clean blocking items in the IO thread pool.
+  for (int i = 0; i < executors->numThreads(); ++i) {
+    batons[i].post();
   }
 }
 
