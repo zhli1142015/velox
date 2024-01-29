@@ -68,7 +68,7 @@ AbfsAccount::AbfsAccount(
       }
     }
   }
-  credKey_ = fmt::format("fs.azure.account.key.{}", accountNameWithSuffix_);
+  credKey_ = accountName_;
 }
 
 const std::string AbfsAccount::accountNameWithSuffix() const {

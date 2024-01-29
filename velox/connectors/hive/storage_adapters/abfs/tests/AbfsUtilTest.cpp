@@ -37,8 +37,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsAccount.endpointSuffix(), "core.windows.net");
   EXPECT_EQ(abfsAccount.fileSystem(), "test");
   EXPECT_EQ(abfsAccount.filePath(), "test");
-  EXPECT_EQ(
-      abfsAccount.credKey(), "fs.azure.account.key.test.dfs.core.windows.net");
+  EXPECT_EQ(abfsAccount.credKey(), "test");
   EXPECT_EQ(
       abfsAccount.connectionString("123"),
       "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=123;EndpointSuffix=core.windows.net");
@@ -53,8 +52,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(
       abfssAccount.filePath(),
       "sf_1/store_sales/ss_sold_date_sk=2450816/part-00002-a29c25f1-4638-494e-8428-a84f51dcea41.c000.snappy.parquet");
-  EXPECT_EQ(
-      abfssAccount.credKey(), "fs.azure.account.key.test.dfs.core.windows.net");
+  EXPECT_EQ(abfssAccount.credKey(), "test");
 
   // test with special characters
   auto abfssAccountWithSpecialCharacters = AbfsAccount(
@@ -70,9 +68,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(
       abfssAccountWithSpecialCharacters.filePath(),
       "main@dir/sub dir/test.txt");
-  EXPECT_EQ(
-      abfssAccountWithSpecialCharacters.credKey(),
-      "fs.azure.account.key.test.dfs.core.windows.net");
+  EXPECT_EQ(abfssAccountWithSpecialCharacters.credKey(), "test");
 
   // china cloud
   auto abfsChinaCloudAccount =
@@ -85,9 +81,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsChinaCloudAccount.endpointSuffix(), "core.chinacloudapi.cn");
   EXPECT_EQ(abfsChinaCloudAccount.fileSystem(), "test");
   EXPECT_EQ(abfsChinaCloudAccount.filePath(), "test");
-  EXPECT_EQ(
-      abfsChinaCloudAccount.credKey(),
-      "fs.azure.account.key.test.dfs.core.chinacloudapi.cn");
+  EXPECT_EQ(abfsChinaCloudAccount.credKey(), "test");
 
   // us gov cloud
   auto abfsUsGovCloudAccount =
@@ -100,9 +94,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsUsGovCloudAccount.endpointSuffix(), "core.usgovcloudapi.net");
   EXPECT_EQ(abfsUsGovCloudAccount.fileSystem(), "test");
   EXPECT_EQ(abfsUsGovCloudAccount.filePath(), "test");
-  EXPECT_EQ(
-      abfsUsGovCloudAccount.credKey(),
-      "fs.azure.account.key.test.dfs.core.usgovcloudapi.net");
+  EXPECT_EQ(abfsUsGovCloudAccount.credKey(), "test");
 
   // germany cloud
   auto abfsGermanyCloudAccount =
@@ -115,9 +107,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsGermanyCloudAccount.endpointSuffix(), "core.cloudapi.de");
   EXPECT_EQ(abfsGermanyCloudAccount.fileSystem(), "test");
   EXPECT_EQ(abfsGermanyCloudAccount.filePath(), "test");
-  EXPECT_EQ(
-      abfsGermanyCloudAccount.credKey(),
-      "fs.azure.account.key.test.dfs.core.cloudapi.de");
+  EXPECT_EQ(abfsGermanyCloudAccount.credKey(), "test");
 
   // Fabric
   auto abfsDXTAccount =
@@ -130,9 +120,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsDXTAccount.endpointSuffix(), "fabric.microsoft.com");
   EXPECT_EQ(abfsDXTAccount.fileSystem(), "test");
   EXPECT_EQ(abfsDXTAccount.filePath(), "testPath");
-  EXPECT_EQ(
-      abfsDXTAccount.credKey(),
-      "fs.azure.account.key.dxt-onelake.dfs.fabric.microsoft.com");
+  EXPECT_EQ(abfsDXTAccount.credKey(), "dxt-onelake");
 
   auto abfsMSITAccount = AbfsAccount(
       "abfss://test@msit-onelake.blob.pbidedicated.windows.net/testPath");
@@ -144,9 +132,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsMSITAccount.endpointSuffix(), "pbidedicated.windows.net");
   EXPECT_EQ(abfsMSITAccount.fileSystem(), "test");
   EXPECT_EQ(abfsMSITAccount.filePath(), "testPath");
-  EXPECT_EQ(
-      abfsMSITAccount.credKey(),
-      "fs.azure.account.key.msit-onelake.blob.pbidedicated.windows.net");
+  EXPECT_EQ(abfsMSITAccount.credKey(), "msit-onelake");
 
 abfss
     : // velox@onelake-int-edog.dfs.pbidedicated.windows-int.net/velox.Lakehouse/Files/tpcds/queries/$queryName.sql")
@@ -161,9 +147,7 @@ abfss
   EXPECT_EQ(abfsEDogAccount.endpointSuffix(), "pbidedicated.windows-int.net");
   EXPECT_EQ(abfsEDogAccount.fileSystem(), "velox");
   EXPECT_EQ(abfsEDogAccount.filePath(), "velox.Lakehouse/Files/testPath");
-  EXPECT_EQ(
-      abfsEDogAccount.credKey(),
-      "fs.azure.account.key.onelake-int-edog.dfs.pbidedicated.windows-int.net");
+  EXPECT_EQ(abfsEDogAccount.credKey(), "onelake-int-edog");
 }
 
 TEST(AbfsUtilsTest, CustomEndpoint) {
@@ -186,6 +170,5 @@ TEST(AbfsUtilsTest, CustomEndpoint) {
   EXPECT_EQ(abfsAccount.endpointSuffix(), "foo.bar.com");
   EXPECT_EQ(abfsAccount.fileSystem(), "testc");
   EXPECT_EQ(abfsAccount.filePath(), "test");
-  EXPECT_EQ(
-      abfsAccount.credKey(), "fs.azure.account.key.testa.dfs.foo.bar.com");
+  EXPECT_EQ(abfsAccount.credKey(), "testa");
 }

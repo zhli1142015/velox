@@ -77,7 +77,7 @@ class VegasFileSystemTest : public testing::Test {
     azuriteServer_->addFile(tempFile->path, filePath);
     auto connectionStringProvider =
         std::make_shared<ConnectionStringBlobClientProvider>(
-            facebook::velox::filesystems::test::AzuriteSparkConfig,
+            facebook::velox::filesystems::test::AzuriteAccountName,
             azuriteServer_->connectionStr());
     filesystems::abfs::BlobClientProviderFactory::registerProvider(
         std::static_pointer_cast<filesystems::abfs::BlobClientProvider>(
