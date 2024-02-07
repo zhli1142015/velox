@@ -47,6 +47,8 @@ class BlobClientProviderFactory {
    */
   static void registerProvider(std::shared_ptr<BlobClientProvider> provider);
 
+  static bool providerRegistered(std::string account);
+
   static std::shared_ptr<BlobClient> getBlobClient(
       std::string path,
       AbfsAccount abfsAccount);

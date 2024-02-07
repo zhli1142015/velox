@@ -30,6 +30,11 @@ void BlobClientProviderFactory::registerProvider(
             << provider->getAccountIdentifier();
 }
 
+bool BlobClientProviderFactory::providerRegistered(std::string account) {
+  auto it = providers.find(account);
+  return it != providers.end();
+}
+
 std::shared_ptr<BlobClient> BlobClientProviderFactory::getBlobClient(
     std::string path,
     AbfsAccount abfsAccount) {
