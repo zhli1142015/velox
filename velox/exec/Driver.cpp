@@ -657,9 +657,9 @@ StopReason Driver::runInternal(
                   kOpMethodIsFinished);
               if (finished) {
                 auto timer = createDeltaCpuWallTimer(
-                    [op, this](const CpuWallTiming& timing) {
-                      processLazyTiming(*op, timing);
-                      op->stats().wlock()->finishTiming.add(timing);
+                    [nextOp, this](const CpuWallTiming& timing) {
+                      processLazyTiming(*nextOp, timing);
+                      nextOp->stats().wlock()->finishTiming.add(timing);
                     });
                 TestValue::adjust(
                     "facebook::velox::exec::Driver::runInternal::noMoreInput",
