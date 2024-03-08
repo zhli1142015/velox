@@ -26,6 +26,14 @@ AbfsAccount::AbfsAccount(
     file = std::string(path.substr(8));
     scheme_ = kAbfssScheme.substr(0, 5);
     containerBegin = 8;
+  } else if (path.find(kWasbsScheme) == 0) {
+    file = std::string(path.substr(8));
+    scheme_ = kWasbsScheme.substr(0, 5);
+    containerBegin = 8;
+  } else if (path.find(kWasbScheme) == 0) {
+    file = std::string(path.substr(7));
+    scheme_ = kWasbScheme.substr(0, 4);
+    containerBegin = 7;
   } else {
     file = std::string(path.substr(7));
     scheme_ = kAbfsScheme.substr(0, 4);

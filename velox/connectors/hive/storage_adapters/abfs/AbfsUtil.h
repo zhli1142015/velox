@@ -26,10 +26,13 @@ namespace facebook::velox::filesystems::abfs {
 namespace {
 constexpr std::string_view kAbfsScheme{"abfs://"};
 constexpr std::string_view kAbfssScheme{"abfss://"};
+constexpr std::string_view kWasbScheme{"wasb://"};
+constexpr std::string_view kWasbsScheme{"wasbs://"};
 } // namespace
 
 inline bool isAbfsFile(const std::string_view filename) {
-  return filename.find(kAbfsScheme) == 0 || filename.find(kAbfssScheme) == 0;
+  return filename.find(kAbfsScheme) == 0 || filename.find(kAbfssScheme) == 0 ||
+      filename.find(kWasbScheme) == 0 || filename.find(kWasbsScheme) == 0;
 }
 
 static const std::string kDefaultAccountIdentifier = "default";

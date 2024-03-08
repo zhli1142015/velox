@@ -184,6 +184,40 @@ void readData(ReadFile* readFile) {
       "ccccc");
 }
 
+void writeData(
+    WriteFile* writeFile,
+    std::shared_ptr<filesystems::test::MockBlobStorageFileClient> mockClient) {
+  EXPECT_EQ(writeFile->size(), 0);
+  std::string dataContent = "";
+  uint64_t totalSize = 0;
+  std::string randomData =
+      AbfsFileSystemTest::generateRandomData(1 * 1024 * 1024);
+  for (int i = 0; i < 8; ++i) {
+    writeFile->append(randomData);
+    dataContent += randomData;
+  }
+  totalSize = randomData.size() * 8;
+  writeFile->flush();
+  EXPECT_EQ(writeFile->size(), totalSize);
+
+  randomData = AbfsFileSystemTest::generateRandomData(9 * 1024 * 1024);
+  dataContent += randomData;
+  writeFile->append(randomData);
+  totalSize += randomData.size();
+  randomData = AbfsFileSystemTest::generateRandomData(2 * 1024 * 1024);
+  dataContent += randomData;
+  totalSize += randomData.size();
+  writeFile->append(randomData);
+  writeFile->flush();
+  EXPECT_EQ(writeFile->size(), totalSize);
+  writeFile->flush();
+  writeFile->close();
+  VELOX_ASSERT_THROW(writeFile->append("abc"), "File is not open");
+  std::string fileContent = mockClient->readContent();
+  ASSERT_EQ(fileContent.size(), dataContent.size());
+  ASSERT_EQ(fileContent, dataContent);
+}
+
 TEST_F(AbfsFileSystemTest, readFile) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig(
       {{facebook::velox::filesystems::test::AzuriteSparkConfig,
@@ -214,6 +248,16 @@ TEST_F(AbfsFileSystemTest, openFileForReadWithInvalidOptions) {
   VELOX_ASSERT_THROW(
       abfs.openFileForRead(fullFilePath, options),
       "File size must be non-negative");
+}
+
+TEST_F(AbfsFileSystemTest, readWasbFile) {
+  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
+      {{facebook::velox::filesystems::test::AzuriteSparkConfig,
+        azuriteServer->connectionStr()}});
+  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
+  auto readFile =
+      abfs->openFileForRead(filesystems::test::AzuriteABFSEndpoint + filePath);
+  readData(readFile.get());
 }
 
 TEST_F(AbfsFileSystemTest, multipleThreadsWithReadFile) {
@@ -258,44 +302,26 @@ TEST_F(AbfsFileSystemTest, missingFile) {
       abfs.openFileForRead(abfsFile), error_code::kFileNotFound, "404");
 }
 
-TEST_F(AbfsFileSystemTest, OpenFileForWriteTest) {
+TEST_F(AbfsFileSystemTest, OpenABFSFileForWriteTest) {
   const std::string abfsFile =
       filesystems::test::AzuriteABFSEndpoint + "writetest.txt";
   auto mockClient =
       std::make_shared<filesystems::test::MockBlobStorageFileClient>(
           filesystems::test::MockBlobStorageFileClient());
   auto abfsWriteFile = openFileForWrite(abfsFile, mockClient);
-  EXPECT_EQ(abfsWriteFile->size(), 0);
-  std::string dataContent = "";
-  uint64_t totalSize = 0;
-  std::string randomData =
-      AbfsFileSystemTest::generateRandomData(1 * 1024 * 1024);
-  for (int i = 0; i < 8; ++i) {
-    abfsWriteFile->append(randomData);
-    dataContent += randomData;
-  }
-  totalSize = randomData.size() * 8;
-  abfsWriteFile->flush();
-  EXPECT_EQ(abfsWriteFile->size(), totalSize);
-
-  randomData = AbfsFileSystemTest::generateRandomData(9 * 1024 * 1024);
-  dataContent += randomData;
-  abfsWriteFile->append(randomData);
-  totalSize += randomData.size();
-  randomData = AbfsFileSystemTest::generateRandomData(2 * 1024 * 1024);
-  dataContent += randomData;
-  totalSize += randomData.size();
-  abfsWriteFile->append(randomData);
-  abfsWriteFile->flush();
-  EXPECT_EQ(abfsWriteFile->size(), totalSize);
-  abfsWriteFile->flush();
-  abfsWriteFile->close();
-  VELOX_ASSERT_THROW(abfsWriteFile->append("abc"), "File is not open");
+  writeData(abfsWriteFile.get(), mockClient);
   VELOX_ASSERT_THROW(
       openFileForWrite(abfsFile, mockClient), "File already exists");
-  std::string fileContent = mockClient->readContent();
-  ASSERT_EQ(fileContent.size(), dataContent.size());
-  ASSERT_EQ(fileContent, dataContent);
+}
+
+TEST_F(AbfsFileSystemTest, OpenWASBFileForWriteTest) {
+  const std::string wasbFile =
+      filesystems::test::AzuriteWASBEndpoint + "writetestw.txt";
+  auto mockClient =
+      std::make_shared<filesystems::test::MockBlobStorageFileClient>(
+          filesystems::test::MockBlobStorageFileClient());
+  auto wasbWriteFile = openFileForWrite(wasbFile, mockClient);
+  writeData(wasbWriteFile.get(), mockClient);
 }
 
 TEST_F(AbfsFileSystemTest, renameNotImplemented) {

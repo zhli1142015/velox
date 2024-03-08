@@ -28,6 +28,8 @@ TEST(AbfsUtilsTest, isAbfsFile) {
   EXPECT_FALSE(isAbfsFile("abfss:/"));
   EXPECT_TRUE(isAbfsFile("abfs://test@test.dfs.core.windows.net/test"));
   EXPECT_TRUE(isAbfsFile("abfss://test@test.dfs.core.windows.net/test"));
+  EXPECT_TRUE(isAbfsFile("wasb://test@test.bolb.core.windows.net/test"));
+  EXPECT_TRUE(isAbfsFile("wasbs://test@test.blob.core.windows.net/test"));
 }
 
 TEST(AbfsUtilsTest, abfsAccount) {
@@ -150,6 +152,29 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsEDogAccount.fileSystem(), "velox");
   EXPECT_EQ(abfsEDogAccount.filePath(), "velox.Lakehouse/Files/testPath");
   EXPECT_EQ(abfsEDogAccount.credKey(), "onelake-int-edog");
+
+  auto wasbAccount = AbfsAccount("wasb://test@test.blob.core.windows.net/test");
+  EXPECT_EQ(wasbAccount.accountNameWithSuffix(), "test.blob.core.windows.net");
+  EXPECT_EQ(wasbAccount.accountName(), "test");
+  EXPECT_EQ(wasbAccount.endpointSuffix(), "core.windows.net");
+  EXPECT_EQ(wasbAccount.fileSystem(), "test");
+  EXPECT_EQ(wasbAccount.filePath(), "test");
+  EXPECT_EQ(wasbAccount.credKey(), "test");
+  EXPECT_EQ(
+      wasbAccount.connectionString("123"),
+      "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=123;EndpointSuffix=core.windows.net");
+
+  auto wasbsAccount =
+      AbfsAccount("wasbs://test@test.blob.core.windows.net/test");
+  EXPECT_EQ(wasbsAccount.accountNameWithSuffix(), "test.blob.core.windows.net");
+  EXPECT_EQ(wasbsAccount.accountName(), "test");
+  EXPECT_EQ(wasbsAccount.endpointSuffix(), "core.windows.net");
+  EXPECT_EQ(wasbsAccount.fileSystem(), "test");
+  EXPECT_EQ(wasbsAccount.filePath(), "test");
+  EXPECT_EQ(wasbsAccount.credKey(), "test");
+  EXPECT_EQ(
+      wasbsAccount.connectionString("123"),
+      "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=123;EndpointSuffix=core.windows.net");
 }
 
 TEST(AbfsUtilsTest, CustomEndpoint) {
@@ -173,4 +198,14 @@ TEST(AbfsUtilsTest, CustomEndpoint) {
   EXPECT_EQ(abfsAccount.fileSystem(), "testc");
   EXPECT_EQ(abfsAccount.filePath(), "test");
   EXPECT_EQ(abfsAccount.credKey(), "testa");
+
+  auto wasbAccount = AbfsAccount(
+      "wasb://testc@testa.blob.core.window.net/test", "foo.bar.com");
+  EXPECT_EQ(wasbAccount.scheme(), "wasb");
+  EXPECT_EQ(wasbAccount.accountNameWithSuffix(), "testa.blob.foo.bar.com");
+  EXPECT_EQ(wasbAccount.accountName(), "testa");
+  EXPECT_EQ(wasbAccount.endpointSuffix(), "foo.bar.com");
+  EXPECT_EQ(wasbAccount.fileSystem(), "testc");
+  EXPECT_EQ(wasbAccount.filePath(), "test");
+  EXPECT_EQ(wasbAccount.credKey(), "testa");
 }

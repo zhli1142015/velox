@@ -41,6 +41,10 @@ static const std::string AzuriteABFSEndpoint = fmt::format(
     "abfs://{}@{}.dfs.core.windows.net/",
     AzuriteContainerName,
     AzuriteAccountName);
+static const std::string AzuriteWASBEndpoint = fmt::format(
+    "wasb://{}@{}.blob.core.windows.net/",
+    AzuriteContainerName,
+    AzuriteAccountName);
 static const std::string AzuriteInvalidAccountKey{""};
 static const std::string AzuriteInvalidConnectionString = fmt::format(
     "DefaultEndpointsProtocol=http;AccountName={};AccountKey={};BlobEndpoint=http://127.0.0.1:10000/{};",
