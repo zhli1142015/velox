@@ -56,7 +56,7 @@ TEST(AbfsUtilsTest, abfsAccount) {
 
   // test with special characters
   auto abfssAccountWithSpecialCharacters = AbfsAccount(
-      "abfss://test@test.dfs.core.windows.net/main@dir/sub dir/test.txt");
+      "abfss://test@test.dfs.core.windows.net/main@dir/brand#51/sub dir/test.txt");
   EXPECT_EQ(abfssAccountWithSpecialCharacters.scheme(), "abfss");
   EXPECT_EQ(
       abfssAccountWithSpecialCharacters.accountNameWithSuffix(),
@@ -67,9 +67,14 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfssAccountWithSpecialCharacters.fileSystem(), "test");
   EXPECT_EQ(
       abfssAccountWithSpecialCharacters.filePath(),
-      "main@dir/sub dir/test.txt");
+      "main@dir/brand#51/sub dir/test.txt");
   EXPECT_EQ(abfssAccountWithSpecialCharacters.credKey(), "test");
-
+  EXPECT_EQ(
+      abfssAccountWithSpecialCharacters.blobURL(true),
+      "https://test.blob.core.windows.net/test/main@dir/brand%2351/sub%20dir/test.txt");
+  EXPECT_EQ(
+      abfssAccountWithSpecialCharacters.blobURL(false),
+      "http://test.blob.core.windows.net/test/main@dir/brand%2351/sub%20dir/test.txt");
   // china cloud
   auto abfsChinaCloudAccount =
       AbfsAccount("abfs://test@test.dfs.core.chinacloudapi.cn/test");
@@ -133,9 +138,6 @@ TEST(AbfsUtilsTest, abfsAccount) {
   EXPECT_EQ(abfsMSITAccount.fileSystem(), "test");
   EXPECT_EQ(abfsMSITAccount.filePath(), "testPath");
   EXPECT_EQ(abfsMSITAccount.credKey(), "msit-onelake");
-
-abfss
-    : // velox@onelake-int-edog.dfs.pbidedicated.windows-int.net/velox.Lakehouse/Files/tpcds/queries/$queryName.sql")
 
   auto abfsEDogAccount = AbfsAccount(
       "abfss://velox@onelake-int-edog.dfs.pbidedicated.windows-int.net/velox.Lakehouse/Files/testPath");

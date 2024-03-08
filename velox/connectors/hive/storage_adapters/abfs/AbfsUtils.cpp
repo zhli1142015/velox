@@ -114,12 +114,10 @@ const std::string AbfsAccount::blobURL(bool useHttps) const {
     protocol = "http";
   }
 
-  return fmt::format(
-      "{}://{}.blob.{}/{}/{}",
-      protocol,
-      accountName(),
-      endpointSuffix(),
-      fileSystem(),
-      filePath());
+  auto blobUrl = Azure::Core::Url(std::move(fmt::format(
+      "{}://{}.blob.{}", protocol, accountName(), endpointSuffix())));
+  blobUrl.AppendPath(Azure::Storage::_internal::UrlEncodePath(fileSystem()));
+  blobUrl.AppendPath(Azure::Storage::_internal::UrlEncodePath(filePath()));
+  return blobUrl.GetAbsoluteUrl();
 }
 } // namespace facebook::velox::filesystems::abfs

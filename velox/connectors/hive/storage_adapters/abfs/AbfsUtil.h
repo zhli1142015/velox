@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include <azure/storage/blobs/blob_client.hpp>
 #include <azure/storage/common/storage_exception.hpp>
 #include "velox/common/file/File.h"
 
