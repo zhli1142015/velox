@@ -282,6 +282,7 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
     auto rows = folly::Range<char**>(&row, 1);
     freeVariableWidthFields(rows);
     freeAggregates(rows);
+    freeDuplicateRowVectors(rows);
   } else if (rowSizeOffset_ != 0 && checkFree_) {
     // zero out string views so that clear() will not hit uninited data. The
     // fastest way is to set the whole row to 0.
@@ -303,6 +304,7 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
 void RowContainer::eraseRows(folly::Range<char**> rows) {
   freeVariableWidthFields(rows);
   freeAggregates(rows);
+  freeDuplicateRowVectors(rows);
   numRows_ -= rows.size();
   for (auto* row : rows) {
     VELOX_CHECK(!bits::isBitSet(row, freeFlagOffset_), "Double free of row");
@@ -354,6 +356,19 @@ int32_t RowContainer::findRows(folly::Range<char**> rows, char** result) {
     }
   }
   return numRows;
+}
+
+void RowContainer::appendNextRow(
+    char* existing,
+    char* nextRow,
+    bool isParallelBuild) {
+  DuplicateRowVector*& nextRowArrayPtr = getNextRowVector(existing);
+  if (!nextRowArrayPtr) {
+    nextRowArrayPtr = new DuplicateRowVector(SyncStlAllocator<char*>(
+        stringAllocator_.get(), isParallelBuild ? nextRowsMutex_ : nullptr));
+    hasDuplicateRows_ = true;
+  }
+  nextRowArrayPtr->emplace_back(nextRow);
 }
 
 void RowContainer::freeVariableWidthFields(folly::Range<char**> rows) {
