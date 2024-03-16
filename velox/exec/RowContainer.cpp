@@ -297,6 +297,9 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
   if (rowSizeOffset_) {
     variableRowSize(row) = 0;
   }
+  if (nextOffset_) {
+    getNextRowVector(row) = nullptr;
+  }
   bits::clearBit(row, freeFlagOffset_);
   return row;
 }

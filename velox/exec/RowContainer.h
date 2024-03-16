@@ -606,8 +606,8 @@ class RowContainer {
 
   void appendNextRow(char* existing, char* nextRow, bool isParallelBuild);
 
-  DuplicateRowVector*& getNextRowVector(char* existing) const {
-    return *reinterpret_cast<DuplicateRowVector**>(existing + nextOffset_);
+  DuplicateRowVector*& getNextRowVector(char* row) const {
+    return *reinterpret_cast<DuplicateRowVector**>(row + nextOffset_);
   }
 
   /// Hashes the values of 'columnIndex' for 'rows'.  If 'mix' is true, mixes
