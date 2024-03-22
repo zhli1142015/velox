@@ -373,6 +373,7 @@ class HashTableListJoinResultBenchmark : public VectorTestBase {
     {
       SelectivityTimer timer(buildClocks, 0);
       topTable_->prepareJoinTable(std::move(otherTables), executor_.get());
+      std::cout << "memmory alloc from StlAllocator:" << HashStringAllocator::numAllocStl << " real memory allocation:" << HashStringAllocator::numAlloc << std::endl;
     }
     buildTime_ = buildClocks.timeToDropValue();
   }
@@ -476,22 +477,12 @@ int main(int argc, char** argv) {
   std::vector<TypePtr> buildTypes = {onlyKeyType};
 
   std::vector<BaseHashTable::HashMode> hashModes = {
-      BaseHashTable::HashMode::kArray,
-      BaseHashTable::HashMode::kNormalizedKey,
-      BaseHashTable::HashMode::kHash};
+      BaseHashTable::HashMode::kArray};
 
   std::vector<std::vector<std::pair<int32_t, int32_t>>> keyRepeatDists = {
       // 20% of the rows are repeated only once, and 80% of the rows are not
       // repeated.
-      {{20, 1}, {80, 0}},
-      {{20, 5}, {80, 0}},
-      {{20, 10}, {80, 0}},
-      {{20, 20}, {80, 0}},
-      {{20, 50}, {80, 0}},
-      {{10, 5}, {10, 1}, {80, 0}},
-      {{10, 10}, {10, 5}, {10, 1}, {70, 0}},
-      {{10, 20}, {10, 10}, {10, 5}, {10, 1}, {60, 0}},
-      {{10, 50}, {10, 20}, {10, 10}, {10, 5}, {10, 1}, {50, 0}}};
+      {{20, 50}, {80, 0}}};
   std::vector<HashTableBenchmarkParams> params;
   for (auto mode : hashModes) {
     for (auto type : buildTypes) {

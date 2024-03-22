@@ -201,16 +201,16 @@ class HashStringAllocator : public StreamArena {
 
   /// Allocates 'size' contiguous bytes preceded by a Header. Returns the
   /// address of Header.
-  Header* allocate(int32_t size) {
+  Header* allocate(int32_t size, bool track = false) {
     VELOX_CHECK_NULL(
         currentHeader_, "Do not call allocate() when a write is in progress");
-    return allocate(std::max(size, kMinAlloc), true);
+    return allocate(std::max(size, kMinAlloc), true, track);
   }
 
   /// Allocates a block that is independently freeable but is freed on
   /// destruction of 'this'. The block has no header and must be freed by
   /// freeToPool() if to be freed before destruction of 'this'.
-  void* allocateFromPool(size_t size);
+  void* allocateFromPool(size_t size, bool track = false);
 
   /// Frees a block allocated with allocateFromPool(). The pointer and size must
   /// match.
@@ -338,6 +338,9 @@ class HashStringAllocator : public StreamArena {
 
   std::string toString() const;
 
+  static std::atomic_int64_t numAlloc;
+  static std::atomic_int64_t numAllocStl;
+
  private:
   static constexpr int32_t kUnitSize = 16 * memory::AllocationTraits::kPageSize;
   static constexpr int32_t kMinContiguous = 48;
@@ -358,7 +361,7 @@ class HashStringAllocator : public StreamArena {
 
   // Allocates a block of specified size. If exactSize is false, the block may
   // be smaller or larger. Checks free list before allocating new memory.
-  Header* allocate(int32_t size, bool exactSize);
+  Header* allocate(int32_t size, bool exactSize, bool track);
 
   // Allocates memory from free list. Returns nullptr if no memory in free list,
   // otherwise returns a header of a free block of some size. if 'mustHaveSize'
@@ -478,11 +481,12 @@ struct StlAllocator {
   }
 
   T* allocate(std::size_t n) {
+    HashStringAllocator::numAllocStl++;
     if (n * sizeof(T) > HashStringAllocator::kMaxAlloc) {
-      return reinterpret_cast<T*>(allocator_->allocateFromPool(n * sizeof(T)));
+      return reinterpret_cast<T*>(allocator_->allocateFromPool(n * sizeof(T), true));
     }
     return reinterpret_cast<T*>(
-        allocator_->allocate(checkedMultiply(n, sizeof(T)))->begin());
+        allocator_->allocate(checkedMultiply(n, sizeof(T)), true)->begin());
   }
 
   void deallocate(T* p, std::size_t n) noexcept {

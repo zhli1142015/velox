@@ -19,6 +19,9 @@
 
 namespace facebook::velox {
 
+std::atomic_int64_t HashStringAllocator::numAlloc{0};
+std::atomic_int64_t HashStringAllocator::numAllocStl{0};
+
 namespace {
 // Returns the size of the previous free block. The size is stored in the last 4
 // bytes of the free block, e.g. 4 bytes just before the current header.
@@ -99,7 +102,10 @@ void HashStringAllocator::clear() {
   pool_.clear();
 }
 
-void* HashStringAllocator::allocateFromPool(size_t size) {
+void* HashStringAllocator::allocateFromPool(size_t size, bool track) {
+  if (track) {
+    numAlloc++;
+  }
   auto* ptr = pool()->allocate(size);
   cumulativeBytes_ += size;
   allocationsFromPool_[ptr] = size;
@@ -152,7 +158,7 @@ HashStringAllocator::Position HashStringAllocator::newWrite(
       currentHeader_,
       "Do not call newWrite before finishing the previous write to "
       "HashStringAllocator");
-  currentHeader_ = allocate(preferredSize, false);
+  currentHeader_ = allocate(preferredSize, false, false);
 
   stream.setRange(
       ByteRange{
@@ -269,7 +275,7 @@ void HashStringAllocator::newRange(
   VELOX_CHECK_NOT_NULL(
       currentHeader_,
       "Must have called newWrite or extendWrite before newRange");
-  auto* newHeader = allocate(bytes, contiguous);
+  auto* newHeader = allocate(bytes, contiguous, false);
 
   // Copy the last word of the current range to the head of new range, and then
   // used the space to store the new range pointer.
@@ -349,17 +355,21 @@ void HashStringAllocator::removeFromFreeList(Header* header) {
 
 HashStringAllocator::Header* HashStringAllocator::allocate(
     int32_t size,
-    bool exactSize) {
+    bool exactSize,
+    bool track) {
   if (size > kMaxAlloc && exactSize) {
     VELOX_CHECK_LE(size, Header::kSizeMask);
     auto* header =
-        reinterpret_cast<Header*>(allocateFromPool(size + sizeof(Header)));
+        reinterpret_cast<Header*>(allocateFromPool(size + sizeof(Header), track));
     new (header) Header(size);
     return header;
   }
 
   auto* header = allocateFromFreeLists(size, exactSize, exactSize);
   if (header == nullptr) {
+    if (track) {
+      numAlloc++;
+    }
     newSlab();
     header = allocateFromFreeLists(size, exactSize, exactSize);
     VELOX_CHECK_NOT_NULL(header);
