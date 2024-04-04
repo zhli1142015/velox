@@ -406,8 +406,8 @@ bool VegasJournalV1::getWriteLock() {
 }
 
 uint64_t VegasJournalV1::cacheWrite(
-    std::vector<uint64_t> lenVec,
-    std::vector<char*> bufVec) const {
+    std::vector<uint64_t>& lenVec,
+    std::vector<char*>& bufVec) const {
   std::ofstream journalFile(
       journalFileName(), std::ios_base::app | std::ios_base::binary);
   uint64_t oldOffset = journalFile.tellp();
@@ -468,7 +468,7 @@ bool VegasJournalV1::initialize(
     return false;
   }
 
-  if (eTagFromCache_ != "" && eTagFromCache_ != eTagRemote_) {
+  if (!eTagFromCache_.empty() && eTagFromCache_ != eTagRemote_) {
     LOG(INFO) << "loadMap Mismatched eTag " << eTagFromCache_
               << " vs eTagRemote " << eTagRemote_ << " " << uri_;
     std::string msg = "__id=vfs.cache.miss\n";

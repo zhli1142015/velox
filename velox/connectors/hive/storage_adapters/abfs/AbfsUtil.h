@@ -48,11 +48,15 @@ static const std::unordered_set<std::string> kValidEndpoints = {
     "data.microsoft.com",
     "fabric.microsoft.com"};
 
+const std::string kFileVersionSuffix = "&etag=";
+const std::string kFileFullLength = "&flength=";
+
 class AbfsAccount {
  public:
   explicit AbfsAccount(
-      const std::string path,
-      const std::string abfsEndpoint = "");
+      const std::string& path,
+      bool passEtagLength = true,
+      const std::string& abfsEndpoint = "");
 
   const std::string accountNameWithSuffix() const;
 
@@ -76,6 +80,12 @@ class AbfsAccount {
 
   const std::string blobURL(bool useHttps) const;
 
+  const std::string etag() const;
+
+  const std::string url() const;
+
+  const int64_t length() const;
+
  private:
   std::string scheme_;
   std::string accountName_;
@@ -83,10 +93,13 @@ class AbfsAccount {
   std::string accountNameWithSuffix_;
   std::string fileSystem_;
   std::string filePath_;
+  std::string url_;
   std::string path_;
   std::string credKey_;
   std::string containerName_;
   std::string blobName_;
+  std::string eTag_{""};
+  int64_t length_{-1};
 };
 
 inline const std::string throwStorageExceptionWithOperationDetails(

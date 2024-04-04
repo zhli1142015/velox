@@ -32,6 +32,8 @@ struct HiveIcebergSplit : public connector::hive::HiveConnectorSplit {
       dwio::common::FileFormat _fileFormat,
       uint64_t _start = 0,
       uint64_t _length = std::numeric_limits<uint64_t>::max(),
+      uint64_t _fileLength = std::numeric_limits<uint64_t>::max(),
+      uint64_t _modificationTime = std::numeric_limits<uint64_t>::max(),
       const std::unordered_map<std::string, std::optional<std::string>>&
           _partitionKeys = {},
       std::optional<int32_t> _tableBucketNumber = std::nullopt,
@@ -46,6 +48,8 @@ struct HiveIcebergSplit : public connector::hive::HiveConnectorSplit {
       dwio::common::FileFormat _fileFormat,
       uint64_t _start = 0,
       uint64_t _length = std::numeric_limits<uint64_t>::max(),
+      uint64_t _fileLength = std::numeric_limits<uint64_t>::max(),
+      uint64_t _modificationTime = std::numeric_limits<uint64_t>::max(),
       const std::unordered_map<std::string, std::optional<std::string>>&
           _partitionKeys = {},
       std::optional<int32_t> _tableBucketNumber = std::nullopt,

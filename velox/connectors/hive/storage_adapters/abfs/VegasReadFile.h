@@ -29,6 +29,7 @@ class VegasReadFile final : public ReadFile {
       const int32_t loadQuantum,
       const std::shared_ptr<folly::Executor> ioExecutor,
       const std::string abfsEndpoint,
+      const bool passEtagLength,
       std::shared_ptr<vegas::VegasCacheConfig> vegasConfig);
 
   ~VegasReadFile();

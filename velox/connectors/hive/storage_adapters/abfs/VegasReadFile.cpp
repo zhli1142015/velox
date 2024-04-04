@@ -23,12 +23,14 @@ VegasReadFile::VegasReadFile(
     const int32_t loadQuantum,
     const std::shared_ptr<folly::Executor> ioExecutor,
     const std::string abfsEndpoint,
+    const bool passEtagLength,
     std::shared_ptr<vegas::VegasCacheConfig> vegasConfig)
     : readFile_(std::make_unique<AbfsReadFile>(
           path,
           loadQuantum,
           ioExecutor,
-          abfsEndpoint)),
+          abfsEndpoint,
+          passEtagLength)),
       vegasConfig_(vegasConfig) {}
 
 VegasReadFile::~VegasReadFile() {

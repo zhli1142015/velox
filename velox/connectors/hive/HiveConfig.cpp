@@ -234,6 +234,10 @@ bool HiveConfig::s3UseProxyFromEnv() const {
   return config_->get<bool>(kS3UseProxyFromEnv, false);
 }
 
+bool HiveConfig::passEtagLength() const {
+  return config_->get<bool>(kPassEtagLength, false);
+}
+
 uint8_t HiveConfig::parquetWriteTimestampUnit(const Config* session) const {
   const auto unit = session->get<uint8_t>(
       kParquetWriteTimestampUnitSession,

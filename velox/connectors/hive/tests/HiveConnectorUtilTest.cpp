@@ -74,6 +74,8 @@ TEST_F(HiveConnectorUtilTest, configureReaderOptions) {
         fileFormat,
         0UL,
         std::numeric_limits<uint64_t>::max(),
+        std::numeric_limits<uint64_t>::max(),
+        std::numeric_limits<uint64_t>::max(),
         partitionKeys,
         std::nullopt,
         customSplitInfo,

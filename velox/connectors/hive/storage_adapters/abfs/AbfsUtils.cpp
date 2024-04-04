@@ -18,8 +18,9 @@
 
 namespace facebook::velox::filesystems::abfs {
 AbfsAccount::AbfsAccount(
-    const std::string path,
-    const std::string abfsEndpoint) {
+    const std::string& path,
+    bool passEtagLength,
+    const std::string& abfsEndpoint) {
   auto file = std::string("");
   auto containerBegin = 0;
   if (path.find(kAbfssScheme) == 0) {
@@ -44,6 +45,40 @@ AbfsAccount::AbfsAccount(
   fileSystem_ = std::string(file.substr(0, firstAt));
   auto firstSep = file.find_first_of("/");
   filePath_ = std::string(file.substr(firstSep + 1));
+
+  if (passEtagLength) {
+    size_t kFileVersionPos = file.rfind(kFileVersionSuffix);
+    if (kFileVersionPos != std::string::npos) {
+      VELOX_CHECK_GT(kFileVersionPos, firstSep);
+      size_t filePathEnd = kFileVersionPos;
+      kFileVersionPos += kFileVersionSuffix.length();
+      size_t kFileLengthPos = file.find(kFileFullLength, kFileVersionPos);
+
+      if (kFileLengthPos != std::string::npos) {
+        VELOX_CHECK_GT(filePathEnd, firstSep);
+        filePath_ =
+            std::string(file.substr(firstSep + 1, filePathEnd - firstSep - 1));
+
+        VELOX_CHECK_GE(kFileLengthPos, kFileVersionPos);
+        eTag_ = file.substr(kFileVersionPos, kFileLengthPos - kFileVersionPos);
+
+        auto lengthString =
+            file.substr(kFileLengthPos + kFileFullLength.length());
+
+        if (std::all_of(lengthString.begin(), lengthString.end(), ::isdigit)) {
+          try {
+            length_ = std::stoull(lengthString);
+          } catch (const std::exception& e) {
+            length_ = -1;
+            LOG(WARNING) << "Failed to parse file length from " << path
+                         << ". Error: " << e.what();
+          }
+        } else {
+          LOG(WARNING) << "The length is not a valid number " << path;
+        }
+      }
+    }
+  }
 
   accountNameWithSuffix_ = file.substr(firstAt + 1, firstSep - firstAt - 1);
   auto firstDot = accountNameWithSuffix_.find_first_of(".");
@@ -76,6 +111,8 @@ AbfsAccount::AbfsAccount(
       }
     }
   }
+  url_ = fmt::format(
+      "{}://{}@{}/{}", scheme_, fileSystem_, accountNameWithSuffix_, filePath_);
   credKey_ = accountName_;
 }
 
@@ -105,6 +142,18 @@ const std::string AbfsAccount::filePath() const {
 
 const std::string AbfsAccount::credKey() const {
   return credKey_;
+}
+
+const std::string AbfsAccount::etag() const {
+  return eTag_;
+}
+
+const std::string AbfsAccount::url() const {
+  return url_;
+}
+
+const int64_t AbfsAccount::length() const {
+  return length_;
 }
 
 const std::string AbfsAccount::connectionString(

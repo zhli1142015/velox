@@ -223,7 +223,15 @@ void SplitReader::createReader() {
 
   std::shared_ptr<FileHandle> fileHandle;
   try {
-    fileHandle = fileHandleFactory_->generate(hiveSplit_->filePath).second;
+    std::string path = hiveSplit_->filePath;
+    if (hiveConfig_->passEtagLength()) {
+      path = fmt::format(
+          "{}&etag={}&flength={}",
+          hiveSplit_->filePath,
+          hiveSplit_->modificationTime,
+          hiveSplit_->fileLength);
+    }
+    fileHandle = fileHandleFactory_->generate(path).second;
   } catch (const VeloxRuntimeError& e) {
     if (e.errorCode() == error_code::kFileNotFound &&
         hiveConfig_->ignoreMissingFiles(

@@ -29,7 +29,8 @@ class AbfsReadFile final : public ReadFile {
       const std::string& path,
       const int32_t loadQuantum,
       const std::shared_ptr<folly::Executor> ioExecutor,
-      const std::string abfsEndpoint);
+      const std::string abfsEndpoint,
+      const bool passEtagLength);
 
   ~AbfsReadFile() = default;
 

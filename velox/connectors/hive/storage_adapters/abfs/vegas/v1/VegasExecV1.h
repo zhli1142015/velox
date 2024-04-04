@@ -213,9 +213,9 @@ class VegasExecV1 final : public VegasExecBase {
   }
 
   void writeCacheAsync(
-      std::vector<uint64_t> logicalOffset,
-      std::vector<uint64_t> lenVec,
-      std::vector<char*> bufVec);
+      std::vector<uint64_t>& logicalOffset,
+      std::vector<uint64_t>& lenVec,
+      std::vector<char*>& bufVec);
 
   std::unique_ptr<VegasJournalV1> blockJournal_{nullptr};
 };

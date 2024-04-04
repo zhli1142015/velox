@@ -46,6 +46,9 @@ class AbfsFileSystem : public FileSystem {
 
   static constexpr const char* kAbfsEndpoint = "fs.azure.abfs.endpoint";
 
+  static constexpr const char* kPassEtagLength =
+      "gluten.sql.columnar.backend.velox.passEtagLength";
+
   explicit AbfsFileSystem(const std::shared_ptr<const Config>& config);
 
   std::string name() const override;

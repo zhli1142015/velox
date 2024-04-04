@@ -51,9 +51,9 @@ void VegasExecV1::tryClose() {
 }
 
 void VegasExecV1::writeCacheAsync(
-    std::vector<uint64_t> logicalOffset,
-    std::vector<uint64_t> lenVec,
-    std::vector<char*> bufVec) {
+    std::vector<uint64_t>& logicalOffset,
+    std::vector<uint64_t>& lenVec,
+    std::vector<char*>& bufVec) {
   bool locked = blockJournal_->getWriteLock();
   if (locked) {
     uint64_t fileOffset = blockJournal_->cacheWrite(lenVec, bufVec);

@@ -73,7 +73,7 @@ class VegasJournalV1 : public VegasJournalBase {
       const uint64_t splitLength);
   void tryClose();
   bool getWriteLock();
-  uint64_t cacheWrite(std::vector<uint64_t> lenVec, std::vector<char*> bufVec)
+  uint64_t cacheWrite(std::vector<uint64_t>& lenVec, std::vector<char*>& bufVec)
       const;
   uint64_t saveMap();
 

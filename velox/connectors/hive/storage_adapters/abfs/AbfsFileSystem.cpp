@@ -67,6 +67,10 @@ class AbfsConfig {
     return config_->get<std::string>(AbfsFileSystem::kAbfsEndpoint, "");
   }
 
+  bool passEtagLength() const {
+    return config_->get<bool>(AbfsFileSystem::kPassEtagLength, true);
+  }
+
  private:
   const Config* config_;
 };
@@ -77,11 +81,17 @@ class AbfsReadFile::Impl {
       const std::string& path,
       const int32_t loadQuantum,
       const std::shared_ptr<folly::Executor> ioExecutor,
-      const std::string abfsEndpoint)
-      : path_(path), loadQuantum_(loadQuantum), ioExecutor_(ioExecutor) {
-    auto abfsAccount = AbfsAccount(path_, abfsEndpoint);
+      const std::string& abfsEndpoint,
+      bool passEtagLength)
+      : loadQuantum_(loadQuantum),
+        ioExecutor_(ioExecutor),
+        passEtagLength_(passEtagLength) {
+    auto abfsAccount = AbfsAccount(path, passEtagLength, abfsEndpoint);
     fileName_ = abfsAccount.filePath();
-    fileClient_ = BlobClientProviderFactory::getBlobClient(path, abfsAccount);
+    eTag_ = abfsAccount.etag();
+    path_ = abfsAccount.url();
+    length_ = abfsAccount.length();
+    fileClient_ = BlobClientProviderFactory::getBlobClient(path_, abfsAccount);
   }
 
   void initialize(const FileOptions& options) {
@@ -91,24 +101,25 @@ class AbfsReadFile::Impl {
       length_ = options.fileSize.value();
     }
 
-    if (length_ != -1) {
-      return;
-    }
+    if (eTag_.empty() || length_ == -1) {
 
-    try {
-      auto properties = fileClient_->GetProperties();
-      length_ = properties.Value.BlobSize;
-      auto eTagFull = properties.Value.ETag.ToString();
-      if (eTagFull.length() > 2) {
-        // Remove Quotes
-        eTag_ = eTagFull.substr(1, eTagFull.length() - 2);
-      } else {
-        eTag_ = "invalid";
+      try {
+        LOG(INFO) << "Fetching properties from remote file system for "
+                  << path_;
+        auto properties = fileClient_->GetProperties();
+        length_ = properties.Value.BlobSize;
+        auto eTagFull = properties.Value.ETag.ToString();
+        if (eTagFull.length() > 2) {
+          // Remove Quotes
+          eTag_ = eTagFull.substr(1, eTagFull.length() - 2);
+        } else {
+          eTag_ = "invalid";
+        }
+      } catch (Azure::Storage::StorageException& e) {
+        throwStorageExceptionWithOperationDetails(
+            "GetProperties", fileName_, e);
       }
-    } catch (Azure::Storage::StorageException& e) {
-      throwStorageExceptionWithOperationDetails("GetProperties", fileName_, e);
     }
-
     VELOX_CHECK_GE(length_, 0);
   }
 
@@ -272,11 +283,12 @@ class AbfsReadFile::Impl {
   }
 
  private:
-  const std::string path_;
+  std::string path_;
   const int32_t loadQuantum_;
   const std::shared_ptr<folly::Executor> ioExecutor_;
   std::string fileName_;
   std::string eTag_;
+  bool passEtagLength_;
   std::shared_ptr<BlobClient> fileClient_;
 
   int64_t length_ = -1;
@@ -286,8 +298,10 @@ AbfsReadFile::AbfsReadFile(
     const std::string& path,
     const int32_t loadQuantum,
     const std::shared_ptr<folly::Executor> ioExecutor,
-    const std::string abfsEndpoint) {
-  impl_ = std::make_shared<Impl>(path, loadQuantum, ioExecutor, abfsEndpoint);
+    const std::string abfsEndpoint,
+    const bool passEtagLength) {
+  impl_ = std::make_shared<Impl>(
+      path, loadQuantum, ioExecutor, abfsEndpoint, passEtagLength);
 }
 
 void AbfsReadFile::initialize(const FileOptions& options) {
@@ -429,7 +443,8 @@ class AbfsFileSystem::Impl {
               << ", load quantum:" << abfsConfig_.loadQuantum()
               << ", ABFS endpoint:" << abfsConfig_.abfsEndpoint()
               << ", Vegas enabled:" << abfsConfig_.isVegasEnabled()
-              << ", Vegas cache size:" << abfsConfig_.vegasCacheSize();
+              << ", Vegas cache size:" << abfsConfig_.vegasCacheSize()
+              << ", pass ETag and length:" << abfsConfig_.passEtagLength();
   }
 
   ~Impl() {
@@ -461,6 +476,10 @@ class AbfsFileSystem::Impl {
     return abfsConfig_.abfsEndpoint();
   }
 
+  const bool passEtagLength() const {
+    return abfsConfig_.passEtagLength();
+  }
+
  private:
   const AbfsConfig abfsConfig_;
   std::shared_ptr<folly::Executor> ioExecutor_;
@@ -488,6 +507,7 @@ std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
         impl_->getLoadQuantum(),
         impl_->getIOExecutor(),
         impl_->getAbfsEndpoint(),
+        impl_->passEtagLength(),
         vegasConfig_);
     vegasfile->initialize();
     return vegasfile;
@@ -496,7 +516,8 @@ std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
       std::string(path),
       impl_->getLoadQuantum(),
       impl_->getIOExecutor(),
-      impl_->getAbfsEndpoint());
+      impl_->getAbfsEndpoint(),
+      impl_->passEtagLength());
   abfsfile->initialize();
   return abfsfile;
 }

@@ -65,6 +65,7 @@ TEST(HiveConfigTest, defaultConfig) {
   ASSERT_EQ(
       hiveConfig->orcWriterLinearStripeSizeHeuristics(emptySession.get()),
       true);
+  ASSERT_EQ(hiveConfig->passEtagLength(), false);
 }
 
 TEST(HiveConfigTest, overrideConfig) {
@@ -95,7 +96,8 @@ TEST(HiveConfigTest, overrideConfig) {
       {HiveConfig::kSortWriterMaxOutputRows, "100"},
       {HiveConfig::kSortWriterMaxOutputBytes, "100MB"},
       {HiveConfig::kOrcWriterLinearStripeSizeHeuristics, "false"},
-      {HiveConfig::kOrcWriterMinCompressionSize, "512"}};
+      {HiveConfig::kOrcWriterMinCompressionSize, "512"},
+      {HiveConfig::kPassEtagLength, "true"}};
   HiveConfig* hiveConfig =
       new HiveConfig(std::make_shared<MemConfig>(configFromFile));
   auto emptySession = std::make_unique<MemConfig>();
@@ -137,6 +139,7 @@ TEST(HiveConfigTest, overrideConfig) {
   ASSERT_EQ(
       hiveConfig->orcWriterLinearStripeSizeHeuristics(emptySession.get()),
       false);
+  ASSERT_EQ(hiveConfig->passEtagLength(), true);
 }
 
 TEST(HiveConfigTest, overrideSession) {
@@ -191,4 +194,5 @@ TEST(HiveConfigTest, overrideSession) {
   ASSERT_EQ(
       hiveConfig->orcWriterLinearStripeSizeHeuristics(session.get()), false);
   ASSERT_EQ(hiveConfig->orcWriterMinCompressionSize(session.get()), 512);
+  ASSERT_EQ(hiveConfig->passEtagLength(), false);
 }
