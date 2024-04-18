@@ -1864,15 +1864,19 @@ TEST_F(RowContainerTest, nextRowVector) {
     rowSet.clear();
   };
 
+  auto getNextRowVector = [&](char* row) {
+    return *reinterpret_cast<NextRowVector**>(row + data->nextOffset());
+  };
+
   auto validateNextRowVector = [&]() {
     for (int i = 0; i < rows.size(); i++) {
-      auto vector = data->getNextRowVector(rows[i]);
+      auto vector = getNextRowVector(rows[i]);
       if (vector) {
         auto iter = std::find(vector->begin(), vector->end(), rows[i]);
         EXPECT_NE(iter, vector->end());
         EXPECT_TRUE(vector->size() <= 2 && vector->size() > 0);
         for (auto next : *vector) {
-          EXPECT_EQ(data->getNextRowVector(next), vector);
+          EXPECT_EQ(getNextRowVector(next), vector);
           EXPECT_TRUE(std::find(rows.begin(), rows.end(), next) != rows.end());
         }
       }
@@ -1883,7 +1887,7 @@ TEST_F(RowContainerTest, nextRowVector) {
     for (int i = 0; i < numRows; ++i) {
       rows.push_back(data->newRow());
       rowSet.insert(rows.back());
-      EXPECT_EQ(data->getNextRowVector(rows.back()), nullptr);
+      EXPECT_EQ(getNextRowVector(rows.back()), nullptr);
     }
     EXPECT_EQ(numRows, data->numRows());
     std::vector<char*> rowsFromContainer(numRows);
@@ -1894,7 +1898,7 @@ TEST_F(RowContainerTest, nextRowVector) {
     EXPECT_EQ(rows, rowsFromContainer);
 
     for (int i = 0; i + 2 <= numRows; i += 2) {
-      data->appendNextRow(rows[i], rows[i + 1]);
+      data->appendDuplicateRow<true>(rows[i], rows[i + 1]);
     }
     validateNextRowVector();
   };
@@ -1928,4 +1932,78 @@ TEST_F(RowContainerTest, nextRowVector) {
       "All rows with the same keys must be present in 'rows'");
 
   dataClear();
+}
+
+TEST_F(RowContainerTest, extractDuplicateRows) {
+  constexpr int32_t numRows = 13;
+  constexpr int32_t maxOut = 7;
+  char* duplicateRows[maxOut];
+  auto validateExtractDuplicateRows = [&](RowContainer* data,
+                                          char** rows,
+                                          int& numOut,
+                                          int& duplicateIndex,
+                                          int& rowIndex,
+                                          bool useNextRowVector) {
+    int numOutPrevious = numOut;
+    int rowIndexPrevious = rowIndex;
+    int duplicateIndexPrevious = duplicateIndex;
+    char* row = rows[rowIndex];
+    if (useNextRowVector) {
+      data->extractDuplicateRows<true>(
+          row, duplicateRows, maxOut, numOut, duplicateIndex);
+    } else {
+      data->extractDuplicateRows<false>(
+          row, duplicateRows, maxOut, numOut, duplicateIndex);
+    }
+    rowIndex += (numOut - numOutPrevious);
+    if (row == nullptr) {
+      ASSERT_EQ(duplicateIndex, 0);
+    } else {
+      ASSERT_EQ(numOut, maxOut);
+      ASSERT_EQ(
+          duplicateIndex, duplicateIndexPrevious + (numOut - numOutPrevious));
+      ASSERT_EQ(row, rows[rowIndex]);
+    }
+    for (int j = numOutPrevious; j < numOut; ++j) {
+      ASSERT_EQ(duplicateRows[j], rows[rowIndexPrevious + j - numOutPrevious]);
+    }
+  };
+  for (const auto useNextRowVector : {true, false}) {
+    SCOPED_TRACE(fmt::format("useNextRowVector: {}", useNextRowVector));
+    auto data = makeRowContainer({SMALLINT()}, {SMALLINT()});
+    EXPECT_EQ(data->nextOffset(), 11);
+    std::vector<char*> rowVector;
+    for (int i = 0; i < numRows; ++i) {
+      rowVector.push_back(data->newRow());
+      ASSERT_EQ(
+          *reinterpret_cast<char**>(rowVector.back() + data->nextOffset()),
+          nullptr);
+    }
+    if (useNextRowVector) {
+      for (int i = 2; i <= 10; i++) {
+        data->appendDuplicateRow<true>(rowVector[1], rowVector[i]);
+      }
+    } else {
+      for (int i = 10; i >= 2; i--) {
+        data->appendDuplicateRow<false>(rowVector[1], rowVector[i]);
+      }
+    }
+    int numOut = 0;
+    int duplicateIndex = 0;
+    int rowIndex = 0;
+    while (rowIndex < numRows) {
+      int numOutPrevious = numOut;
+      validateExtractDuplicateRows(
+          data.get(),
+          rowVector.data(),
+          numOut,
+          duplicateIndex,
+          rowIndex,
+          useNextRowVector);
+      if (numOut == maxOut) {
+        numOut = 0;
+      }
+    }
+    ASSERT_EQ(rowIndex, numRows);
+  }
 }

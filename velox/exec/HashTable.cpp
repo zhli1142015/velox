@@ -728,9 +728,9 @@ void HashTable<ignoreNullKeys>::allocateTables(uint64_t size) {
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::clear(bool freeTable) {
   if (otherTables_.size() > 0) {
-    rows_->clearNextRowVectors();
+    rows_->clearDuplicateRows();
     for (auto i = 0; i < otherTables_.size(); ++i) {
-      otherTables_[i]->rows()->clearNextRowVectors();
+      otherTables_[i]->rows()->clearDuplicateRows();
     }
   }
   for (auto* rowContainer : allRows()) {
@@ -1132,7 +1132,7 @@ bool HashTable<ignoreNullKeys>::arrayPushRow(char* row, int32_t index) {
   if (existing) {
     if (nextOffset_) {
       hasDuplicates_ = true;
-      rows_->appendNextRow(existing, row);
+      rows_->appendDuplicateRow<true>(existing, row);
     }
     return false;
   }
@@ -1147,7 +1147,7 @@ void HashTable<ignoreNullKeys>::pushNext(
     char* next) {
   if (nextOffset_ > 0) {
     hasDuplicates_ = true;
-    rows->appendNextRow(row, next);
+    rows->appendDuplicateRow<false>(row, next);
   }
 }
 
@@ -1697,45 +1697,34 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
   if (!hasDuplicates_) {
     return listJoinResultsNoDuplicates(iter, includeMisses, inputRows, hits);
   }
-  size_t numOut = 0;
+  if (hashMode_ == HashMode::kArray) {
+    return listJoinResultsForArrayMode(iter, includeMisses, inputRows, hits);
+  }
+  int32_t numOut = 0;
   auto maxOut = inputRows.size();
   while (iter.lastRowIndex < iter.rows->size()) {
     auto row = (*iter.rows)[iter.lastRowIndex];
-    auto hit = (*iter.hits)[row]; // NOLINT
-    if (!hit) {
-      ++iter.lastRowIndex;
-      if (includeMisses) {
-        inputRows[numOut] = row; // NOLINT
-        hits[numOut] = nullptr;
-        ++numOut;
-        if (numOut >= maxOut) {
-          return numOut;
+    if (!iter.nextHit) {
+      iter.nextHit = (*iter.hits)[row]; // NOLINT
+      if (!iter.nextHit) {
+        ++iter.lastRowIndex;
+        if (includeMisses) {
+          inputRows[numOut] = row; // NOLINT
+          hits[numOut] = nullptr;
+          ++numOut;
+          if (numOut >= maxOut) {
+            return numOut;
+          }
         }
+        continue;
       }
-      continue;
     }
-
-    auto rows = rows_->getNextRowVector(hit);
-    if (!rows) {
-      inputRows[numOut] = row; // NOLINT
-      hits[numOut] = hit;
-      numOut++;
-      iter.lastRowIndex++;
-    } else {
-      auto numRows = rows->size();
-      auto num =
-          std::min(numRows - iter.lastDuplicateRowIndex, maxOut - numOut);
-      std::fill_n(inputRows.begin() + numOut, num, row);
-      std::memcpy(
-          hits.data() + numOut,
-          rows->data() + iter.lastDuplicateRowIndex,
-          num * sizeof(char*));
-      iter.lastDuplicateRowIndex += num;
-      numOut += num;
-      if (iter.lastDuplicateRowIndex >= numRows) {
-        iter.lastDuplicateRowIndex = 0;
-        iter.lastRowIndex++;
-      }
+    int32_t numOutBefore = numOut;
+    rows_->extractDuplicateRows<false>(
+        iter.nextHit, hits.data(), maxOut, numOut, iter.lastDuplicateRowIndex);
+    std::fill_n(inputRows.begin() + numOutBefore, numOut - numOutBefore, row);
+    if (!iter.nextHit) {
+      ++iter.lastRowIndex;
     }
     if (numOut >= maxOut) {
       return numOut;
@@ -1796,6 +1785,45 @@ int32_t HashTable<ignoreNullKeys>::listJoinResultsNoDuplicates(
   }
 
   iter.lastRowIndex = i;
+  return numOut;
+}
+
+template <bool ignoreNullKeys>
+int32_t HashTable<ignoreNullKeys>::listJoinResultsForArrayMode(
+    JoinResultIterator& iter,
+    bool includeMisses,
+    folly::Range<vector_size_t*> inputRows,
+    folly::Range<char**> hits) {
+  int32_t numOut = 0;
+  auto maxOut = inputRows.size();
+  while (iter.lastRowIndex < iter.rows->size()) {
+    auto row = (*iter.rows)[iter.lastRowIndex];
+    if (!iter.nextHit) {
+      iter.nextHit = (*iter.hits)[row]; // NOLINT
+      if (!iter.nextHit) {
+        ++iter.lastRowIndex;
+        if (includeMisses) {
+          inputRows[numOut] = row; // NOLINT
+          hits[numOut] = nullptr;
+          ++numOut;
+          if (numOut >= maxOut) {
+            return numOut;
+          }
+        }
+        continue;
+      }
+    }
+    int32_t numOutBefore = numOut;
+    rows_->extractDuplicateRows<true>(
+        iter.nextHit, hits.data(), maxOut, numOut, iter.lastDuplicateRowIndex);
+    std::fill_n(inputRows.begin() + numOutBefore, numOut - numOutBefore, row);
+    if (!iter.nextHit) {
+      ++iter.lastRowIndex;
+    }
+    if (numOut >= maxOut) {
+      return numOut;
+    }
+  }
   return numOut;
 }
 
@@ -1880,25 +1908,14 @@ int32_t HashTable<false>::listNullKeyRows(
     iter->nextHit = lookup.hits[0];
     iter->initialized = true;
   }
-  size_t numRows = 0;
-  if (numRows < maxRows && iter->nextHit) {
-    auto nextRows = rows_->getNextRowVector(iter->nextHit);
-    if (nextRows) {
-      auto num = std::min(
-          nextRows->size() - iter->lastDuplicateRowIndex, maxRows - numRows);
-      std::memcpy(
-          rows + numRows,
-          nextRows->data() + iter->lastDuplicateRowIndex,
-          num * sizeof(char*));
-      iter->lastDuplicateRowIndex += num;
-      numRows += num;
-      if (iter->lastDuplicateRowIndex >= nextRows->size()) {
-        iter->nextHit = nullptr;
-        iter->lastDuplicateRowIndex = 0;
-      }
+  int32_t numRows = 0;
+  if (iter->nextHit) {
+    if (hashMode_ == HashMode::kArray) {
+      rows_->extractDuplicateRows<true>(
+          iter->nextHit, rows, maxRows, numRows, iter->lastDuplicateRowIndex);
     } else {
-      rows[numRows++] = iter->nextHit;
-      iter->nextHit = nullptr;
+      rows_->extractDuplicateRows<false>(
+          iter->nextHit, rows, maxRows, numRows, iter->lastDuplicateRowIndex);
     }
   }
 
