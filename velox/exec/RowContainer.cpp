@@ -23,7 +23,6 @@
 
 namespace facebook::velox::exec {
 namespace {
-static constexpr int32_t kNextRowVectorSize = sizeof(NextRowVector);
 
 template <TypeKind Kind>
 static int32_t kindSize() {
@@ -329,7 +328,7 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
     variableRowSize(row) = 0;
   }
   if (nextOffset_) {
-    getNextRowVector(row) = nullptr;
+    getNextRow(row) = nullptr;
   }
   bits::clearBit(row, freeFlagOffset_);
   return row;
@@ -389,19 +388,6 @@ int32_t RowContainer::findRows(folly::Range<char**> rows, char** result) {
   return numRows;
 }
 
-void RowContainer::appendNextRow(char* current, char* nextRow) {
-  NextRowVector*& nextRowArrayPtr = getNextRowVector(current);
-  if (!nextRowArrayPtr) {
-    nextRowArrayPtr =
-        new (stringAllocator_->allocate(kNextRowVectorSize)->begin())
-            NextRowVector(StlAllocator<char*>(stringAllocator_.get()));
-    hasDuplicateRows_ = true;
-    nextRowArrayPtr->emplace_back(current);
-  }
-  nextRowArrayPtr->emplace_back(nextRow);
-  getNextRowVector(nextRow) = nextRowArrayPtr;
-}
-
 void RowContainer::freeVariableWidthFields(folly::Range<char**> rows) {
   for (auto i = 0; i < types_.size(); ++i) {
     switch (typeKinds_[i]) {
@@ -455,7 +441,7 @@ void RowContainer::freeAggregates(folly::Range<char**> rows) {
 }
 
 void RowContainer::freeNextRowVectors(folly::Range<char**> rows, bool clear) {
-  if (!nextOffset_ || !hasDuplicateRows_) {
+  if (!nextOffset_ || !hasNextRowVectors_) {
     return;
   }
 
@@ -902,7 +888,7 @@ void RowContainer::hash(
 void RowContainer::clear() {
   const bool sharedStringAllocator = !stringAllocator_.unique();
   if (checkFree_ || sharedStringAllocator || usesExternalMemory_ ||
-      hasDuplicateRows_) {
+      hasNextRowVectors_) {
     constexpr int32_t kBatch = 1000;
     std::vector<char*> rows(kBatch);
     RowContainerIterator iter;
@@ -924,15 +910,15 @@ void RowContainer::clear() {
   firstFreeRow_ = nullptr;
 }
 
-void RowContainer::clearNextRowVectors() {
-  if (hasDuplicateRows_) {
+void RowContainer::clearDuplicateRows() {
+  if (hasNextRowVectors_) {
     constexpr int32_t kBatch = 1000;
     std::vector<char*> rows(kBatch);
     RowContainerIterator iter;
     while (auto numRows = listRows(&iter, kBatch, rows.data())) {
       freeNextRowVectors(folly::Range<char**>(rows.data(), numRows), true);
     }
-    hasDuplicateRows_ = false;
+    hasNextRowVectors_ = false;
   }
 }
 

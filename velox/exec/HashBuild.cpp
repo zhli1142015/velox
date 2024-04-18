@@ -703,6 +703,11 @@ bool HashBuild::finishHashBuild() {
 
   ensureTableFits(numRows);
 
+  bool mayHaveDuplicateRows = table_->rows()->nextOffset() != 0;
+  if (mayHaveDuplicateRows) {
+    ensureNextRowVectorFits(numRows, otherBuilds);
+  }
+
   std::vector<std::unique_ptr<BaseHashTable>> otherTables;
   otherTables.reserve(peers.size());
   SpillPartitionSet spillPartitions;
@@ -722,10 +727,6 @@ bool HashBuild::finishHashBuild() {
     if (spiller != nullptr) {
       spiller->finishSpill(spillPartitions);
     }
-  }
-  bool allowDuplicateRows = table_->rows()->nextOffset() != 0;
-  if (allowDuplicateRows) {
-    ensureNextRowVectorFits(numRows, otherBuilds);
   }
 
   if (spiller_ != nullptr) {
@@ -761,7 +762,7 @@ bool HashBuild::finishHashBuild() {
   // Release the unused memory reservation since we have finished the merged
   // table build.
   pool()->release();
-  if (allowDuplicateRows) {
+  if (mayHaveDuplicateRows) {
     for (auto* build : otherBuilds) {
       build->pool()->release();
     }

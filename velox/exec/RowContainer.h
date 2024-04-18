@@ -639,14 +639,91 @@ class RowContainer {
     return nextOffset_;
   }
 
-  // Create a next-row-vector if it doesn't exist. Append the row address to
-  // the next-row-vector, and store the address of the next-row-vector in the
-  // nextOffset_ slot for all duplicate rows.
-  void appendNextRow(char* current, char* nextRow);
-
-  NextRowVector*& getNextRowVector(char* row) const {
-    return *reinterpret_cast<NextRowVector**>(row + nextOffset_);
+  // If 'useNextRowVector_' is true, create a next-row-vector if it doesn't
+  // exist. Append the row address to the next-row-vector, and store the
+  // address of the next-row-vector in the nextOffset_ slot for all duplicate
+  // rows. Otherwise, duplicate rows are linked together via the nextOffset_
+  // slot.
+  template <bool useNextRowVector>
+  void appendDuplicateRow(char* current, char* nextRow) {
+    if constexpr (useNextRowVector) {
+      NextRowVector*& nextRowArrayPtr = getNextRowVector(current);
+      if (!nextRowArrayPtr) {
+        // When initializing the NextRowVector, we need to insert 'current' and
+        // 'nextRow', so the initial size is 2 to reduce one time memory
+        // allocation.
+        nextRowArrayPtr =
+            new (stringAllocator_->allocate(sizeof(NextRowVector))->begin())
+                NextRowVector(2, StlAllocator<char*>(stringAllocator_.get()));
+        hasNextRowVectors_ = true;
+        nextRowArrayPtr->data()[0] = current;
+        nextRowArrayPtr->data()[1] = nextRow;
+        getNextRowVector(nextRow) = nextRowArrayPtr;
+        return;
+      }
+      nextRowArrayPtr->emplace_back(nextRow);
+      getNextRowVector(nextRow) = nextRowArrayPtr;
+    } else {
+      auto previousNext = getNextRow(current);
+      getNextRow(current) = nextRow;
+      getNextRow(nextRow) = previousNext;
+    }
   }
+
+  // Extract the duplicate rows for 'row' and copy their addresses to 'hits'.
+  // If the number of copied results reaches 'maxOut', update 'row' and
+  // 'duplicateRowIndex' to point to the next duplicate row. Otherwise, set
+  // 'row' to null and 'duplicateRowIndex' to zero.
+  template <bool useNextRowVector>
+  void extractDuplicateRows(
+      char*& row,
+      char** hits,
+      int32_t maxOut,
+      int32_t& numOut,
+      int32_t& duplicateRowIndex) const {
+    if constexpr (useNextRowVector) {
+      if (!row) {
+        return;
+      }
+      auto rows = getNextRowVector(row);
+      if (!rows) {
+        hits[numOut++] = row;
+        duplicateRowIndex = 0;
+        row = nullptr;
+      } else {
+        int32_t numRows = rows->size();
+        auto num = std::min(numRows - duplicateRowIndex, maxOut - numOut);
+        std::memcpy(
+            hits + numOut,
+            rows->data() + duplicateRowIndex,
+            num * sizeof(char*));
+        duplicateRowIndex += num;
+        numOut += num;
+        if (duplicateRowIndex >= numRows) {
+          duplicateRowIndex = 0;
+          row = nullptr;
+        } else {
+          row = rows->data()[duplicateRowIndex];
+        }
+      }
+    } else {
+      while (row && numOut < maxOut) {
+        char* next = getNextRow(row);
+        if (next) {
+          __builtin_prefetch(reinterpret_cast<char*>(next) + nextOffset_);
+        }
+        hits[numOut++] = row;
+        duplicateRowIndex++;
+        row = next;
+      }
+      if (!row) {
+        duplicateRowIndex = 0;
+      }
+    }
+  }
+
+  /// Frees memory for next row vectors.
+  void clearDuplicateRows();
 
   /// Hashes the values of 'columnIndex' for 'rows'.  If 'mix' is true, mixes
   /// the hash with the existing value in 'result'.
@@ -679,9 +756,6 @@ class RowContainer {
 
   /// Resets the state to be as after construction. Frees memory for payload.
   void clear();
-
-  /// Frees memory for next row vectors.
-  void clearNextRowVectors();
 
   int32_t compareRows(
       const char* left,
@@ -866,6 +940,14 @@ class RowContainer {
   uint32_t& variableRowSize(char* row) {
     VELOX_DCHECK(rowSizeOffset_);
     return *reinterpret_cast<uint32_t*>(row + rowSizeOffset_);
+  }
+
+  inline NextRowVector*& getNextRowVector(char* row) const {
+    return *reinterpret_cast<NextRowVector**>(row + nextOffset_);
+  }
+
+  inline char*& getNextRow(char* row) const {
+    return *reinterpret_cast<char**>(row + nextOffset_);
   }
 
   template <TypeKind Kind>
@@ -1253,7 +1335,7 @@ class RowContainer {
   std::vector<TypePtr> types_;
   std::vector<TypeKind> typeKinds_;
   int32_t nextOffset_ = 0;
-  bool hasDuplicateRows_{false};
+  bool hasNextRowVectors_{false};
   // Bit position of null bit  in the row. 0 if no null flag. Order is keys,
   // accumulators, dependent.
   std::vector<int32_t> nullOffsets_;
