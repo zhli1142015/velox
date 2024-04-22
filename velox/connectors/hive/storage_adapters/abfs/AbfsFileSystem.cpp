@@ -95,12 +95,6 @@ class AbfsReadFile::Impl {
   }
 
   void initialize(const FileOptions& options) {
-    if (options.fileSize.has_value()) {
-      VELOX_CHECK_GE(
-          options.fileSize.value(), 0, "File size must be non-negative");
-      length_ = options.fileSize.value();
-    }
-
     if (eTag_.empty() || length_ == -1) {
 
       try {
@@ -303,8 +297,8 @@ AbfsReadFile::AbfsReadFile(
       path, loadQuantum, ioExecutor, abfsEndpoint, passEtagLength);
 }
 
-void AbfsReadFile::initialize(const FileOptions& options) {
-  return impl_->initialize(options);
+void AbfsReadFile::initialize() {
+  return impl_->initialize();
 }
 
 std::string_view
