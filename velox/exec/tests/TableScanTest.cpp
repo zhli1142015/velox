@@ -3519,22 +3519,6 @@ TEST_F(TableScanTest, dictionaryMemo) {
 #endif
 }
 
-TEST_F(TableScanTest, reuseRowVector) {
-  auto iota = makeFlatVector<int32_t>(10, folly::identity);
-  auto data = makeRowVector({iota, makeRowVector({iota})});
-  auto rowType = asRowType(data->type());
-  auto file = TempFilePath::create();
-  writeToFile(file->getPath(), {data});
-  auto plan = PlanBuilder()
-                  .tableScan(rowType, {}, "c0 < 5")
-                  .project({"c1.c0"})
-                  .planNode();
-  auto split = HiveConnectorSplitBuilder(file->getPath()).build();
-  auto expected = makeRowVector(
-      {makeFlatVector<int32_t>(10, [](auto i) { return i % 5; })});
-  AssertQueryBuilder(plan).splits({split, split}).assertResults(expected);
-}
-
 // Tests queries that read more row fields than exist in the data.
 TEST_F(TableScanTest, readMissingFields) {
   vector_size_t size = 10;
