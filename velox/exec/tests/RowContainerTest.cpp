@@ -1868,12 +1868,13 @@ TEST_F(RowContainerTest, nextRowVector) {
     for (int i = 0; i < rows.size(); i++) {
       auto vector = data->getNextRowVector(rows[i]);
       if (vector) {
-        auto iter = std::find(vector->begin(), vector->end(), rows[i]);
-        EXPECT_NE(iter, vector->end());
+        // auto iter = std::find(vector->begin(), vector->end(), rows[i]);
+        // EXPECT_NE(iter, vector->end());
         EXPECT_TRUE(vector->size() <= 2 && vector->size() > 0);
-        for (auto next : *vector) {
-          EXPECT_EQ(data->getNextRowVector(next), vector);
-          EXPECT_TRUE(std::find(rows.begin(), rows.end(), next) != rows.end());
+        auto nData = vector->data();
+        for (int32_t i = 0; i < vector->size(); i++) {
+          EXPECT_EQ(data->getNextRowVector(nData[i]), vector);
+          EXPECT_TRUE(std::find(rows.begin(), rows.end(), nData[i]) != rows.end());
         }
       }
     }

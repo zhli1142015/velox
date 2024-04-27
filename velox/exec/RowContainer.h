@@ -25,8 +25,6 @@
 
 namespace facebook::velox::exec {
 
-using NextRowVector = std::vector<char*, StlAllocator<char*>>;
-
 class Aggregate;
 
 class Accumulator {
@@ -96,6 +94,77 @@ struct RowContainerIterator {
 
   std::string toString() const;
 };
+
+
+struct NextRowVector {
+ public:
+  static constexpr uint32_t kInlineSize = 4;
+
+  NextRowVector(StlAllocator<char*>* allocator) : allocator_(allocator) {}
+
+  bool isInline() const {
+    return isInline(size_);
+  }
+
+  FOLLY_ALWAYS_INLINE static constexpr bool isInline(uint32_t size) {
+    return size <= kInlineSize;
+  }
+
+  char** data() const& {
+    return isInline() ? const_cast<char**>(value_.inlined) : value_.data;
+  }
+
+  size_t size() const {
+    return size_;
+  }
+
+  size_t capacity() const {
+    return capacity_;
+  }
+
+  const StlAllocator<char*>* get_allocator() const {
+    return allocator_;
+  }
+
+  void push_back(char* next) {
+    if (isInline(size_ + 1)) {
+      value_.inlined[size_++] = next;
+    } else {
+      if (isInline(capacity_)) {
+        value_.data = allocator_->allocate(capacity_ * 2);
+        std::memcpy(value_.data, value_.inlined, sizeof(char*) * capacity_);
+        capacity_ *= 2;
+      } else {
+        if (size_ + 1 > capacity_) {
+          auto data = allocator_->allocate(capacity_ * 2);
+          std::memcpy(data, value_.data, sizeof(char*) * capacity_);
+          allocator_->deallocate(value_.data, capacity_);
+          value_.data = data;
+          capacity_ *= 2;
+        }
+      }
+      value_.data[size_++] = next;
+    }
+  }
+
+  void free() {
+    if (!isInline()) {
+      allocator_->deallocate(value_.data, capacity_);
+    }
+    size_ = 0;
+    capacity_ = 0;
+  }
+
+ private:
+  uint32_t size_ = 0;
+  uint32_t capacity_ = kInlineSize;
+  StlAllocator<char*>* allocator_;
+  union {
+    char* inlined[kInlineSize];
+    char** data;
+  } value_;
+};
+
 
 /// Container with a 8-bit partition number field for each row in a
 /// RowContainer. The partition number bytes correspond 1:1 to rows. Used only
@@ -1254,6 +1323,7 @@ class RowContainer {
   std::vector<TypeKind> typeKinds_;
   int32_t nextOffset_ = 0;
   bool hasDuplicateRows_{false};
+  std::unique_ptr<StlAllocator<char*>> nextRowVectorAllocator;
   // Bit position of null bit  in the row. 0 if no null flag. Order is keys,
   // accumulators, dependent.
   std::vector<int32_t> nullOffsets_;

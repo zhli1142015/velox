@@ -394,11 +394,11 @@ void RowContainer::appendNextRow(char* current, char* nextRow) {
   if (!nextRowArrayPtr) {
     nextRowArrayPtr =
         new (stringAllocator_->allocate(kNextRowVectorSize)->begin())
-            NextRowVector(StlAllocator<char*>(stringAllocator_.get()));
+            NextRowVector(nextRowVectorAllocator.get());
     hasDuplicateRows_ = true;
-    nextRowArrayPtr->emplace_back(current);
+    nextRowArrayPtr->push_back(current);
   }
-  nextRowArrayPtr->emplace_back(nextRow);
+  nextRowArrayPtr->push_back(nextRow);
   getNextRowVector(nextRow) = nextRowArrayPtr;
 }
 
@@ -465,14 +465,15 @@ void RowContainer::freeNextRowVectors(folly::Range<char**> rows, bool clear) {
       if (vector) {
         // Clear all rows, we can clear the nextOffset_ slots and delete the
         // next-row-vector.
-        for (auto& next : *vector) {
-          getNextRowVector(next) = nullptr;
+        auto data = vector->data();
+        for (int32_t i = 0; i < vector->size(); i++) {
+          getNextRowVector(data[i]) = nullptr;
         }
+        vector->free();
         // Because of 'parallelJoinBuild', the memory for the next row vector
         // may not be allocated from the RowContainer to which the row belongs,
         // hence we need to release memory through the vector's allocator.
-        auto allocator = vector->get_allocator().allocator();
-        std::destroy_at(vector);
+        auto allocator = vector->get_allocator()->allocator();
         allocator->free(HashStringAllocator::headerOf(vector));
       }
     }
@@ -484,14 +485,15 @@ void RowContainer::freeNextRowVectors(folly::Range<char**> rows, bool clear) {
     if (vector) {
       // If 'clear' is false, the caller must ensure that all rows with same
       // keys appear in the 'rows'.
-      for (auto& next : *vector) {
+      auto data = vector->data();
+      for (int32_t i = 0; i < vector->size(); i++) {
         VELOX_CHECK(
-            std::find(rows.begin(), rows.end(), next) != rows.end(),
+            std::find(rows.begin(), rows.end(), data[i]) != rows.end(),
             "All rows with the same keys must be present in 'rows'");
-        getNextRowVector(next) = nullptr;
+        getNextRowVector(data[i]) = nullptr;
       }
-      auto allocator = vector->get_allocator().allocator();
-      std::destroy_at(vector);
+      auto allocator = vector->get_allocator()->allocator();
+      vector->free();
       allocator->free(HashStringAllocator::headerOf(vector));
     }
   }
