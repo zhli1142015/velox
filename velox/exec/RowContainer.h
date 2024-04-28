@@ -95,12 +95,12 @@ struct RowContainerIterator {
   std::string toString() const;
 };
 
-
 struct NextRowVector {
+  using value_type = char*;
  public:
-  static constexpr uint32_t kInlineSize = 4;
+  static constexpr uint32_t kInlineSize = 2;
 
-  NextRowVector(StlAllocator<char*>* allocator) : allocator_(allocator) {}
+  explicit NextRowVector(StlAllocator<value_type>* allocator) : allocator_(allocator) {}
 
   bool isInline() const {
     return isInline(size_);
@@ -110,9 +110,7 @@ struct NextRowVector {
     return size <= kInlineSize;
   }
 
-  char** data() const& {
-    return isInline() ? const_cast<char**>(value_.inlined) : value_.data;
-  }
+  char** data() const;
 
   size_t size() const {
     return size_;
@@ -122,49 +120,25 @@ struct NextRowVector {
     return capacity_;
   }
 
-  const StlAllocator<char*>* get_allocator() const {
+  const StlAllocator<value_type>* get_allocator() const {
     return allocator_;
   }
 
-  void push_back(char* next) {
-    if (isInline(size_ + 1)) {
-      value_.inlined[size_++] = next;
-    } else {
-      if (isInline(capacity_)) {
-        value_.data = allocator_->allocate(capacity_ * 2);
-        std::memcpy(value_.data, value_.inlined, sizeof(char*) * capacity_);
-        capacity_ *= 2;
-      } else {
-        if (size_ + 1 > capacity_) {
-          auto data = allocator_->allocate(capacity_ * 2);
-          std::memcpy(data, value_.data, sizeof(char*) * capacity_);
-          allocator_->deallocate(value_.data, capacity_);
-          value_.data = data;
-          capacity_ *= 2;
-        }
-      }
-      value_.data[size_++] = next;
-    }
-  }
+  void push_back(char* next);
 
-  void free() {
-    if (!isInline()) {
-      allocator_->deallocate(value_.data, capacity_);
-    }
-    size_ = 0;
-    capacity_ = 0;
-  }
+  void free();
 
  private:
   uint32_t size_ = 0;
   uint32_t capacity_ = kInlineSize;
-  StlAllocator<char*>* allocator_;
+  StlAllocator<value_type>* allocator_;
   union {
-    char* inlined[kInlineSize];
-    char** data;
+    value_type inlined[kInlineSize];
+    value_type* data;
   } value_;
 };
 
+static constexpr int32_t kNextRowVectorSize = sizeof(NextRowVector);
 
 /// Container with a 8-bit partition number field for each row in a
 /// RowContainer. The partition number bytes correspond 1:1 to rows. Used only

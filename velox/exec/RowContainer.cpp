@@ -21,9 +21,10 @@
 #include "velox/exec/ContainerRowSerde.h"
 #include "velox/exec/Operator.h"
 
+#include <iostream>
+
 namespace facebook::velox::exec {
 namespace {
-static constexpr int32_t kNextRowVectorSize = sizeof(NextRowVector);
 
 template <TypeKind Kind>
 static int32_t kindSize() {
@@ -128,6 +129,37 @@ std::string RowContainerIterator::toString() const {
       rowOffset,
       rowNumber);
 }
+char** NextRowVector::data() const {
+  return isInline() ? const_cast<char**>(value_.inlined) : value_.data;
+}
+
+void NextRowVector::push_back(char* next) {
+  if (isInline(size_ + 1)) {
+      value_.inlined[size_++] = next;
+    } else {
+      if (isInline(capacity_)) {
+        char** data = allocator_->allocate(capacity_ * 2);
+        std::memcpy(data, value_.inlined, sizeof(char*) * capacity_);
+        value_.data = data;
+        capacity_ *= 2;
+      } else if (size_ + 1 > capacity_) {
+          char** data = allocator_->allocate(capacity_ * 2);
+          std::memcpy(data, value_.data, sizeof(char*) * capacity_);
+          allocator_->deallocate(value_.data, capacity_);
+          value_.data = data;
+          capacity_ *= 2;
+      }
+      value_.data[size_++] = next;
+    }
+  }
+
+  void NextRowVector::free() {
+    if (!isInline()) {
+      allocator_->deallocate(value_.data, capacity_);
+    }
+    size_ = 0;
+    capacity_ = 0;
+  }
 
 RowContainer::RowContainer(
     const std::vector<TypePtr>& keyTypes,
@@ -252,6 +284,8 @@ RowContainer::RowContainer(
   if (hasNext) {
     nextOffset_ = offset;
     offset += sizeof(void*);
+    nextRowVectorAllocator = std::make_unique<StlAllocator<char*>>(
+        stringAllocator_.get());
   }
   fixedRowSize_ = bits::roundUp(offset, alignment_);
   // A distinct hash table has no aggregates and if the hash table has

@@ -815,7 +815,7 @@ void HashBuild::ensureNextRowVectorFits(
   // The memory allocation for next-row-vectors may stuck in
   // 'SharedArbitrator::growCapacity' when memory arbitrating is also
   // triggered. Reserve memory for next-row-vectors to prevent this issue.
-  auto bytesToReserve = numRows * (sizeof(char*) + sizeof(NextRowVector));
+  auto bytesToReserve = numRows * (sizeof(char*) + kNextRowVectorSize);
   {
     Operator::ReclaimableSectionGuard guard(this);
     if (!pool()->maybeReserve(bytesToReserve)) {
