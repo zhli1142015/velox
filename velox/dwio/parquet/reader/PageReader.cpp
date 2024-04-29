@@ -381,13 +381,13 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
             for (auto i = dictionary_.numValues - 1; i >= 0; --i) {
               int64_t units{};
               memcpy(&units, parquetValues + i * typeSize, typeSize);
-              values[i] = util::fromUTCMicros(units);
+              values[i] = Timestamp::fromMicros(units);
             }
           } else if (logicalType.TIMESTAMP.unit.__isset.MILLIS) {
             for (auto i = dictionary_.numValues - 1; i >= 0; --i) {
               int64_t units{};
               memcpy(&units, parquetValues + i * typeSize, typeSize);
-              values[i] = util::fromUTCMillis(units);
+              values[i] = Timestamp::fromMillis(units);
             }
           } else {
             VELOX_NYI("Nano Timestamp unit is not supported.");

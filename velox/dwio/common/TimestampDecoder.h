@@ -63,8 +63,8 @@ class TimestampDecoder : public DirectDecoder<false> {
       if constexpr (std::is_same_v<typename Visitor::DataType, int128_t>) {
         auto units = IntDecoder<false>::template readInt<int64_t>();
         Timestamp timestamp = precision_ == TimestampPrecision::kMillis
-            ? util::fromUTCMillis(units)
-            : util::fromUTCMicros(units);
+            ? Timestamp::fromMillis(units)
+            : Timestamp::fromMicros(units);
         int128_t value{};
         memcpy(&value, &timestamp, sizeof(int128_t));
         toSkip = visitor.process(value, atEnd);

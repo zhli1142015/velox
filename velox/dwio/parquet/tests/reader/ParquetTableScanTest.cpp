@@ -752,9 +752,26 @@ TEST_F(ParquetTableScanTest, timestampINT96) {
   assertSelect({"time"}, "SELECT time from expected");
 }
 
-TEST_F(ParquetTableScanTest, timestampINT64) {
-  auto a = makeFlatVector<Timestamp>(
-      12, [](auto row) { return Timestamp(row % 4, 0); });
+TEST_F(ParquetTableScanTest, timestampINT64millis) {
+  std::vector<Timestamp> rawData = {
+      Timestamp(0, 0),
+      Timestamp(0, 1000000),
+      Timestamp(-1, 999000000),
+      Timestamp(1, 0),
+      Timestamp(-1, 0),
+      Timestamp(1, 1000000),
+      Timestamp(-2, 999000000),
+      Timestamp(0, 999000000),
+      Timestamp(-1, 1000000),
+      Timestamp(1000, 0),
+      Timestamp(-1000, 0),
+      Timestamp(1000, 1000000),
+      Timestamp(-1001, 999000000),
+      Timestamp(99, 999000000),
+      Timestamp(-100, 1000000)};
+
+  auto a =
+      makeFlatVector<Timestamp>(60, [&](auto row) { return rawData[row / 4]; });
 
   auto expected = makeRowVector({"time"}, {a});
   createDuckDbTable("expected", {expected});
@@ -780,6 +797,33 @@ TEST_F(ParquetTableScanTest, timestampINT64) {
               vector,
           }));
   assertSelect({"time"}, "SELECT time from expected");
+}
+
+TEST_F(ParquetTableScanTest, timestampINT64micros) {
+  std::vector<Timestamp> rawData = {
+      Timestamp(0, 0),
+      Timestamp(0, 1000),
+      Timestamp(-1, 999999000),
+      Timestamp(0, 1000000),
+      Timestamp(-1, 999000000),
+      Timestamp(0, 1001000),
+      Timestamp(-1, 998999000),
+      Timestamp(0, 999000),
+      Timestamp(-1, 999001000),
+      Timestamp(1, 0),
+      Timestamp(-1, 0),
+      Timestamp(1, 1000),
+      Timestamp(-2, 999999000),
+      Timestamp(0, 99999000),
+      Timestamp(-1, 900001000)};
+
+  auto a =
+      makeFlatVector<Timestamp>(60, [&](auto row) { return rawData[row / 4]; });
+
+  auto expected = makeRowVector({"time"}, {a});
+  createDuckDbTable("expected", {expected});
+
+  auto vector = makeArrayVector<Timestamp>({{}});
 
   loadData(
       getExampleFilePath("int64_micros_dictionary.parquet"),
