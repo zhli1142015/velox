@@ -291,6 +291,47 @@ VectorPtr CastExpr::castFromIntervalDayTime(
   }
 }
 
+VectorPtr CastExpr::castIntToTimestamp(
+    const SelectivityVector& rows,
+    const BaseVector& input,
+    exec::EvalCtx& context,
+    const TypePtr& fromType) {
+  VectorPtr castResult;
+  context.ensureWritable(rows, TIMESTAMP(), castResult);
+  (*castResult).clearNulls(rows);
+  auto* resultFlatVector = castResult->as<FlatVector<Timestamp>>();
+  const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+  const auto sessionTzName = queryConfig.sessionTimezone();
+  const auto* timeZone =
+      (queryConfig.adjustTimestampToTimezone() && !sessionTzName.empty())
+      ? date::locate_zone(sessionTzName)
+      : nullptr;
+
+  switch (fromType->kind()) {
+    case TypeKind::TINYINT:
+      castIntegerToTimestamp<int8_t>(
+          rows, input, context, castResult, timeZone, resultFlatVector);
+      break;
+    case TypeKind::SMALLINT:
+      castIntegerToTimestamp<int16_t>(
+          rows, input, context, castResult, timeZone, resultFlatVector);
+      break;
+    case TypeKind::INTEGER:
+      castIntegerToTimestamp<int32_t>(
+          rows, input, context, castResult, timeZone, resultFlatVector);
+      break;
+    case TypeKind::BIGINT:
+      castIntegerToTimestamp<int64_t>(
+          rows, input, context, castResult, timeZone, resultFlatVector);
+      break;
+    default:
+      VELOX_UNREACHABLE(
+          "Cast from {} to Timestamp is not supported", fromType->kind());
+      break;
+  }
+  return castResult;
+}
+
 namespace {
 void propagateErrorsOrSetNulls(
     bool setNullInResultAtError,
@@ -732,6 +773,11 @@ void CastExpr::applyPeeled(
     result = applyDecimal<int64_t>(rows, input, context, fromType, toType);
   } else if (toType->isLongDecimal()) {
     result = applyDecimal<int128_t>(rows, input, context, fromType, toType);
+  } else if (
+      (fromType->isTinyint() || fromType->isSmallint() ||
+       fromType->isInteger() || fromType->isBigint()) &&
+      toType->isTimestamp()) {
+    result = castIntToTimestamp(rows, input, context, fromType);
   } else if (fromType->isDecimal()) {
     switch (toType->kind()) {
       case TypeKind::VARCHAR:
