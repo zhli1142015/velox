@@ -311,11 +311,12 @@ void HashTable<ignoreNullKeys>::storeKeys(
 }
 
 template <bool ignoreNullKeys>
+template <bool isArrayMode>
 void HashTable<ignoreNullKeys>::storeRowPointer(
     uint64_t index,
     uint64_t hash,
     char* row) {
-  if (hashMode_ == HashMode::kArray) {
+  if constexpr (isArrayMode) {
     reinterpret_cast<char**>(table_)[index] = row;
     return;
   }
@@ -327,19 +328,25 @@ void HashTable<ignoreNullKeys>::storeRowPointer(
 }
 
 template <bool ignoreNullKeys>
+template <BaseHashTable::HashMode mode>
 char* HashTable<ignoreNullKeys>::insertEntry(
     HashLookup& lookup,
     uint64_t index,
     vector_size_t row) {
   char* group = rows_->newRow();
-  lookup.hits[row] = group; // NOLINT
-  storeKeys(lookup, row);
-  storeRowPointer(index, lookup.hashes[row], group);
-  if (hashMode_ == HashMode::kNormalizedKey) {
+  if constexpr (mode == HashMode::kNormalizedKey) {
     // We store the unique digest of key values (normalized key) in
     // the word below the row. Space was reserved in the allocation
     // unless we have given up on normalized keys.
     RowContainer::normalizedKey(group) = lookup.normalizedKeys[row]; // NOLINT
+  } else {
+    lookup.hits[row] = group; // NOLINT
+    storeKeys(lookup, row);
+  }
+  if constexpr (mode == HashMode::kArray) {
+    storeRowPointer<true>(index, lookup.hashes[row], group);
+  } else {
+    storeRowPointer<false>(index, lookup.hashes[row], group);
   }
   ++numDistinct_;
   lookup.newGroups.push_back(row);
@@ -396,8 +403,11 @@ FOLLY_ALWAYS_INLINE void HashTable<ignoreNullKeys>::fullProbe(
           return RowContainer::normalizedKey(group) ==
               lookup.normalizedKeys[row];
         },
-        [&](int32_t row, uint64_t index) {
-          return isJoin ? nullptr : insertEntry(lookup, index, row);
+        [&](int32_t row, uint64_t index) -> char* {
+          if constexpr (isJoin) {
+            return nullptr;
+          }
+          return insertEntry<HashMode::kNormalizedKey>(lookup, index, row);
         },
         numTombstones_,
         !isJoin && extraCheck);
@@ -408,8 +418,11 @@ FOLLY_ALWAYS_INLINE void HashTable<ignoreNullKeys>::fullProbe(
       *this,
       0,
       [&](char* group, int32_t row) { return compareKeys(group, lookup, row); },
-      [&](int32_t row, uint64_t index) {
-        return isJoin ? nullptr : insertEntry(lookup, index, row);
+      [&](int32_t row, uint64_t index) -> char* {
+        if constexpr (isJoin) {
+          return nullptr;
+        }
+        return insertEntry<HashMode::kHash>(lookup, index, row);
       },
       numTombstones_,
       !isJoin && extraCheck);
@@ -499,38 +512,33 @@ void HashTable<ignoreNullKeys>::groupProbe(HashLookup& lookup) {
 
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::groupNormalizedKeyProbe(HashLookup& lookup) {
-  ProbeState state1;
-  ProbeState state2;
-  ProbeState state3;
-  ProbeState state4;
   int32_t probeIndex = 0;
   int32_t numProbes = lookup.rows.size();
   auto rows = lookup.rows.data();
   constexpr int32_t kKeyOffset =
       -static_cast<int32_t>(sizeof(normalized_key_t));
-  for (; probeIndex + 4 <= numProbes; probeIndex += 4) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 1];
-    state2.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 2];
-    state3.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 3];
-    state4.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state2.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state3.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state4.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    fullProbe<false, true>(lookup, state1, false);
-    fullProbe<false, true>(lookup, state2, true);
-    fullProbe<false, true>(lookup, state3, true);
-    fullProbe<false, true>(lookup, state4, true);
+  constexpr int32_t groupSize = 64;
+  ProbeState states[groupSize];
+  for (; probeIndex + groupSize <= numProbes; probeIndex += groupSize) {
+    for (int32_t i = 0; i < groupSize; ++i) {
+      int32_t row = rows[probeIndex + i];
+      states[i].preProbe(*this, lookup.hashes[row], row);
+    }
+    for (int32_t i = 0; i < groupSize; ++i) {
+      states[i].firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
+    }
+    for (int32_t i = 0; i < groupSize; ++i) {
+      fullProbe<false, true>(lookup, states[i], i != 0);
+    }
   }
   for (; probeIndex < numProbes; ++probeIndex) {
     int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe(*this, kKeyOffset);
-    fullProbe<false, true>(lookup, state1, false);
+    states[0].preProbe(*this, lookup.hashes[row], row);
+    states[0].firstProbe(*this, kKeyOffset);
+    fullProbe<false, true>(lookup, states[0], false);
+  }
+  for (auto row : lookup.newGroups) {
+    storeKeys(lookup, row);
   }
 }
 
@@ -564,7 +572,7 @@ void HashTable<ignoreNullKeys>::arrayGroupProbe(HashLookup& lookup) {
           auto index = hashes[row];
           auto hit = table_[index];
           if (!hit) {
-            hit = insertEntry(lookup, index, row);
+            hit = insertEntry<HashMode::kArray>(lookup, index, row);
           }
           groups[row] = hit;
         }
@@ -578,7 +586,7 @@ void HashTable<ignoreNullKeys>::arrayGroupProbe(HashLookup& lookup) {
     VELOX_DCHECK_LT(index, capacity_);
     char* group = table_[index];
     if (UNLIKELY(!group)) {
-      group = insertEntry(lookup, index, row);
+      group = insertEntry<HashMode::kArray>(lookup, index, row);
     }
     groups[row] = group; // NOLINT
   }
@@ -1109,7 +1117,7 @@ void HashTable<ignoreNullKeys>::insertForGroupBy(
             ProbeState::kFullMask;
         if (free) {
           auto freeOffset = bits::getAndClearLastSetBit(free);
-          storeRowPointer(offset + freeOffset, hash, groups[i]);
+          storeRowPointer<false>(offset + freeOffset, hash, groups[i]);
           inserted = true;
           break;
         }
@@ -1164,7 +1172,7 @@ FOLLY_ALWAYS_INLINE void HashTable<ignoreNullKeys>::buildFullProbe(
       partitionInfo->addOverflow(inserted);
       return nullptr;
     }
-    storeRowPointer(index, hash, inserted);
+    storeRowPointer<false>(index, hash, inserted);
     return nullptr;
   };
 
