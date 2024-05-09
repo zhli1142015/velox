@@ -823,6 +823,7 @@ class HashTable : public BaseHashTable {
       bool initNormalizedKeys,
       raw_vector<uint64_t>& hashes);
 
+  template <bool isNormalizedKey>
   char* insertEntry(HashLookup& lookup, uint64_t index, vector_size_t row);
 
   bool compareKeys(const char* group, HashLookup& lookup, vector_size_t row);

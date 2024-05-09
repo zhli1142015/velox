@@ -37,6 +37,13 @@ add_executable(velox_hash_benchmark HashTableBenchmark.cpp)
 target_link_libraries(velox_hash_benchmark velox_exec velox_exec_test_lib
                       velox_vector_test_lib ${FOLLY_BENCHMARK})
 
+add_executable(velox_hash_group_probe_benchmark
+               HashTableGroupProbeBenchmark.cpp)
+
+target_link_libraries(
+  velox_hash_group_probe_benchmark velox_exec velox_exec_test_lib
+  velox_vector_test_lib ${FOLLY_BENCHMARK})
+
 add_executable(velox_hash_join_list_result_benchmark
                HashJoinListResultBenchmark.cpp)
 
