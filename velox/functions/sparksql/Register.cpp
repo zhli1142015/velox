@@ -460,6 +460,15 @@ void registerFunctions(const std::string& prefix) {
       Array<Array<Generic<T1>>>>({prefix + "flatten"});
 
   registerFunction<SoundexFunction, Varchar, Varchar>({prefix + "soundex"});
+
+  registerFunction<
+      LevenshteinDistanceFunction,
+      int32_t,
+      Varchar,
+      Varchar,
+      int32_t>({prefix + "levenshtein"});
+  registerFunction<LevenshteinDistanceFunction, int32_t, Varchar, Varchar>(
+      {prefix + "levenshtein"});
 }
 
 } // namespace sparksql
