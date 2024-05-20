@@ -24,7 +24,6 @@ add_library(
   BitwiseXorAggregate.cpp
   BoolAggregates.cpp
   CentralMomentsAggregates.cpp
-  Compare.cpp
   CountAggregate.cpp
   CountIfAggregate.cpp
   CovarianceAggregates.cpp
