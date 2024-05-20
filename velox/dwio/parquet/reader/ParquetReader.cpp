@@ -221,6 +221,17 @@ void ReaderBase::initializeSchema() {
       maxSchemaElementIdx, maxRepeat, maxDefine, 0, schemaIdx, columnIdx);
   schema_ = createRowType(
       schemaWithId_->getChildren(), isFileColumnNamesReadAsLowerCase());
+
+  const auto& keyValues = fileMetaData_->key_value_metadata;
+  for (const auto& keyValue : keyValues) {
+    if (keyValue.key == "org.apache.spark.legacyINT96") {
+      for (const auto& child : schema_->children()) {
+        if (child->kind() == TypeKind::TIMESTAMP) {
+          VELOX_UNSUPPORTED("Reading legacy timestamp is not supported.");
+        }
+      }
+    }
+  }
 }
 
 std::unique_ptr<ParquetTypeWithId> ReaderBase::getParquetColumnInfo(

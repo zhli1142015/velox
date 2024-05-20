@@ -752,6 +752,31 @@ TEST_F(ParquetTableScanTest, timestampINT96) {
   assertSelect({"time"}, "SELECT time from expected");
 }
 
+TEST_F(ParquetTableScanTest, timestampINT96Legacy) {
+  auto vector1 = makeArrayVector<Timestamp>({{}});
+  loadData(
+      getExampleFilePath("timestamp_int96_legacy.parquet"),
+      ROW({"time"}, {TIMESTAMP()}),
+      makeRowVector(
+          {"time"},
+          {
+              vector1,
+          }));
+  VELOX_ASSERT_THROW(
+      assertSelect({"time"}, "SELECT ('hello')"),
+      "Reading legacy timestamp is not supported.");
+  auto vector2 = makeArrayVector<StringView>({{}});
+  loadData(
+      getExampleFilePath("timestamp_int96_legacy_notimestamp.parquet"),
+      ROW({"time"}, {VARCHAR()}),
+      makeRowVector(
+          {"time"},
+          {
+              vector2,
+          }));
+  assertSelect({"time"}, "SELECT ('hello')");
+}
+
 TEST_F(ParquetTableScanTest, timestampINT64millis) {
   std::vector<Timestamp> rawData = {
       Timestamp(0, 0),
