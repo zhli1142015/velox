@@ -179,6 +179,8 @@ class VegasExecV1 final : public VegasExecBase {
       uint64_t length,
       char* pos,
       ReadFunc preadInternal) {
+    VLOG(1) << "Cache missed for offset: " << offset << " length: " << length
+            << " path " << blockJournal_->uri();
     preadInternal(offset, length, pos);
 
     std::vector<uint64_t> offsetVec({offset});
@@ -207,8 +209,10 @@ class VegasExecV1 final : public VegasExecBase {
       }
       offset_t += range.size();
     }
+    VLOG(1) << "Cache missed for offset " << offset
+            << " length: " << offset_t - offset
+            << " path: " << blockJournal_->uri();
     writeCacheAsync(offsetVec, lenVec, bufVec);
-
     return true;
   }
 

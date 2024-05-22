@@ -33,7 +33,7 @@ VegasExecV1::VegasExecV1(
   std::string md5hex = boost::algorithm::hex_lower(md5str);
   const std::string localPath = vegasConfig->getVfsCachePath(md5hex);
   blockJournal_ =
-      std::make_unique<VegasJournalV1>(vegasConfig, path, localPath);
+      std::make_unique<VegasJournalV1>(vegasConfig, path, localPath, md5hex);
 }
 
 bool VegasExecV1::initialize(
@@ -43,6 +43,9 @@ bool VegasExecV1::initialize(
     const uint64_t splitLength) {
   bool cacheInitialized =
       blockJournal_->initialize(remoteEtag, size, splitOffset, splitLength);
+  VLOG(1) << "Cache initialized: " << cacheInitialized
+          << " remoteEtag: " << remoteEtag << " path: " << blockJournal_->uri()
+          << " offset: " << splitOffset << " length: " << splitLength;
   return cacheInitialized;
 }
 
@@ -56,6 +59,7 @@ void VegasExecV1::writeCacheAsync(
     std::vector<char*>& bufVec) {
   bool locked = blockJournal_->getWriteLock();
   if (locked) {
+    VLOG(1) << "Got write lock for: " << blockJournal_->uri();
     uint64_t fileOffset = blockJournal_->cacheWrite(lenVec, bufVec);
     uint64_t fileOffset_t = fileOffset;
     for (int i = 0; i < lenVec.size(); ++i) {

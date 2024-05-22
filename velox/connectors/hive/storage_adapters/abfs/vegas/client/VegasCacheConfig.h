@@ -36,8 +36,9 @@ class VegasCacheConfig {
   std::string getVfsCacheDir() const;
 
   const static inline std::string VFSJournalExt = ".block.journal";
-  const static inline std::string VFSLockExt = ".block.journal.lock";
   const static inline std::string VFSMapExt = ".block.map";
+  const static inline std::string VFSLocalFileSemaphoreExt =
+      ".block.journal.semaphore";
 
   const static inline std::string mapFileSignature = "BlockJournal_v101_Begin";
   const static inline std::string mapFileTerminator = "BlockJournal_v101_End";

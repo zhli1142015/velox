@@ -20,15 +20,20 @@
 namespace facebook::velox::filesystems::abfs::vegas {
 
 folly::ConcurrentHashMap<std::string, size_t> VegasJournalV1::kWriteLocks;
+std::unordered_map<std::string, uint64_t> VegasSemaphore::kSemaphoreRefCount;
 std::atomic_uint64_t VegasJournalV1::kWriteLocksCount(0);
 bool VegasJournalV1::kShouldCleanup;
 uint64_t VegasJournalV1::kWriteLocksLimit;
+std::mutex VegasSemaphore::mutex_;
 
 VegasJournalV1::VegasJournalV1(
     const std::shared_ptr<vegas::VegasCacheConfig> vegasConfig,
     const std::string& uri,
-    const std::string& path)
+    const std::string& path,
+    const std::string& semaphoreFileName)
     : VegasJournalBase(vegasConfig, uri, path) {
+  semaphoreFileName_.append(semaphoreFileName);
+  semaphoreFileName_.append(VegasCacheConfig::VFSLocalFileSemaphoreExt);
   kShouldCleanup = vegasConfig->getVfsLimitTotalWriteLocks();
   kWriteLocksLimit = vegasConfig->getVfsWriteLocksLimit();
 }
@@ -37,8 +42,8 @@ uint64_t VegasJournalV1::getTotalFileOpens() const {
   std::ifstream mapFile;
   mapFile.open(mapFileName());
   if (!mapFile.is_open()) {
-    LOG(INFO) << "getTotalFileOpens failed to open mapFile" << mapFileName()
-              << " " << uri_;
+    LOG(WARNING) << "getTotalFileOpens failed to open mapFile" << mapFileName()
+                 << " " << uri_;
     return -1;
   }
   std::string mapFileAsStr(
@@ -48,7 +53,7 @@ uint64_t VegasJournalV1::getTotalFileOpens() const {
 
   uint64_t sz = mapFileAsStr.size();
   if (sz == 0) {
-    LOG(INFO) << "getTotalFileOpens failed sz = " << sz << " path " << uri_;
+    LOG(WARNING) << "getTotalFileOpens failed sz = " << sz << " path " << uri_;
     return -1;
   }
 
@@ -56,7 +61,7 @@ uint64_t VegasJournalV1::getTotalFileOpens() const {
   uint32_t bufIndex = 19;
 
   if (bufIndex >= sz) {
-    LOG(INFO) << "getTotalFileOpens failed at totalFileOpens_ " << uri_;
+    LOG(WARNING) << "getTotalFileOpens failed at totalFileOpens_ " << uri_;
     return -1;
   }
   return readEightBytes(buffer, bufIndex - 7);
@@ -78,7 +83,7 @@ bool VegasJournalV1::loadMap() {
 
   uint64_t sz = mapFileAsStr.size();
   if (sz == 0) {
-    LOG(INFO) << "loadMap failed sz = " << sz << " path " << uri_;
+    LOG(WARNING) << "loadMap failed sz = " << sz << " path: " << uri_;
     return true;
   }
 
@@ -89,14 +94,14 @@ bool VegasJournalV1::loadMap() {
   std::string signature;
   bool success = readString(buffer, bufIndex, sz, signature);
   if (!success) {
-    LOG(INFO) << "loadMap failed to load  mapFileSignature "
-              << " path " << uri_;
+    LOG(WARNING) << "loadMap failed to load mapFileSignature "
+                 << " path: " << uri_;
     return false;
   }
   if (signature != VegasCacheConfig::mapFileSignature) {
-    LOG(INFO) << "loadMap failed to match mapFileSignature: " << signature
-              << " vs " << VegasCacheConfig::mapFileSignature << " path "
-              << uri_;
+    LOG(WARNING) << "loadMap failed to match mapFileSignature: " << signature
+                 << " vs " << VegasCacheConfig::mapFileSignature
+                 << " path: " << uri_;
     return false;
   }
 
@@ -105,14 +110,14 @@ bool VegasJournalV1::loadMap() {
   std::string uri;
   success = readString(buffer, bufIndex, sz, uri);
   if (!success) {
-    LOG(INFO) << "loadMap failed to load  uri " << uri_;
+    LOG(WARNING) << "loadMap failed to load uri " << uri_;
     return false;
   }
 
   // file length
   bufIndex += 8;
   if (bufIndex >= sz) {
-    LOG(INFO) << "loadMap failed at fileLength " << uri_;
+    LOG(WARNING) << "loadMap failed at fileLength for path: " << uri_;
     return false;
   }
   uint64_t fileLength = readEightBytes(buffer, bufIndex - 7);
@@ -120,7 +125,8 @@ bool VegasJournalV1::loadMap() {
   // isSequentiallyComplete
   bufIndex += 1;
   if (bufIndex >= sz) {
-    LOG(INFO) << "loadMap failed at isSequentiallyComplete " << uri_;
+    LOG(WARNING) << "loadMap failed at isSequentiallyComplete for path: "
+                 << uri_;
     return false;
   }
   isSequentiallyComplete_ = readOneByte(buffer, bufIndex);
@@ -130,14 +136,14 @@ bool VegasJournalV1::loadMap() {
   std::string eTag;
   success = readString(buffer, bufIndex, sz, eTagFromCache_);
   if (!success) {
-    LOG(INFO) << "loadMap failed to load eTag " << uri_;
+    LOG(WARNING) << "loadMap failed to load eTag for path: " << uri_;
     return false;
   }
 
   // total File
   bufIndex += 8;
   if (bufIndex >= sz) {
-    LOG(INFO) << "loadMap failed at totalFileOpens_ " << uri_;
+    LOG(WARNING) << "loadMap failed at totalFileOpens for path: " << uri_;
     return false;
   }
   totalFileOpens_ = readEightBytes(buffer, bufIndex - 7);
@@ -145,13 +151,13 @@ bool VegasJournalV1::loadMap() {
   // number of blocks
   bufIndex += 4;
   if (bufIndex >= sz) {
-    LOG(INFO) << "loadMap failed at numBlocks " << uri_;
+    LOG(WARNING) << "loadMap failed at numBlocks for path: " << uri_;
     return false;
   }
   uint32_t numBlocks = readFourBytes(buffer, bufIndex - 3);
 
   if (bufIndex + (numBlocks * 20) >= sz) {
-    LOG(INFO) << "loadMap failed at blocks " << uri_;
+    LOG(WARNING) << "loadMap failed at blocks for path: " << uri_;
     return false;
   }
 
@@ -170,7 +176,9 @@ bool VegasJournalV1::loadMap() {
     uint64_t fileOffset = readEightBytes(buffer, bufIndex - 7);
 
     if (logicalOffset >= fileLength) {
-      LOG(INFO) << "CORRUPTED MAP FILE: logicalOffset >= fileLength" << uri_;
+      LOG(WARNING)
+          << "CORRUPTED MAP FILE: logicalOffset >= fileLength for path: "
+          << uri_;
       return false;
     }
 
@@ -182,12 +190,13 @@ bool VegasJournalV1::loadMap() {
   std::string terminator;
   success = readString(buffer, bufIndex, sz, terminator);
   if (!success) {
-    LOG(INFO) << "loadMap failed to load terminator " << uri_;
+    LOG(WARNING) << "loadMap failed to load terminator for path: " << uri_;
     return false;
   }
   if (terminator != VegasCacheConfig::mapFileTerminator) {
-    LOG(INFO) << "loadMap failed to match mapFileTerminator: " << terminator
-              << " vs " << VegasCacheConfig::mapFileTerminator << uri_;
+    LOG(WARNING) << "loadMap failed to match mapFileTerminator: " << terminator
+                 << " vs " << VegasCacheConfig::mapFileTerminator
+                 << " for path: " << uri_;
     return false;
   }
   fileLengthMap_ = sz;
@@ -204,11 +213,15 @@ bool VegasJournalV1::verifyMap() {
 
   uint64_t targetExtentSize = 0;
   for (const auto& arr : blocks_) {
+    VLOG(1) << "Blocks logicalOffset: " << arr.logicalOffset_
+            << " length: " << arr.length_ << " fileOffset: " << arr.fileOffset_
+            << " path: " << uri_;
     targetExtentSize += arr.length_;
   }
   if (size != targetExtentSize) {
-    LOG(INFO) << "VegasJournalV1::verifyMap  fileSize " << size
-              << " targetExtentSize = " << targetExtentSize << " path " << uri_;
+    LOG(WARNING) << "FileSize = " << size
+                 << " targetExtentSize = " << targetExtentSize
+                 << " for path: " << uri_;
   }
   fileLengthJournal_ = targetExtentSize;
   return size >= targetExtentSize;
@@ -218,10 +231,9 @@ uint64_t VegasJournalV1::saveMap() {
   std::ofstream mapFile; // overwrite
   mapFile.open(mapFileName());
   if (!mapFile.is_open()) {
-    LOG(INFO) << "saveMap failed to open mapFile " << mapFileName() << uri_;
+    LOG(WARNING) << "Failed to open mapFile " << mapFileName() << uri_;
     return 0;
   }
-  uint64_t oldOffset = mapFile.tellp();
 
   uint16_t signatureSize = VegasCacheConfig::mapFileSignature.size();
   saveTwoBytesInMap(mapFile, signatureSize);
@@ -243,6 +255,9 @@ uint64_t VegasJournalV1::saveMap() {
 
   saveFourBytesInMap(mapFile, blocks_.size());
   for (const auto& arr : blocks_) {
+    VLOG(1) << "Writing blocks logicalOffset: " << arr.logicalOffset_
+            << " length: " << arr.length_ << " fileOffset: " << arr.fileOffset_
+            << " path: " << uri_;
     saveEightBytesInMap(mapFile, arr.logicalOffset_);
     saveEightBytesInMap(mapFile, arr.length_);
     saveEightBytesInMap(mapFile, arr.fileOffset_);
@@ -299,21 +314,22 @@ uint64_t VegasJournalV1::cachedBlocks(
     const uint64_t length,
     std::vector<Chunk>& chunks) {
   if (length < 1) {
-    LOG(INFO) << "Attempting to read invalid length " << length;
+    LOG(WARNING) << "Attempting to read invalid length " << length
+                 << " for path: " << uri_;
     return 0;
   }
 
   const uint64_t endOffset = startOffset + length - 1;
   if (endOffset < startOffset) {
-    LOG(INFO) << "Endoffset " << endOffset << " is less than start offset "
-              << startOffset;
+    LOG(WARNING) << "End offset " << endOffset << " is less than start offset "
+                 << startOffset << " for path: " << uri_;
     return 0;
   }
 
   if (fileLengthRemote_ != 0 && startOffset > fileLengthRemote_) {
-    LOG(INFO) << "Attempting to read at " << startOffset
-              << " which is greater than known file length "
-              << fileLengthRemote_;
+    LOG(WARNING) << "Attempting to read at " << startOffset
+                 << " which is greater than known file length "
+                 << fileLengthRemote_ << " for path: " << uri_;
     return 0;
   }
 
@@ -378,6 +394,8 @@ void VegasJournalV1::cacheRead(uint64_t offset, uint64_t length, uint8_t* pos)
   journalFile.seekg(offset, std::ios_base::beg);
   journalFile.read(reinterpret_cast<char*>(pos), length);
   journalFile.close();
+  VLOG(1) << "Cache read from offset: " << offset << " length: " << length
+          << " " << uri_;
 }
 
 bool VegasJournalV1::getWriteLock() {
@@ -391,7 +409,7 @@ bool VegasJournalV1::getWriteLock() {
           kWriteLocks.erase(uri_);
           kWriteLocksCount.fetch_sub(1);
           LOG(WARNING) << "Unable to get write lock for " << uri_
-                       << " due to totalFileOpens mismatch. ";
+                       << " due to totalFileOpens mismatch.";
           return false;
         }
       }
@@ -414,8 +432,11 @@ uint64_t VegasJournalV1::cacheWrite(
   for (int i = 0; i < lenVec.size(); ++i) {
     journalFile.write(bufVec[i], lenVec[i]);
   }
+  journalFile.seekp(0, std::ios::end);
   uint64_t newOffset = journalFile.tellp();
   journalFile.close();
+  VLOG(1) << "Cache write from offset: " << oldOffset
+          << " to newOffset: " << newOffset << " path: " << uri_;
 
   return oldOffset;
 }
@@ -433,21 +454,16 @@ bool VegasJournalV1::initialize(
     return false;
   }
 
-  // Reference: CacheController::TryPurgeVfsEntry
-  fpLock_ = fopen(lockFileName().c_str(), "w+");
-  if (nullptr == fpLock_) {
-    LOG(INFO) << "VegasJournalV1::initialize: "
-              << "Could not open lock file " << uri_;
+  fpLock_ = std::make_shared<VegasSemaphore>(semaphoreFileName_);
+  if (!fpLock_->open()) {
+    VLOG(1) << "Could not open semaphore file for path: " << uri_;
     std::string msg = "__id=vfs.bypass\n";
     msg += "path=" + uri_ + "\n";
     vegasClient_->sendMessageQueue(msg);
     return false;
   }
-  if (0 != lockf(fileno(fpLock_), F_LOCK, 0)) {
-    std::fclose(fpLock_);
-    fpLock_ = nullptr;
-    LOG(INFO) << "VegasJournalV1::initialize: "
-              << "Could not acquire lock " << uri_;
+  if (!fpLock_->tryWait()) {
+    VLOG(1) << "Could not acquire semaphore for path: " << uri_;
     std::string msg = "__id=vfs.bypass\n";
     msg += "path=" + uri_ + "\n";
     vegasClient_->sendMessageQueue(msg);
@@ -469,8 +485,8 @@ bool VegasJournalV1::initialize(
   }
 
   if (!eTagFromCache_.empty() && eTagFromCache_ != eTagRemote_) {
-    LOG(INFO) << "loadMap Mismatched eTag " << eTagFromCache_
-              << " vs eTagRemote " << eTagRemote_ << " " << uri_;
+    VLOG(1) << "loadMap mismatched eTag " << eTagFromCache_ << " vs eTagRemote "
+            << eTagRemote_ << " for path: " << uri_;
     std::string msg = "__id=vfs.cache.miss\n";
     msg += "url=" + uri_ + "\n";
     vegasClient_->sendMessageQueue(msg);
@@ -480,7 +496,7 @@ bool VegasJournalV1::initialize(
       mapFile.close();
       std::ofstream journalFile(journalFileName(), std::ofstream::trunc);
       journalFile.close();
-      LOG(INFO) << "loadMap Mismatched eTag, then clear cache " << uri_;
+      VLOG(1) << "loadMap mismatched eTag, clearing cache for path: " << uri_;
     }
     return false;
   }
@@ -506,24 +522,23 @@ void VegasJournalV1::tryClose() {
         fileLengthJournal_ += arr.length_;
       }
       auto res = publishCatalog(fileLengthMap_, fileLengthJournal_);
+      VLOG(1) << "publishCatalog isDirty = true "
+              << " res: " << res << " map length: " << fileLengthMap_
+              << " journal length: " << fileLengthJournal_ << " path: " << uri_;
     } else {
       auto res = publishCatalog(fileLengthMap_, fileLengthJournal_);
+      VLOG(1) << "publishCatalog isDirty = false "
+              << " res: " << res << " map length: " << fileLengthMap_
+              << " journal length: " << fileLengthJournal_ << " path: " << uri_;
     }
   }
 
   blocks_.clear();
 
-  if (nullptr != fpLock_) {
-    if (0 != lockf(fileno(fpLock_), F_ULOCK, 0)) {
-      LOG(INFO) << "VegasJournalV1::tryClose: "
-                << "Could not unlock lock-file " << uri_;
+  if (fpLock_ != nullptr) {
+    if (!fpLock_->release()) {
+      VLOG(1) << "Could not release semaphore for path: " << uri_;
     }
-
-    if (0 != fclose(fpLock_)) {
-      LOG(INFO) << "VegasJournalV1::tryClose: "
-                << "Could not close lock-file " << uri_;
-    }
-    fpLock_ = nullptr;
   }
 
   if (vegasClient_->isInitialized()) {
@@ -606,6 +621,7 @@ bool VegasJournalV1::publishCatalog(
       SysUtils::now_as_string_millis() + "\n");
 
   int32_t ret = vegasClient_->publishCatalogUsingSocket(catalogStringBuilder);
+  VLOG(1) << "publishCatalogUsingSocket: " << ret << " path: " << uri_;
   return ret == 0;
 }
 

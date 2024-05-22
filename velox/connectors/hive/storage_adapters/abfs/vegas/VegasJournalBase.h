@@ -70,9 +70,6 @@ class VegasJournalBase {
   inline std::string mapFileName() const {
     return path_ + VegasCacheConfig::VFSMapExt;
   }
-  inline std::string lockFileName() const {
-    return path_ + VegasCacheConfig::VFSLockExt;
-  }
 
   // static
   static bool readString(

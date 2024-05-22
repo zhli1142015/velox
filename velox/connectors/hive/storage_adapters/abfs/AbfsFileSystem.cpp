@@ -104,8 +104,7 @@ class AbfsReadFile::Impl {
     if (eTag_.empty() || length_ == -1) {
 
       try {
-        LOG(INFO) << "Fetching properties from remote file system for "
-                  << path_;
+        VLOG(1) << "Fetching properties from remote file system for " << path_;
         auto properties = fileClient_->GetProperties();
         length_ = properties.Value.BlobSize;
         auto eTagFull = properties.Value.ETag.ToString();

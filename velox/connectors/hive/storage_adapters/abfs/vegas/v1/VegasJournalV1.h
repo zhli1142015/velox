@@ -18,6 +18,7 @@
 
 #include "folly/concurrency/ConcurrentHashMap.h"
 #include "velox/connectors/hive/storage_adapters/abfs/vegas/VegasJournalBase.h"
+#include "velox/connectors/hive/storage_adapters/abfs/vegas/VegasSempahore.h"
 
 namespace facebook::velox::filesystems::abfs::vegas {
 
@@ -56,7 +57,8 @@ class VegasJournalV1 : public VegasJournalBase {
   explicit VegasJournalV1(
       const std::shared_ptr<vegas::VegasCacheConfig> vegasConfig,
       const std::string& uri,
-      const std::string& path);
+      const std::string& path,
+      const std::string& semaphoreFileName);
 
   void cacheRead(uint64_t offset, uint64_t length, uint8_t* pos) const;
 
@@ -92,10 +94,11 @@ class VegasJournalV1 : public VegasJournalBase {
 
   uint64_t fileLengthMap_ = 0;
   uint64_t fileLengthJournal_ = 0;
+  std::string semaphoreFileName_{"/"};
 
   bool isDirty_ = false;
-  FILE* fpLock_ = nullptr;
   std::vector<BlockDef> blocks_;
+  std::shared_ptr<VegasSemaphore> fpLock_;
 
   static bool kShouldCleanup;
   static uint64_t kWriteLocksLimit;

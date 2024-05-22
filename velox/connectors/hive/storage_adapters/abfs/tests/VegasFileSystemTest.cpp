@@ -25,10 +25,14 @@
 #include "velox/connectors/hive/storage_adapters/abfs/BlobClientProviderFactory.h"
 #include "velox/connectors/hive/storage_adapters/abfs/ConnectionStringBlobClientProvider.h"
 #include "velox/connectors/hive/storage_adapters/abfs/tests/AzuriteServer.h"
+#include "velox/connectors/hive/storage_adapters/abfs/vegas/VegasSempahore.h"
 #include "velox/exec/tests/utils/PortUtil.h"
 #include "velox/exec/tests/utils/TempFilePath.h"
 
+#include <boost/algorithm/hex.hpp>
 #include <mqueue.h>
+#include <openssl/md5.h>
+#include <semaphore.h>
 #include <atomic>
 #include <filesystem>
 #include <random>
@@ -90,6 +94,7 @@ class VegasFileSystemTest : public testing::Test {
         LOG(ERROR) << "Error creating Vegas cache directory " << vegasCacheDir;
       }
     }
+
     for (const auto& entry :
          std::filesystem::directory_iterator(vegasCacheDir)) {
       if (std::filesystem::is_regular_file(entry)) {
@@ -122,6 +127,15 @@ class VegasFileSystemTest : public testing::Test {
         if (std::filesystem::is_regular_file(entry)) {
           std::filesystem::remove(entry);
         }
+      }
+    }
+
+    std::string suffix = ".block.journal.semaphore";
+    for (const auto& entry : std::filesystem::directory_iterator("/dev/shm")) {
+      std::string filename = entry.path().filename().string();
+      if (entry.is_regular_file() &&
+          filename.rfind(suffix) == filename.size() - suffix.size()) {
+        std::filesystem::remove(entry);
       }
     }
 
@@ -286,4 +300,137 @@ TEST_F(VegasFileSystemTest, multipleThreadsWithReadFile) {
   for (auto& thread : threads) {
     thread.join();
   }
+}
+
+TEST_F(VegasFileSystemTest, readFileWithJournalDelete) {
+  const std::string path = "test_file3.txt";
+  const std::string fullPath =
+      facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
+  auto tempFile = VegasFileSystemTest::createFile();
+  azuriteServer_->addFile(tempFile->path, path);
+
+  auto config = VegasFileSystemTest::hiveConfig();
+  auto abfs = filesystems::getFileSystem(fullPath, config);
+  auto readFile = abfs->openFileForRead(fullPath);
+  uint64_t ssdBytesRead = 0;
+
+  readData(readFile.get(), ssdBytesRead);
+  // Last 3 reads in readData will already be in cache
+  ASSERT_EQ(ssdBytesRead, 33);
+
+  unsigned char md5output[MD5_DIGEST_LENGTH];
+  MD5(reinterpret_cast<const unsigned char*>(fullPath.c_str()),
+      fullPath.length(),
+      md5output);
+  auto md5str =
+      std::string(reinterpret_cast<const char*>(md5output), MD5_DIGEST_LENGTH);
+  std::string md5hex = boost::algorithm::hex_lower(md5str);
+  std::filesystem::remove("/tmp/vegas/vfs/" + md5hex + ".block.journal");
+
+  ssdBytesRead = 0;
+  char buffer4[10];
+  ASSERT_EQ(readFile->pread(0, 10, &buffer4, ssdBytesRead, 0, 0), "aaaaabbbbb");
+  ASSERT_EQ(ssdBytesRead, 0);
+}
+
+TEST_F(VegasFileSystemTest, readFileWithMapDelete) {
+  const std::string path = "test_file4.txt";
+  const std::string fullPath =
+      facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
+  auto tempFile = VegasFileSystemTest::createFile();
+  azuriteServer_->addFile(tempFile->path, path);
+
+  auto config = VegasFileSystemTest::hiveConfig();
+  auto abfs = filesystems::getFileSystem(fullPath, config);
+  auto readFile = abfs->openFileForRead(fullPath);
+  uint64_t ssdBytesRead = 0;
+
+  readData(readFile.get(), ssdBytesRead);
+  // Last 3 reads in readData will already be in cache
+  ASSERT_EQ(ssdBytesRead, 33);
+
+  unsigned char md5output[MD5_DIGEST_LENGTH];
+  MD5(reinterpret_cast<const unsigned char*>(fullPath.c_str()),
+      fullPath.length(),
+      md5output);
+  auto md5str =
+      std::string(reinterpret_cast<const char*>(md5output), MD5_DIGEST_LENGTH);
+  std::string md5hex = boost::algorithm::hex_lower(md5str);
+  std::filesystem::remove("/tmp/vegas/vfs/" + md5hex + ".block.map");
+
+  auto readFile2 = abfs->openFileForRead(fullPath);
+  ssdBytesRead = 0;
+  char buffer4[10];
+  ASSERT_EQ(
+      readFile2->pread(0, 10, &buffer4, ssdBytesRead, 0, 0), "aaaaabbbbb");
+  ASSERT_EQ(ssdBytesRead, 0);
+}
+
+TEST_F(VegasFileSystemTest, readFileSemaphoreAlreadyExists) {
+  const std::string path = "test_file5.txt";
+  const std::string fullPath =
+      facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
+  auto tempFile = VegasFileSystemTest::createFile();
+  azuriteServer_->addFile(tempFile->path, path);
+
+  unsigned char md5output[MD5_DIGEST_LENGTH];
+  MD5(reinterpret_cast<const unsigned char*>(fullPath.c_str()),
+      fullPath.length(),
+      md5output);
+  auto md5str =
+      std::string(reinterpret_cast<const char*>(md5output), MD5_DIGEST_LENGTH);
+  std::string md5hex = boost::algorithm::hex_lower(md5str);
+  std::string semaphoreName = md5str + ".block.journal.semaphore";
+  sem_t* sem = sem_open(semaphoreName.c_str(), O_CREAT | O_EXCL, 0644, 1);
+
+  sem_trywait(sem);
+
+  auto config = VegasFileSystemTest::hiveConfig();
+  auto abfs = filesystems::getFileSystem(fullPath, config);
+
+  // Semaphore has been acquired "outside process" so cache read should be 0
+  auto readFile = abfs->openFileForRead(fullPath);
+  uint64_t ssdBytesRead = 0;
+  char buffer[10];
+  ASSERT_EQ(readFile->pread(0, 10, &buffer, ssdBytesRead, 0, 0), "aaaaabbbbb");
+  ASSERT_EQ(ssdBytesRead, 0);
+
+  sem_post(sem);
+  sem_close(sem);
+  sem_unlink(semaphoreName.c_str());
+
+  // Semaphore has been released so cache read should be 10
+  auto readFile2 = abfs->openFileForRead(fullPath);
+  ssdBytesRead = 0;
+  char buffer2[10];
+  ASSERT_EQ(
+      readFile2->pread(0, 10, &buffer2, ssdBytesRead, 0, 0), "aaaaabbbbb");
+  ASSERT_EQ(ssdBytesRead, 10);
+}
+
+TEST_F(VegasFileSystemTest, semaphoreRelease) {
+  const std::string path = "test_file6.txt";
+  const std::string fullPath =
+      facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
+
+  unsigned char md5output[MD5_DIGEST_LENGTH];
+  MD5(reinterpret_cast<const unsigned char*>(fullPath.c_str()),
+      fullPath.length(),
+      md5output);
+  auto md5str =
+      std::string(reinterpret_cast<const char*>(md5output), MD5_DIGEST_LENGTH);
+  std::string md5hex = boost::algorithm::hex_lower(md5str);
+  std::string semaphoreName = md5str + ".block.journal.semaphore";
+
+  filesystems::abfs::vegas::VegasSemaphore semaphore1(semaphoreName);
+  semaphore1.release();
+
+  filesystems::abfs::vegas::VegasSemaphore semaphore2(semaphoreName);
+  semaphore2.open();
+  semaphore2.release();
+
+  filesystems::abfs::vegas::VegasSemaphore semaphore3(semaphoreName);
+  semaphore3.open();
+  semaphore3.tryWait();
+  semaphore2.release();
 }
