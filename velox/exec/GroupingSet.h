@@ -120,6 +120,10 @@ class GroupingSet {
     return spiller_->stats();
   }
 
+  int64_t rehashTime() const {
+    return table_ ? table_->getRehashTime() : 0;
+  }
+
   /// Returns true if spilling has triggered on this grouping set.
   bool hasSpilled() const;
 

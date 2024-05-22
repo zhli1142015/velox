@@ -357,6 +357,10 @@ class BaseHashTable {
     return static_cast<uint8_t>(hash >> 38) | 0x80;
   }
 
+  int64_t getRehashTime() const {
+    return totalRehashTime_;
+  }
+
   /// Loads a vector of tags for bulk comparison. Disables tsan errors
   /// because with parallel join build different ranges of the table
   /// are filled by different threads, after which the main thread
@@ -410,6 +414,7 @@ class BaseHashTable {
 
   // Time spent in build outside of the calling thread.
   CpuWallTiming offThreadBuildTiming_;
+  int64_t totalRehashTime_{0};
 };
 
 FOLLY_ALWAYS_INLINE std::ostream& operator<<(

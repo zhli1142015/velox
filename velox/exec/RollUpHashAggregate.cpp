@@ -238,12 +238,14 @@ std::unique_ptr<GroupingSet> RollUpHashAggregate::createGroupingSet(
 void RollUpHashAggregate::updateGroupingSetStats(const GroupingSet& gs) {
   const auto mode = gs.hashMode();
   hashModeStats_[static_cast<int>(mode)]++;
+  numRehashes += gs.hashTableStats().numRehashes;
+  rehashTime += gs.rehashTime();
 }
 
 void RollUpHashAggregate::switchGroupingSet() {
+  secondaryGroupingSet_->noMoreInput();
   // Accumulate stats for each grouping sets
   updateGroupingSetStats(*secondaryGroupingSet_);
-  secondaryGroupingSet_->noMoreInput();
   groupingSet_->resetTable();
   std::swap(groupingSet_, secondaryGroupingSet_);
   createSecondaryGroupingSet();
@@ -270,6 +272,14 @@ void RollUpHashAggregate::recordHashMode() {
       RuntimeMetric(hashModeStats_[1]);
   lockedStats->runtimeStats["hashtable.numNormalizedKeyMode"] =
       RuntimeMetric(hashModeStats_[2]);
+}
+
+void RollUpHashAggregate::recordRehashStats() {
+  auto lockedStats = stats_.wlock();
+  lockedStats->runtimeStats["hashtable.numRehashes"] =
+      RuntimeMetric(numRehashes);
+  lockedStats->runtimeStats["hashtable.rehashTime"] =
+      RuntimeMetric(rehashTime, RuntimeCounter::Unit::kNanos);
 }
 
 void RollUpHashAggregate::prepareOutput(vector_size_t size) {
@@ -312,6 +322,7 @@ RowVectorPtr RollUpHashAggregate::getOutput() {
     if (noMoreInput_ && rollup_ == groupingKeySize_ - 1) {
       finished_ = true;
       recordHashMode();
+      recordRehashStats();
     } else if (noMoreInput_) {
       switchGroupingSet();
 
@@ -362,8 +373,8 @@ void RollUpHashAggregate::insertIntoSecondaryTable() {
 }
 
 void RollUpHashAggregate::noMoreInput() {
-  updateGroupingSetStats(*groupingSet_);
   groupingSet_->noMoreInput();
+  updateGroupingSetStats(*groupingSet_);
   Operator::noMoreInput();
 }
 

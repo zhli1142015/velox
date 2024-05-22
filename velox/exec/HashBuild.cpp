@@ -949,6 +949,8 @@ void HashBuild::addRuntimeStats() {
     lockedStats->runtimeStats["hashtable.numNormalizedKeyMode"] =
         RuntimeMetric(1);
   }
+  lockedStats->runtimeStats["hashtable.rehashTime"] =
+      RuntimeMetric(table_->getRehashTime(), RuntimeCounter::Unit::kNanos);
 }
 
 BlockingReason HashBuild::isBlocked(ContinueFuture* future) {

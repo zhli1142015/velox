@@ -1227,6 +1227,7 @@ void HashTable<ignoreNullKeys>::insertForJoin(
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::rehash(bool initNormalizedKeys) {
   ++numRehashes_;
+  auto rehashStartMicros = getCurrentTimeMicro();
   constexpr int32_t kHashBatchSize = 1024;
   if (canApplyParallelJoinBuild()) {
     parallelJoinBuild();
@@ -1248,11 +1249,17 @@ void HashTable<ignoreNullKeys>::rehash(bool initNormalizedKeys) {
       if (!insertBatch(
               groups, numGroups, hashes, initNormalizedKeys || i != 0)) {
         VELOX_CHECK_NE(hashMode_, HashMode::kHash);
+        auto hashModeRehashTimeStart = getCurrentTimeMicro();
         setHashMode(HashMode::kHash, 0);
+        // time to rehash when hash mode is set to kHash is already added in the
+        // setHashMode call above
+        totalRehashTime_ +=
+            (hashModeRehashTimeStart - rehashStartMicros) * 1000;
         return;
       }
     } while (numGroups > 0);
   }
+  totalRehashTime_ += (getCurrentTimeMicro() - rehashStartMicros) * 1000;
 }
 
 template <bool ignoreNullKeys>

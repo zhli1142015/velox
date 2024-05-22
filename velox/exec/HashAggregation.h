@@ -116,6 +116,7 @@ class HashAggregation : public Operator {
 
   // Possibly reusable output vector.
   RowVectorPtr output_;
+  void recordRehashTime();
 };
 
 } // namespace facebook::velox::exec

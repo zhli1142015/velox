@@ -204,6 +204,12 @@ void HashAggregation::recordHashMode() {
   }
 }
 
+void HashAggregation::recordRehashTime() {
+  auto lockedStats = stats_.wlock();
+  lockedStats->runtimeStats["hashtable.rehashTime"] =
+      RuntimeMetric(groupingSet_->rehashTime(), RuntimeCounter::Unit::kNanos);
+}
+
 void HashAggregation::prepareOutput(vector_size_t size) {
   if (output_) {
     VectorPtr output = std::move(output_);
@@ -397,6 +403,7 @@ void HashAggregation::noMoreInput() {
   updateEstimatedOutputRowSize();
   groupingSet_->noMoreInput();
   recordHashMode();
+  recordRehashTime();
   Operator::noMoreInput();
   // Release the extra reserved memory right after processing all the inputs.
   pool()->release();

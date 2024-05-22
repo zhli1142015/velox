@@ -85,6 +85,8 @@ class RollUpHashAggregate : public Operator {
 
   void recordHashMode();
 
+  void recordRehashStats();
+
   // Creates the secondary hash table with modified Aggregate functions and
   // spill config
   std::unique_ptr<GroupingSet> createGroupingSet(
@@ -126,6 +128,9 @@ class RollUpHashAggregate : public Operator {
   // BaseHashTable::HashMode::kArray Index 2 ->
   // BaseHashTable::HashMode::kNormalizedKey
   std::array<int, 3> hashModeStats_ = {0, 0, 0};
+
+  int64_t numRehashes = 0;
+  int64_t rehashTime = 0;
 
   // Count the number of input rows. It is reset on partial aggregation output
   // flush.
