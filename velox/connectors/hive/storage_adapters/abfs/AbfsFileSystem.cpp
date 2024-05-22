@@ -94,9 +94,8 @@ class AbfsReadFile::Impl {
     fileClient_ = BlobClientProviderFactory::getBlobClient(path_, abfsAccount);
   }
 
-  void initialize(const FileOptions& options) {
+  void initialize() {
     if (eTag_.empty() || length_ == -1) {
-
       try {
         VLOG(1) << "Fetching properties from remote file system for " << path_;
         auto properties = fileClient_->GetProperties();

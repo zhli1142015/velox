@@ -78,7 +78,7 @@ class VegasFileSystemTest : public testing::Test {
             static_cast<int64_t>(stoi(port_)));
     azuriteServer_->start();
     auto tempFile = createFile();
-    azuriteServer_->addFile(tempFile->path, filePath);
+    azuriteServer_->addFile(tempFile->getPath(), filePath);
     auto connectionStringProvider =
         std::make_shared<ConnectionStringBlobClientProvider>(
             facebook::velox::filesystems::test::AzuriteAccountName,
@@ -209,7 +209,7 @@ TEST_F(VegasFileSystemTest, readFileWithPartialOverlaps) {
   const std::string fullPath =
       facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
   auto tempFile = VegasFileSystemTest::createFile();
-  azuriteServer_->addFile(tempFile->path, path);
+  azuriteServer_->addFile(tempFile->getPath(), path);
 
   auto config = VegasFileSystemTest::hiveConfig();
   auto abfs = filesystems::getFileSystem(fullPath, config);
@@ -307,7 +307,7 @@ TEST_F(VegasFileSystemTest, readFileWithJournalDelete) {
   const std::string fullPath =
       facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
   auto tempFile = VegasFileSystemTest::createFile();
-  azuriteServer_->addFile(tempFile->path, path);
+  azuriteServer_->addFile(tempFile->getPath(), path);
 
   auto config = VegasFileSystemTest::hiveConfig();
   auto abfs = filesystems::getFileSystem(fullPath, config);
@@ -338,7 +338,7 @@ TEST_F(VegasFileSystemTest, readFileWithMapDelete) {
   const std::string fullPath =
       facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
   auto tempFile = VegasFileSystemTest::createFile();
-  azuriteServer_->addFile(tempFile->path, path);
+  azuriteServer_->addFile(tempFile->getPath(), path);
 
   auto config = VegasFileSystemTest::hiveConfig();
   auto abfs = filesystems::getFileSystem(fullPath, config);
@@ -371,7 +371,7 @@ TEST_F(VegasFileSystemTest, readFileSemaphoreAlreadyExists) {
   const std::string fullPath =
       facebook::velox::filesystems::test::AzuriteABFSEndpoint + path;
   auto tempFile = VegasFileSystemTest::createFile();
-  azuriteServer_->addFile(tempFile->path, path);
+  azuriteServer_->addFile(tempFile->getPath(), path);
 
   unsigned char md5output[MD5_DIGEST_LENGTH];
   MD5(reinterpret_cast<const unsigned char*>(fullPath.c_str()),

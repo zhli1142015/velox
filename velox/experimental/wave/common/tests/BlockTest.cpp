@@ -155,8 +155,8 @@ class BlockTest : public testing::Test {
     }
     stream.wait();
     elapsed = getCurrentTimeMicro() - startMicros;
-    std::cout << "Flags " << (use256 ? "256" : "")
-              << " to indices: " << " to indices no smem: " << elapsed << "us, "
+    std::cout << "Flags " << (use256 ? "256" : "") << " to indices: "
+              << " to indices no smem: " << elapsed << "us, "
               << kNumFlags / static_cast<float>(elapsed) << " Mrows/s"
               << std::endl;
   }
