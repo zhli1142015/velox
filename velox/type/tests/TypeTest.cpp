@@ -627,7 +627,8 @@ TEST(TypeTest, equality) {
 
   // mix
   EXPECT_FALSE(MAP(REAL(), INTEGER())
-                   ->operator==(*ROW({{"a", REAL()}, {"b", INTEGER()}})));
+                   ->
+                   operator==(*ROW({{"a", REAL()}, {"b", INTEGER()}})));
   EXPECT_FALSE(ARRAY(REAL())->operator==(*ROW({{"a", REAL()}})));
 }
 

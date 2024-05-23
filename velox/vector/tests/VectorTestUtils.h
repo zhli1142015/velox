@@ -212,7 +212,8 @@ void assertVector(
 
     if (isNull) {
       if (dbgPrintVec) {
-        LOG(INFO) << "[" << i << "]:" << "NULL";
+        LOG(INFO) << "[" << i << "]:"
+                  << "NULL";
       }
       EXPECT_EQ(isNull, actualIsNull);
     } else {
