@@ -1010,7 +1010,16 @@ RowVectorPtr HashProbe::getOutputInternal(bool toSpillOutput) {
     }
     VELOX_CHECK_LE(numOut, outputTableRows_.size());
 
-    numOut = evalFilter(numOut);
+    if (filter_) {
+      CpuWallTiming timing;
+      {
+        CpuWallTimer cpuWallTimer{timing};
+        numOut = evalFilter(numOut);
+      }
+      stats_.wlock()->addRuntimeStat(
+          "joinFilterTime",
+          RuntimeCounter(timing.wallNanos, RuntimeCounter::Unit::kNanos));
+    }
 
     if (numOut == 0) {
       continue;
