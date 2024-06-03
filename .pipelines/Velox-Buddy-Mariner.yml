@@ -116,19 +116,17 @@ extends:
           type: linux
 
         variables: # More settings at https://aka.ms/obpipelines/yaml/jobs
-          LinuxContainerImage: 'onebranch.azurecr.io/linux/ubuntu-2004:latest'
+          LinuxContainerImage: 'mcr.microsoft.com/onebranch/cbl-mariner/build:2.0'
           ob_outputDirectory: '$(Build.SourcesDirectory)/out' # this directory is uploaded to pipeline artifacts, reddog and cloudvault. More info at https://aka.ms/obpipelines/artifacts
         
         steps:
           - task: Bash@3
-            displayName: 'Install clang-format-12'
+            displayName: 'Install clang-format'
             inputs:
               targetType: 'inline'
               script: |
-                wget https://apt.llvm.org/llvm.sh
-                chmod +x llvm.sh
-                sudo ./llvm.sh 12
-                sudo apt install -y clang-format-12
+                sudo tdnf install -y clang
+                sudo tdnf install -y clang-tools-extra
 
           - task: Bash@3
             displayName: 'Formatting check'

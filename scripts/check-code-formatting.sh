@@ -21,7 +21,7 @@ format_diff() {
 	local filepath="$1"
     
 	# Invoke clang-format with dry run and formatting error output
-    local_format="$(clang-format-12 -n --Werror --style=file --fallback-style=llvm "${filepath}")"
+    local_format="$(clang-format -n --Werror --style=file --fallback-style=llvm "${filepath}")"
 	local format_status="$?"
 	if [[ ${format_status} -ne 0 ]]; then
 		# Append Markdown-bulleted monospaced filepath of failing file to
