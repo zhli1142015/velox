@@ -26,6 +26,10 @@
 
 namespace facebook::velox::functions::aggregate::sparksql {
 
+extern void registerCollectSetAggAggregate(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite);
 extern void registerFirstLastAggregates(
     const std::string& prefix,
     bool withCompanionFunctions,
@@ -47,6 +51,7 @@ void registerAggregateFunctions(
   registerAverage(prefix + "avg", withCompanionFunctions, overwrite);
   registerSum(prefix + "sum", withCompanionFunctions, overwrite);
   registerCentralMomentsAggregate(prefix, withCompanionFunctions, overwrite);
+  registerCollectSetAggAggregate(prefix, withCompanionFunctions, overwrite);
   registerCollectListAggregate(prefix, withCompanionFunctions, overwrite);
   registerRegrReplacementAggregate(prefix, withCompanionFunctions, overwrite);
 }

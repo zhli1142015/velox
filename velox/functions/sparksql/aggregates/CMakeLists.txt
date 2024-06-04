@@ -18,6 +18,7 @@ add_library(
   BloomFilterAggAggregate.cpp
   CentralMomentsAggregate.cpp
   CollectListAggregate.cpp
+  CollectSetAggregate.cpp
   FirstLastAggregate.cpp
   MinMaxByAggregate.cpp
   Register.cpp
