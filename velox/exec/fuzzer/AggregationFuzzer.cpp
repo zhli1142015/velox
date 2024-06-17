@@ -165,6 +165,7 @@ class AggregationFuzzer : public AggregationFuzzerBase {
           false /*injectSpill*/,
           false /*abandonPartial*/,
           customVerification,
+          false,
           customVerifiers,
           expected,
           maxDrivers);
@@ -176,6 +177,7 @@ class AggregationFuzzer : public AggregationFuzzerBase {
             true /*injectSpill*/,
             false /*abandonPartial*/,
             customVerification,
+            false,
             customVerifiers,
             expected,
             maxDrivers);
@@ -189,6 +191,7 @@ class AggregationFuzzer : public AggregationFuzzerBase {
             false /*injectSpill*/,
             true /*abandonPartial*/,
             customVerification,
+            false,
             customVerifiers,
             expected,
             maxDrivers);

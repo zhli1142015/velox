@@ -88,6 +88,8 @@ class Window : public Operator {
     const std::optional<FrameChannelArg> end;
   };
 
+  bool supportRowsStreaming();
+
   // Creates WindowFunction and frame objects for this operator.
   void createWindowFunctions();
 
@@ -132,7 +134,7 @@ class Window : public Operator {
   // consists of all the input columns followed by the results of the
   // window function.
   // @return The number of rows processed in the loop.
-  vector_size_t callApplyLoop(
+  std::pair<vector_size_t, vector_size_t> callApplyLoop(
       vector_size_t numOutputRows,
       const RowVectorPtr& result);
 
@@ -165,7 +167,7 @@ class Window : public Operator {
 
   // Used to access window partition rows and columns by the window
   // operator and functions. This structure is owned by the WindowBuild.
-  std::unique_ptr<WindowPartition> currentPartition_;
+  std::shared_ptr<WindowPartition> currentPartition_;
 
   // HashStringAllocator required by functions that allocate out of line
   // buffers.
