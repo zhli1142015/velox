@@ -18,6 +18,7 @@
 #include <velox/common/base/Exceptions.h>
 #include "velox/functions/Udf.h"
 #include "velox/vector/BaseVector.h"
+#include <iostream>
 
 namespace facebook::velox::functions {
 
@@ -29,71 +30,6 @@ namespace {
 /// If the vector encoding is not flat, we revert to non simd approach.
 template <typename ComparisonOp, typename Arch = xsimd::default_arch>
 struct SimdComparator {
-  template <typename T, bool isConstant>
-  inline auto loadSimdData(const T* rawData, vector_size_t offset) {
-    using d_type = xsimd::batch<T>;
-    if constexpr (isConstant) {
-      return xsimd::broadcast<T>(rawData[0]);
-    }
-    return d_type::load_unaligned(rawData + offset);
-  }
-
-  template <typename T, bool isLeftConstant, bool isRightConstant>
-  void applySimdComparison(
-      const vector_size_t begin,
-      const vector_size_t end,
-      const T* rawLhs,
-      const T* rawRhs,
-      uint8_t* rawResult) {
-    using d_type = xsimd::batch<T>;
-    constexpr auto numScalarElements = d_type::size;
-    const auto vectorEnd = (end - begin) - (end - begin) % numScalarElements;
-
-    if constexpr (numScalarElements == 2 || numScalarElements == 4) {
-      for (auto i = begin; i < vectorEnd; i += 8) {
-        rawResult[i / 8] = 0;
-        for (auto j = 0; j < 8 && (i + j) < vectorEnd; j += numScalarElements) {
-          auto left = loadSimdData<T, isLeftConstant>(rawLhs, i + j);
-          auto right = loadSimdData<T, isRightConstant>(rawRhs, i + j);
-
-          uint8_t res = simd::toBitMask(ComparisonOp()(left, right));
-          rawResult[i / 8] |= res << j;
-        }
-      }
-    } else {
-      for (auto i = begin; i < vectorEnd; i += numScalarElements) {
-        auto left = loadSimdData<T, isLeftConstant>(rawLhs, i);
-        auto right = loadSimdData<T, isRightConstant>(rawRhs, i);
-
-        auto res = simd::toBitMask(ComparisonOp()(left, right));
-        if constexpr (numScalarElements == 8) {
-          rawResult[i / 8] = res;
-        } else if constexpr (numScalarElements == 16) {
-          uint16_t* addr = reinterpret_cast<uint16_t*>(rawResult + i / 8);
-          *addr = res;
-        } else if constexpr (numScalarElements == 32) {
-          uint32_t* addr = reinterpret_cast<uint32_t*>(rawResult + i / 8);
-          *addr = res;
-        } else {
-          VELOX_FAIL("Unsupported number of scalar elements");
-        }
-      }
-    }
-
-    // Evaluate remaining values.
-    for (auto i = vectorEnd; i < end; i++) {
-      if constexpr (isRightConstant && isLeftConstant) {
-        bits::setBit(rawResult, i, ComparisonOp()(rawLhs[0], rawRhs[0]));
-      } else if constexpr (isRightConstant) {
-        bits::setBit(rawResult, i, ComparisonOp()(rawLhs[i], rawRhs[0]));
-      } else if constexpr (isLeftConstant) {
-        bits::setBit(rawResult, i, ComparisonOp()(rawLhs[0], rawRhs[i]));
-      } else {
-        bits::setBit(rawResult, i, ComparisonOp()(rawLhs[i], rawRhs[i]));
-      }
-    }
-  }
-
   template <
       TypeKind kind,
       typename std::enable_if_t<
@@ -109,52 +45,33 @@ struct SimdComparator {
       exec::EvalCtx& context,
       VectorPtr& result) {
     using T = typename TypeTraits<kind>::NativeType;
-
+    if constexpr (!std::is_same_v<T, int128_t>) {
+      bool evaluated = false;
+      if (lhs.isFlatEncoding() && rhs.isFlatEncoding()) {
+        evaluated =
+            applySimdComparison<T, false, false>(rows, lhs, rhs, result);
+      } else if (lhs.isConstantEncoding() && rhs.isFlatEncoding()) {
+        evaluated = applySimdComparison<T, true, false>(rows, lhs, rhs, result);
+      } else if (lhs.isFlatEncoding() && rhs.isConstantEncoding()) {
+        evaluated = applySimdComparison<T, false, true>(rows, lhs, rhs, result);
+      }
+      if (evaluated) {
+        return;
+      }
+    }
     auto resultVector = result->asUnchecked<FlatVector<bool>>();
     auto rawResult = resultVector->mutableRawValues<uint8_t>();
 
-    auto isSimdizable = (lhs.isConstantEncoding() || lhs.isFlatEncoding()) &&
-        (rhs.isConstantEncoding() || rhs.isFlatEncoding()) &&
-        rows.isAllSelected();
+    exec::LocalDecodedVector lhsDecoded(context, lhs, rows);
+    exec::LocalDecodedVector rhsDecoded(context, rhs, rows);
 
-    if (!isSimdizable || std::is_same_v<T, int128_t>) {
-      exec::LocalDecodedVector lhsDecoded(context, lhs, rows);
-      exec::LocalDecodedVector rhsDecoded(context, rhs, rows);
-
-      context.template applyToSelectedNoThrow(rows, [&](auto row) {
-        auto l = lhsDecoded->template valueAt<T>(row);
-        auto r = rhsDecoded->template valueAt<T>(row);
-        auto filtered = ComparisonOp()(l, r);
-        resultVector->set(row, filtered);
-      });
-      return;
-    }
-
-    if constexpr (!std::is_same_v<T, int128_t>) {
-      if (lhs.isConstantEncoding() && rhs.isConstantEncoding()) {
-        auto l = lhs.asUnchecked<ConstantVector<T>>()->valueAt(0);
-        auto r = rhs.asUnchecked<ConstantVector<T>>()->valueAt(0);
-        applySimdComparison<T, true, true>(
-            rows.begin(), rows.end(), &l, &r, rawResult);
-      } else if (lhs.isConstantEncoding()) {
-        auto l = lhs.asUnchecked<ConstantVector<T>>()->valueAt(0);
-        auto rawRhs = rhs.asUnchecked<FlatVector<T>>()->rawValues();
-        applySimdComparison<T, true, false>(
-            rows.begin(), rows.end(), &l, rawRhs, rawResult);
-      } else if (rhs.isConstantEncoding()) {
-        auto rawLhs = lhs.asUnchecked<FlatVector<T>>()->rawValues();
-        auto r = rhs.asUnchecked<ConstantVector<T>>()->valueAt(0);
-        applySimdComparison<T, false, true>(
-            rows.begin(), rows.end(), rawLhs, &r, rawResult);
-      } else {
-        auto rawLhs = lhs.asUnchecked<FlatVector<T>>()->rawValues();
-        auto rawRhs = rhs.asUnchecked<FlatVector<T>>()->rawValues();
-        applySimdComparison<T, false, false>(
-            rows.begin(), rows.end(), rawLhs, rawRhs, rawResult);
-      }
-
-      resultVector->clearNulls(rows);
-    }
+    context.template applyToSelectedNoThrow(rows, [&](auto row) {
+      auto l = lhsDecoded->template valueAt<T>(row);
+      auto r = rhsDecoded->template valueAt<T>(row);
+      auto filtered = ComparisonOp()(l, r);
+      resultVector->set(row, filtered);
+    });
+    return;
   }
 
   template <
@@ -173,6 +90,67 @@ struct SimdComparator {
       VectorPtr& /* result */) {
     VELOX_UNSUPPORTED("Unsupported type for SIMD comparison");
   }
+
+ private:
+  template <typename T, bool constA, bool constB>
+  bool applySimdComparison(
+      const SelectivityVector& rows,
+      BaseVector& lhs,
+      BaseVector& rhs,
+      VectorPtr& result) const {
+    vector_size_t begin = rows.begin();
+    vector_size_t end = rows.end();
+    vector_size_t size = end - begin;
+    if (rows.isAllSelected()) {
+      // std::cout << "use simd" << std::endl;
+      tempRes_->reserve(rows.size());
+      auto __restrict tempRes = tempRes_->data();
+      auto resultVector = result->asUnchecked<FlatVector<bool>>();
+      auto rawResult = resultVector->mutableRawValues<uint8_t>();
+      if constexpr (!constA && !constB) {
+        T* __restrict rawA =
+            lhs.asUnchecked<FlatVector<T>>()->mutableRawValues();
+        T* __restrict rawB =
+            rhs.asUnchecked<FlatVector<T>>()->mutableRawValues();
+        for (auto i = begin; i < end; i++) {
+          tempRes[i] = ComparisonOp()(rawA[i], rawB[i]) ? -1 : 0;
+        }
+      } else if constexpr (constA) {
+        auto constant = lhs.asUnchecked<ConstantVector<T>>()->valueAt(0);
+        T* __restrict rawB =
+            rhs.asUnchecked<FlatVector<T>>()->mutableRawValues();
+        for (auto i = begin; i < end; i++) {
+          tempRes[i] = ComparisonOp()(constant, rawB[i]) ? -1 : 0;
+        }
+      } else if constexpr (constB) {
+        T* __restrict rawA =
+            lhs.asUnchecked<FlatVector<T>>()->mutableRawValues();
+        auto constant = rhs.asUnchecked<ConstantVector<T>>()->valueAt(0);
+        for (auto i = begin; i < end; i++) {
+          tempRes[i] = ComparisonOp()(rawA[i], constant) ? -1 : 0;
+        }
+      } else {
+        VELOX_UNREACHABLE();
+      }
+
+      const auto vectorEnd = size - size % 32;
+      for (auto i = begin; i < vectorEnd; i += 32) {
+        auto res = simd::toBitMask(
+            xsimd::batch_bool<int8_t>(xsimd::load_unaligned(tempRes + i)));
+        uint32_t* addr = reinterpret_cast<uint32_t*>(rawResult + i / 8);
+        *addr = res;
+      }
+      for (auto i = vectorEnd; i < end; i++) {
+        bits::setBit(rawResult, i, tempRes[i]);
+      }
+      result->clearNulls(rows);
+      return true;
+    }
+    return false;
+  }
+
+  std::unique_ptr<std::vector<int8_t>> tempRes_ =
+      std::make_unique<std::vector<int8_t>>();
 };
 
 template <typename ComparisonOp, typename Arch = xsimd::default_arch>
