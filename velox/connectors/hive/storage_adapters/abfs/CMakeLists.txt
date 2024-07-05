@@ -14,8 +14,9 @@
 
 # for generated headers
 
-add_library(velox_abfs RegisterAbfsFileSystem.cpp BlobClientProviderFactory.cpp
-                       ConnectionStringBlobClientProvider.cpp)
+add_library(
+  velox_abfs RegisterAbfsFileSystem.cpp BlobClientProviderFactory.cpp
+             ConnectionStringBlobClientProvider.cpp SASBlobClientProvider.cpp)
 
 if(VELOX_ENABLE_ABFS)
   target_sources(
