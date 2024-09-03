@@ -1169,7 +1169,8 @@ std::string RowContainer::toString(const char* row) const {
   auto vector = BaseVector::create<RowVector>(rowType, 1, pool());
 
   for (auto i = 0; i < rowType->size(); ++i) {
-    extractColumn(&row, 1, columnAt(i), 0, vector->childAt(i));
+    extractColumn(
+        &row, 1, columnAt(i), columnHasNulls(i), true, 0, vector->childAt(i));
   }
 
   return vector->toString(0);

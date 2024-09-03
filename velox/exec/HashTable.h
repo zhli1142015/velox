@@ -406,6 +406,7 @@ class BaseHashTable {
   virtual void extractColumn(
       folly::Range<char* const*> rows,
       int32_t columnIndex,
+      bool rowsMayHaveNulls,
       const VectorPtr& result) = 0;
 
  protected:
@@ -657,12 +658,14 @@ class HashTable : public BaseHashTable {
   void extractColumn(
       folly::Range<char* const*> rows,
       int32_t columnIndex,
+      bool rowsMayHaveNulls,
       const VectorPtr& result) override {
     RowContainer::extractColumn(
         rows.data(),
         rows.size(),
         rows_->columnAt(columnIndex),
         columnHasNulls_[columnIndex],
+        rowsMayHaveNulls,
         result);
   }
 

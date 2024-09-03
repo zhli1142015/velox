@@ -315,10 +315,12 @@ void SortBuffer::prepareOutput(vector_size_t maxOutputRows) {
 void SortBuffer::getOutputWithoutSpill() {
   VELOX_DCHECK_EQ(numInputRows_, sortedRows_.size());
   for (const auto& columnProjection : columnMap_) {
-    data_->extractColumn(
+    RowContainer::extractColumn(
         sortedRows_.data() + numOutputRows_,
         output_->size(),
-        columnProjection.inputChannel,
+        data_->columnAt(columnProjection.inputChannel),
+        data_->columnHasNulls(columnProjection.inputChannel),
+        false,
         output_->childAt(columnProjection.outputChannel));
   }
   numOutputRows_ += output_->size();

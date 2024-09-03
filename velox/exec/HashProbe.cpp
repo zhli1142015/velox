@@ -63,6 +63,7 @@ void extractColumns(
     BaseHashTable* table,
     folly::Range<char* const*> rows,
     folly::Range<const IdentityProjection*> projections,
+    bool rowsMayHaveNulls,
     memory::MemoryPool* pool,
     const std::vector<TypePtr>& resultTypes,
     std::vector<VectorPtr>& resultVectors) {
@@ -78,7 +79,8 @@ void extractColumns(
       child = BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
     }
     child->resize(rows.size());
-    table->extractColumn(rows, projection.inputChannel, child);
+    table->extractColumn(
+        rows, projection.inputChannel, rowsMayHaveNulls, child);
   }
 }
 
@@ -785,6 +787,7 @@ void HashProbe::fillOutput(vector_size_t size) {
         table_.get(),
         folly::Range<char* const*>(outputTableRows_->as<char*>(), size),
         tableOutputProjections_,
+        !isInnerJoin(joinType_) || table_->numDistinct() == 0,
         pool(),
         outputType_->children(),
         output_->children());
@@ -831,6 +834,7 @@ RowVectorPtr HashProbe::getBuildSideOutput() {
       table_.get(),
       folly::Range<char**>(outputTableRows, numOut),
       tableOutputProjections_,
+      !isInnerJoin(joinType_) || table_->numDistinct() == 0,
       pool(),
       outputType_->children(),
       output_->children());
@@ -1128,6 +1132,7 @@ RowVectorPtr HashProbe::createFilterInput(vector_size_t size) {
       table_.get(),
       folly::Range<char* const*>(outputTableRows_->as<char*>(), size),
       filterTableProjections_,
+      !isInnerJoin(joinType_) || table_->numDistinct() == 0,
       pool(),
       filterInputType_->children(),
       filterColumns);
@@ -1229,6 +1234,7 @@ void HashProbe::applyFilterOnTableRowsForNullAwareJoin(
       table_->extractColumn(
           folly::Range<char* const*>(data, numRows),
           projection.inputChannel,
+          true,
           filterTableInput_->childAt(projection.outputChannel));
     }
     rows.applyToSelected([&](vector_size_t row) {

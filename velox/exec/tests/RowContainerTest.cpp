@@ -2116,3 +2116,63 @@ TEST_F(RowContainerTest, columnHasNulls) {
     }
   }
 }
+
+TEST_F(RowContainerTest, rowMayHaveNulls) {
+  auto rowContainer = makeRowContainer({BIGINT(), BIGINT()}, {}, false);
+  for (int i = 0; i < rowContainer->columnTypes().size(); ++i) {
+    ASSERT_TRUE(!rowContainer->columnHasNulls(i));
+  }
+
+  const uint64_t kNumRows = 1000;
+  auto rowVector = makeRowVector(
+      {makeFlatVector<int64_t>(kNumRows, [](auto row) { return row % 5; }),
+       makeFlatVector<int64_t>(kNumRows, [](auto row) { return row % 5; })});
+
+  std::vector<char*> rows;
+  std::vector<char*> rowsWithNulls;
+  rows.reserve(kNumRows);
+  rowsWithNulls.reserve(kNumRows);
+
+  ASSERT_EQ(rowContainer->numRows(), 0);
+  SelectivityVector allRows(kNumRows);
+  for (size_t i = 0; i < kNumRows; i++) {
+    auto row = rowContainer->newRow();
+    rows.push_back(row);
+    if (i % 5 == 0) {
+      rowsWithNulls.push_back(nullptr);
+    } else {
+      rowsWithNulls.push_back(row);
+    }
+  }
+  for (int i = 0; i < rowContainer->columnTypes().size(); ++i) {
+    DecodedVector decoded(*rowVector->childAt(i), allRows);
+    for (int j = 0; j < kNumRows; ++j) {
+      char* row = rows[i];
+      rowContainer->store(decoded, j, row, i);
+    }
+  }
+
+  for (int i = 0; i < rowContainer->columnTypes().size(); ++i) {
+    auto vector =
+        BaseVector::create(rowVector->childAt(i)->type(), kNumRows, pool());
+    if (i % 2 == 0) {
+      RowContainer::extractColumn(
+          rows.data(),
+          kNumRows,
+          rowContainer->columnAt(i),
+          rowContainer->columnHasNulls(i),
+          false,
+          vector);
+      ASSERT_TRUE(!vector->mayHaveNulls());
+    } else {
+      RowContainer::extractColumn(
+          rowsWithNulls.data(),
+          kNumRows,
+          rowContainer->columnAt(i),
+          rowContainer->columnHasNulls(i),
+          true,
+          vector);
+      ASSERT_TRUE(vector->mayHaveNulls());
+    }
+  }
+}

@@ -746,6 +746,7 @@ bool GroupingSet::getOutput(
     }
     return false;
   }
+
   extractGroups(folly::Range<char**>(groups, numGroups), result);
   return true;
 }
@@ -761,7 +762,13 @@ void GroupingSet::extractGroups(
   auto totalKeys = rows.keyTypes().size();
   for (int32_t i = 0; i < totalKeys; ++i) {
     auto keyVector = result->childAt(i);
-    rows.extractColumn(groups.data(), groups.size(), i, keyVector);
+    RowContainer::extractColumn(
+        groups.data(),
+        groups.size(),
+        rows.columnAt(i),
+        rows.columnHasNulls(i),
+        false,
+        keyVector);
   }
   for (int32_t i = 0; i < aggregates_.size(); ++i) {
     if (!aggregates_[i].sortingKeys.empty()) {
