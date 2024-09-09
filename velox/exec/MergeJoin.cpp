@@ -148,6 +148,7 @@ void MergeJoin::initializeFilter(
         return;
       }
     }
+
     filters.emplace_back(channel, filterChannel++);
   };
 
@@ -340,8 +341,14 @@ void MergeJoin::addOutputRow(
   }
 
   if (filter_) {
-    copyRow(left, leftIndex, filterInput_, outputSize_, filterLeftInputs_);
-    copyRow(right, rightIndex, filterInput_, outputSize_, filterRightInputs_);
+    copyRow(
+        left, leftIndex, filterInput_, outputSize_, flattenFilterLeftInputs_);
+    copyRow(
+        right,
+        rightIndex,
+        filterInput_,
+        outputSize_,
+        flattenFilterRightInputs_);
 
     if (joinTracker_) {
       if (isRightJoin(joinType_)) {
@@ -444,6 +451,16 @@ bool MergeJoin::prepareOutput(
       std::move(localColumns));
   outputSize_ = 0;
 
+  auto findIndex = [&](column_index_t index,
+                       std::vector<IdentityProjection>& filterInputs) {
+    for (auto i = 0; i < filterInputs.size(); ++i) {
+      if (filterInputs[i].outputChannel == index) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
   if (filterInput_ != nullptr) {
     for (auto i = 0; i < filterInputType_->size(); ++i) {
       auto& child = filterInput_->childAt(i);
@@ -454,20 +471,65 @@ bool MergeJoin::prepareOutput(
         child = output_->childAt(filterInputToOutputChannel_[i]);
         continue;
       }
+      bool shouldHandleReuseComplexVector = false;
+      auto index = findIndex(i, filterLeftInputs_);
+      if (index >= 0) {
+        if (newLeft != nullptr) {
+          child = BaseVector::wrapInDictionary(
+              {},
+              leftIndices_,
+              outputBatchSize_,
+              newLeft->childAt(filterLeftInputs_[index].inputChannel));
+        } else {
+          if (findIndex(i, flattenFilterLeftInputs_) < 0) {
+            child = BaseVector::create(
+                filterInputType_->childAt(i),
+                outputBatchSize_,
+                operatorCtx_->pool());
+            flattenFilterLeftInputs_.emplace_back(filterLeftInputs_[index]);
+          } else {
+            shouldHandleReuseComplexVector = true;
+          }
+        }
+      }
+      index = findIndex(i, filterRightInputs_);
+      if (index >= 0) {
+        if (right != nullptr) {
+          child = BaseVector::wrapInDictionary(
+              {},
+              rightIndices_,
+              outputBatchSize_,
+              right->childAt(filterRightInputs_[index].inputChannel));
+        } else {
+          if (findIndex(i, flattenFilterRightInputs_) < 0) {
+            child = BaseVector::create(
+                filterInputType_->childAt(i),
+                outputBatchSize_,
+                operatorCtx_->pool());
+            flattenFilterRightInputs_.emplace_back(filterRightInputs_[index]);
+          } else {
+            shouldHandleReuseComplexVector = true;
+          }
+        }
+      }
 
       // When filterInput_ contains array or map columns that are not
       // projected to output, their child vectors(elements, keys and values)
       // keep growing after each call to 'copyRow'. Call prepareForReuse() to
       // reset non-reusable buffers and updates child vectors for reusing.
-      if (child->typeKind() == TypeKind::ARRAY) {
-        child->as<ArrayVector>()->prepareForReuse();
-      } else if (child->typeKind() == TypeKind::MAP) {
-        child->as<MapVector>()->prepareForReuse();
+      if (shouldHandleReuseComplexVector) {
+        if (child->typeKind() == TypeKind::ARRAY) {
+          child->as<ArrayVector>()->prepareForReuse();
+        } else if (child->typeKind() == TypeKind::MAP) {
+          child->as<MapVector>()->prepareForReuse();
+        }
       }
     }
   }
 
   if (filter_ != nullptr && filterInput_ == nullptr) {
+    flattenFilterLeftInputs_.clear();
+    flattenFilterRightInputs_.clear();
     std::vector<VectorPtr> inputs(filterInputType_->size());
     for (const auto [filterInputChannel, outputChannel] :
          filterInputToOutputChannel_) {
@@ -478,8 +540,41 @@ bool MergeJoin::prepareOutput(
           filterInputToOutputChannel_.end()) {
         continue;
       }
-      inputs[i] = BaseVector::create(
-          filterInputType_->childAt(i), outputBatchSize_, operatorCtx_->pool());
+      auto index = findIndex(i, filterLeftInputs_);
+      if (index >= 0) {
+        if (newLeft != nullptr) {
+          inputs[i] = BaseVector::wrapInDictionary(
+              {},
+              leftIndices_,
+              outputBatchSize_,
+              newLeft->childAt(filterLeftInputs_[index].inputChannel));
+        } else {
+          inputs[i] = BaseVector::create(
+              filterInputType_->childAt(i),
+              outputBatchSize_,
+              operatorCtx_->pool());
+          flattenFilterLeftInputs_.emplace_back(filterLeftInputs_[index]);
+        }
+        continue;
+      }
+      index = findIndex(i, filterRightInputs_);
+      if (index >= 0) {
+        if (right != nullptr) {
+          inputs[i] = BaseVector::wrapInDictionary(
+              {},
+              rightIndices_,
+              outputBatchSize_,
+              right->childAt(filterRightInputs_[index].inputChannel));
+        } else {
+          inputs[i] = BaseVector::create(
+              filterInputType_->childAt(i),
+              outputBatchSize_,
+              operatorCtx_->pool());
+          flattenFilterRightInputs_.emplace_back(filterRightInputs_[index]);
+        }
+      } else {
+        VELOX_UNREACHABLE();
+      }
     }
 
     filterInput_ = std::make_shared<RowVector>(

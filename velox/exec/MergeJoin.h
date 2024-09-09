@@ -450,10 +450,12 @@ class MergeJoin : public Operator {
   // Maps left-side input channels to channels in 'filterInputType_', excluding
   // those in 'filterInputToOutputChannel_'.
   std::vector<IdentityProjection> filterLeftInputs_;
+  std::vector<IdentityProjection> flattenFilterLeftInputs_;
 
   // Maps right-side input channels to channels in 'filterInputType_', excluding
   // those in 'filterInputToOutputChannel_'.
   std::vector<IdentityProjection> filterRightInputs_;
+  std::vector<IdentityProjection> flattenFilterRightInputs_;
 
   // Reusable memory for filter evaluation.
   RowVectorPtr filterInput_;
