@@ -21,6 +21,7 @@
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/Task.h"
 #include "velox/expression/FieldReference.h"
+#include <iostream>
 
 using facebook::velox::common::testutil::TestValue;
 
@@ -1010,6 +1011,10 @@ RowVectorPtr HashProbe::getOutputInternal(bool toSpillOutput) {
       outputRowMapping_, outputTableRowsCapacity_, pool());
   auto* outputTableRows =
       initBuffer<char*>(outputTableRows_, outputTableRowsCapacity_, pool());
+  
+  BufferPtr tempOutputRowMapping_;
+  BufferPtr tempOutputTableRows_;
+  int tempNumOut = 0;
 
   for (;;) {
     int numOut = 0;
@@ -1054,11 +1059,22 @@ RowVectorPtr HashProbe::getOutputInternal(bool toSpillOutput) {
     // to process and the NoMatchDetector isn't carrying forward a row that
     // still needs to be written to the output.
     if (!numOut && !noMatchDetector_.hasLastMissedRow()) {
+      if (tempNumOut > 0) {
+        std::cout << "error we should handle for case:!numOut && !noMatchDetector_.hasLastMissedRow()" << std::endl;
+        std::cout << "switch result1:" << numOut << " " << tempNumOut << std::endl;
+        numOut = tempNumOut;
+        outputTableRows_ = tempOutputTableRows_;
+        outputRowMapping_ = tempOutputRowMapping_;
+        fillOutput(numOut);
+
+        input_ = nullptr;
+        return output_;
+      }
       input_ = nullptr;
       return nullptr;
     }
     VELOX_CHECK_LE(numOut, outputBatchSize);
-
+    int originalNumOutput = numOut;
     numOut = evalFilter(numOut);
 
     if (numOut == 0) {
@@ -1076,7 +1092,46 @@ RowVectorPtr HashProbe::getOutputInternal(bool toSpillOutput) {
       if (resultIter_->atEnd()) {
         input_ = nullptr;
       }
+      if (tempNumOut > 0) {
+        std::cout << "error we should handle for case:isRightSemiFilterJoin(joinType_) || isRightSemiProjectJoin(joinType_)" << std::endl;
+      }
       return nullptr;
+    }
+
+    if (tempNumOut > 0 || (filter_ != nullptr && numOut < originalNumOutput / 10)) {
+      std::cout << "enter the handling for filter merge:" << numOut << ", numOut before filter:" << originalNumOutput << ", outputBatchSize:" << outputBatchSize << std::endl;
+      // afterFilterBatchSize = outputBatchSize - numOut, update this to limit outputBatchSize, we need this to stop
+      // merge outputRowMapping_ and outputTableRows_ to temp vlaues and contine
+      if(tempOutputRowMapping_ == nullptr) {
+        tempOutputRowMapping_ = allocateIndices(outputTableRowsCapacity_, pool());
+      }
+      memcpy(tempOutputRowMapping_->asMutable<vector_size_t>() + tempNumOut, outputRowMapping_->as<vector_size_t>(), numOut * sizeof(vector_size_t));
+      std::cout << "outputRowMapping_:" << (*outputRowMapping_).size() << std::endl;
+      std::cout << "tempOutputRowMapping_:" << (*tempOutputRowMapping_).size() << std::endl;
+
+      if(tempOutputTableRows_ == nullptr) {
+        tempOutputTableRows_ = AlignedBuffer::allocate<char*>(outputTableRowsCapacity_, pool());
+      }
+      memcpy(tempOutputTableRows_->asMutable<char*>() + tempNumOut, outputTableRows_->as<char*>(), numOut * sizeof(char*));
+      std::cout << "outputTableRows_:" << (*outputTableRows_).size() << std::endl;
+      std::cout << "tempOutputTableRows_:" << (*tempOutputTableRows_).size() << std::endl;
+
+      tempNumOut += numOut;
+      std::cout << "tempNumOut:" << tempNumOut << ", numOut:" << numOut << std::endl;
+      if (!resultIter_->atEnd() && tempNumOut < outputTableRowsCapacity_) {
+        outputBatchSize = outputBatchSize - numOut;
+        std::cout << "continue outputBatchSize:" << outputBatchSize << std::endl;
+        continue;
+      } else {
+        std::cout << "no continue:noMatchDetector_.hasLastMissedRow():" << noMatchDetector_.hasLastMissedRow() << ", resultIter_->atEnd():" << resultIter_->atEnd() << std::endl;
+      }
+    }
+    // if temp value is not null, set temp to outputRowMapping_ and outputTableRows_
+    if (tempNumOut > 0) {
+      std::cout << "switch result:" << numOut << " " << tempNumOut << std::endl;
+      numOut = tempNumOut;
+      outputTableRows_ = tempOutputTableRows_;
+      outputRowMapping_ = tempOutputRowMapping_;
     }
 
     fillOutput(numOut);
