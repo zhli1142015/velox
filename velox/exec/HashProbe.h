@@ -130,7 +130,7 @@ class HashProbe : public Operator {
 
   // Applies 'filter_' to 'outputTableRows_' and updates 'outputRowMapping_'.
   // Returns the number of passing rows.
-  vector_size_t evalFilter(vector_size_t numRows, BufferPtr& outputRowMapping, vector_size_t* rawOutputProbeRowMapping, char** outputTableRows);
+  vector_size_t evalFilter(vector_size_t numRows, BufferPtr& outputRowMapping, vector_size_t* rawOutputProbeRowMapping, char** outputTableRows, int tempNumOut);
 
   inline bool filterPassed(vector_size_t row) {
     return filterInputRows_.isValid(row) &&
@@ -155,7 +155,7 @@ class HashProbe : public Operator {
   // Evaluate the filter for null-aware anti or left semi project join.
   SelectivityVector evalFilterForNullAwareJoin(
       vector_size_t numRows,
-      bool filterPropagateNulls, BufferPtr& outputRowMapping);
+      bool filterPropagateNulls, vector_size_t* rawOutputProbeRowMapping);
 
   // Combine the selected probe-side rows with all or null-join-key (depending
   // on the iterator) build side rows and evaluate the filter.  Mark probe rows

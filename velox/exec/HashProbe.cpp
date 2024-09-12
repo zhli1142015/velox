@@ -780,6 +780,7 @@ void HashProbe::fillOutput(vector_size_t size) {
   }
 
   if (isLeftSemiProjectJoin(joinType_)) {
+    std::cout << "fillLeftSemiProjectMatchColumn" << std::endl;
     fillLeftSemiProjectMatchColumn(size);
   } else {
     extractColumns(
@@ -1075,7 +1076,7 @@ RowVectorPtr HashProbe::getOutputInternal(bool toSpillOutput) {
     VELOX_CHECK_LE(numOut, outputBatchSize);
     int originalNumOutput = numOut;
     std::cout << "evalFilter  numOut:" << numOut << std::endl;
-    numOut = evalFilter(numOut, tempOutputRowMapping, mapping.data(), outputTableRows);
+    numOut = evalFilter(numOut, tempOutputRowMapping, mapping.data(), outputTableRows, tempNumOut);
 
     if (numOut == 0) {
       continue;
@@ -1110,7 +1111,7 @@ RowVectorPtr HashProbe::getOutputInternal(bool toSpillOutput) {
         mapping = folly::Range(outputRowMapping_->asMutable<vector_size_t>() + tempNumOut, newSize);
         outputTableRows = outputTableRows_->asMutable<char*>() + tempNumOut;
         outputBatchSize = outputBatchSize - numOut;
-        std::cout << "continue outputBatchSize:" << outputBatchSize << std::endl;
+        std::cout << "continue outputBatchSize:" << outputBatchSize << ", noMatchDetector_.hasLastMissedRow():" << noMatchDetector_.hasLastMissedRow() << " " << (tempOutputRowMapping->as<vector_size_t>() - outputRowMapping_->asMutable<vector_size_t>() == tempNumOut)<< std::endl;
         continue;
       } else {
         std::cout << "no continue:noMatchDetector_.hasLastMissedRow():" << noMatchDetector_.hasLastMissedRow() << ", resultIter_->atEnd():" << resultIter_->atEnd() << std::endl;
@@ -1182,6 +1183,7 @@ void HashProbe::prepareFilterRowsForNullAwareJoin(
     RowVectorPtr& filterInput,
     vector_size_t numRows,
     bool filterPropagateNulls, BufferPtr& outputRowMapping) {
+  std::cout << "prepareFilterRowsForNullAwareJoin" << std::endl;
   VELOX_CHECK_LE(numRows, kBatchSize);
   if (filterTableInput_ == nullptr) {
     filterTableInput_ =
@@ -1315,9 +1317,8 @@ void HashProbe::applyFilterOnTableRowsForNullAwareJoin(
 
 SelectivityVector HashProbe::evalFilterForNullAwareJoin(
     vector_size_t numRows,
-    bool filterPropagateNulls, BufferPtr& outputRowMapping) {
-  auto* rawOutputProbeRowMapping =
-      outputRowMapping->asMutable<vector_size_t>();
+    bool filterPropagateNulls, vector_size_t* rawOutputProbeRowMapping) {
+  std::cout << "evalFilterForNullAwareJoin" << std::endl;
 
   // Subset of probe-side rows with a match that passed the filter.
   SelectivityVector filterPassedRows(input_->size(), false);
@@ -1369,7 +1370,7 @@ SelectivityVector HashProbe::evalFilterForNullAwareJoin(
   return filterPassedRows;
 }
 
-int32_t HashProbe::evalFilter(int32_t numRows, BufferPtr& outputRowMapping, vector_size_t* rawOutputProbeRowMapping, char** outputTableRows) {
+int32_t HashProbe::evalFilter(int32_t numRows, BufferPtr& outputRowMapping, vector_size_t* rawOutputProbeRowMapping, char** outputTableRows, int tempNumOut) {
   if (!filter_) {
     return numRows;
   }
@@ -1455,6 +1456,7 @@ int32_t HashProbe::evalFilter(int32_t numRows, BufferPtr& outputRowMapping, vect
       }
     }
   } else if (isLeftSemiFilterJoin(joinType_)) {
+    std::cout << "isLeftSemiFilterJoin" << std::endl;
     auto addLastMatch = [&](auto row) {
       outputTableRows[numPassed] = nullptr;
       rawOutputProbeRowMapping[numPassed++] = row;
@@ -1469,13 +1471,16 @@ int32_t HashProbe::evalFilter(int32_t numRows, BufferPtr& outputRowMapping, vect
       leftSemiFilterJoinTracker_.finish(addLastMatch);
     }
   } else if (isLeftSemiProjectJoin(joinType_)) {
+    std::cout << "isLeftSemiProjectJoin" << std::endl;
     // NOTE: Set output table row to point to a fake string to indicate there
     // is a match for this probe 'row'. 'fillOutput' populates the match
     // column based on the nullable of this pointer.
     static const char* kPassed = "passed";
 
     if (nullAware_) {
-      leftSemiProjectIsNull_.resize(numRows);
+      std::cout << "nullAware_" << std::endl;
+      leftSemiProjectIsNull_.resize(numRows + tempNumOut, false);
+      if (tempNumOut == 0)
       leftSemiProjectIsNull_.clearAll();
 
       auto addLast = [&](auto row, std::optional<bool> passed) {
@@ -1483,13 +1488,13 @@ int32_t HashProbe::evalFilter(int32_t numRows, BufferPtr& outputRowMapping, vect
           outputTableRows[numPassed] =
               passed.value() ? const_cast<char*>(kPassed) : nullptr;
         } else {
-          leftSemiProjectIsNull_.setValid(numPassed, true);
+          leftSemiProjectIsNull_.setValid(numPassed + tempNumOut, true);
         }
         rawOutputProbeRowMapping[numPassed++] = row;
       };
 
       auto passedRows =
-          evalFilterForNullAwareJoin(numRows, filterPropagateNulls, outputRowMapping);
+          evalFilterForNullAwareJoin(numRows, filterPropagateNulls, rawOutputProbeRowMapping);
       for (auto i = 0; i < numRows; ++i) {
         // filterPassed(i) -> TRUE
         // else passed -> NULL
@@ -1520,13 +1525,15 @@ int32_t HashProbe::evalFilter(int32_t numRows, BufferPtr& outputRowMapping, vect
       }
     }
   } else if (isAntiJoin(joinType_)) {
+    std::cout << "isAntiJoin" << std::endl;
     auto addMiss = [&](auto row) {
       outputTableRows[numPassed] = nullptr;
       rawOutputProbeRowMapping[numPassed++] = row;
     };
     if (nullAware_) {
+      std::cout << "nullAware_" << std::endl;
       auto passedRows =
-          evalFilterForNullAwareJoin(numRows, filterPropagateNulls, outputRowMapping);
+          evalFilterForNullAwareJoin(numRows, filterPropagateNulls, rawOutputProbeRowMapping);
       for (auto i = 0; i < numRows; ++i) {
         auto probeRow = rawOutputProbeRowMapping[i];
         bool passed = passedRows.isValid(probeRow);
