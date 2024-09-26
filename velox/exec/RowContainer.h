@@ -1358,13 +1358,13 @@ class RowContainer {
         if (view.isInline()) {
           continue;
         }
-        auto iter = stringStoreBackData_.find(view.data());
+        auto iter = stringStoreBackData_.find(reinterpret_cast<int64_t>(view.data()));
         if (iter != stringStoreBackData_.end()) {
           auto dataIter = stringStoreData_.find(iter->second);
           if (dataIter->second.updateRef(-1)) {
             // erase
             stringStoreData_.erase(iter->second);
-            stringStoreBackData_.erase(view.data());
+            stringStoreBackData_.erase(reinterpret_cast<int64_t>(view.data()));
           } else {
             continue;
           }
@@ -1488,8 +1488,8 @@ class RowContainer {
     uint32_t refCount_;
   };
 
-  folly::F14FastMap<uint64_t, StringStoreData> stringStoreData_;
-  folly::F14FastMap<const char*, uint64_t> stringStoreBackData_;
+  folly::F14FastMap<uint32_t, StringStoreData> stringStoreData_;
+  folly::F14FastMap<uint64_t, uint32_t> stringStoreBackData_;
 };
 
 template <>

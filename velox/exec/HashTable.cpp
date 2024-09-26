@@ -68,7 +68,7 @@ HashTable<ignoreNullKeys>::HashTable(
     }
   }
 
-  shouldOptimizeStringStoreInRowContainer_ = stringTypes > 0 && keys.size() > 1 && std::numeric_limits<uint32_t>::max() / keys.size() <= VectorHasher::kMaxDistinct;
+  shouldOptimizeStringStoreInRowContainer_ = stringTypes > 0 && keys.size() > 1 && std::numeric_limits<uint32_t>::max() / keys.size() > VectorHasher::kMaxDistinct;
 
   rows_ = std::make_unique<RowContainer>(
       keys,

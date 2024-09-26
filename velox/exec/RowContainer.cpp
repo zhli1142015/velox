@@ -557,7 +557,7 @@ void RowContainer::storeString(
     return;
   }
   if (valueId <= VectorHasher::kMaxDistinct) {
-    uint64_t id = valueId + column * VectorHasher::kMaxDistinct;
+    uint32_t id = valueId + column * VectorHasher::kMaxDistinct;
     auto iter = stringStoreData_.find(id);
     if (iter != stringStoreData_.end()) {
       iter->second.updateRef(1);
@@ -565,9 +565,10 @@ void RowContainer::storeString(
     } else {
       RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
       stringAllocator_->copyMultipart(*value, row, offset);
-      StringStoreData data(reinterpret_cast<StringView*>(row + offset)->data());
+      auto ptr = reinterpret_cast<StringView*>(row + offset)->data();
+      StringStoreData data(ptr);
       stringStoreData_.emplace(id, data);
-      stringStoreBackData_.emplace(reinterpret_cast<StringView*>(row + offset)->data(), id);
+      stringStoreBackData_.emplace(reinterpret_cast<int64_t>(ptr), id);
     }
     return;
   }
