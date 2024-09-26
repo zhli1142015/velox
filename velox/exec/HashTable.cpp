@@ -56,13 +56,19 @@ HashTable<ignoreNullKeys>::HashTable(
     : BaseHashTable(std::move(hashers)),
       minTableSizeForParallelJoinBuild_(minTableSizeForParallelJoinBuild),
       isJoinBuild_(isJoinBuild) {
+  int stringTypes = 0;
   std::vector<TypePtr> keys;
   for (auto& hasher : hashers_) {
     keys.push_back(hasher->type());
+    if (hasher->typeKind() == TypeKind::VARCHAR) {
+      stringTypes++;
+    }
     if (!VectorHasher::typeKindSupportsValueIds(hasher->typeKind())) {
       hashMode_ = HashMode::kHash;
     }
   }
+
+  shouldOptimizeStringStoreInRowContainer_ = stringTypes > 0 && keys.size() > 1 && std::numeric_limits<uint32_t>::max() / keys.size() <= VectorHasher::kMaxDistinct;
 
   rows_ = std::make_unique<RowContainer>(
       keys,
@@ -305,7 +311,16 @@ void HashTable<ignoreNullKeys>::storeKeys(
     vector_size_t row) {
   for (int32_t i = 0; i < hashers_.size(); ++i) {
     auto& hasher = hashers_[i];
-    rows_->store(hasher->decodedVector(), row, lookup.hits[row], i); // NOLINT
+    if (hashMode_ != HashMode::kHash && shouldOptimizeStringStoreInRowContainer_ && hasher->typeKind() == TypeKind::VARCHAR) {
+      if (hasher->decodedVector().isNullAt(row)) {
+        rows_->storeString(nullptr, VectorHasher::kMaxDistinct + 1, lookup.hits[row], i); // NOLINT
+      } else {
+        auto value = hasher->decodedVector().valueAt<StringView>(row);
+        rows_->storeString(&value, hasher->uniqueValueIdForString(value), lookup.hits[row], i); // NOLINT
+      }
+    } else {
+      rows_->store(hasher->decodedVector(), row, lookup.hits[row], i); // NOLINT
+    }
   }
 }
 

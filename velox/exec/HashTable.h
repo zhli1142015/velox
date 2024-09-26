@@ -1018,6 +1018,8 @@ class HashTable : public BaseHashTable {
   int8_t sizeBits_;
   bool isJoinBuild_ = false;
 
+  bool shouldOptimizeStringStoreInRowContainer_ = false;
+
   // Set at join build time if the table has duplicates, meaning that
   // the join can be cardinality increasing. Atomic for tsan because
   // many threads can set this.

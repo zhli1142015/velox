@@ -20,6 +20,7 @@
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/ContainerRowSerde.h"
 #include "velox/exec/Operator.h"
+#include "velox/exec/VectorHasher.h"
 #include "velox/type/FloatingPointUtil.h"
 
 namespace facebook::velox::exec {
@@ -538,6 +539,40 @@ void RowContainer::store(
         rowColumn.nullMask(),
         column);
   }
+}
+
+void RowContainer::storeString(
+    const StringView* value,
+    uint32_t valueId,
+    char* row,
+    int32_t column) {
+  auto offset = offsets_[column];
+  if (value == nullptr) {
+    auto rowColumn = rowColumns_[column];
+    row[rowColumn.nullByte()] |= rowColumn.nullMask();
+    // Do not leave an uninitialized value in the case of a
+    // null. This is an error with valgrind/asan.
+    *reinterpret_cast<StringView*>(row + offset) = StringView();
+    updateColumnHasNulls(column, true);
+    return;
+  }
+  if (valueId <= VectorHasher::kMaxDistinct) {
+    uint64_t id = valueId + column * VectorHasher::kMaxDistinct;
+    auto iter = stringStoreData_.find(id);
+    if (iter != stringStoreData_.end()) {
+      iter->second.updateRef(1);
+      *reinterpret_cast<StringView*>(row + offset) = StringView(iter->second.data(), value->size());
+    } else {
+      RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
+      stringAllocator_->copyMultipart(*value, row, offset);
+      StringStoreData data(reinterpret_cast<StringView*>(row + offset)->data());
+      stringStoreData_.emplace(id, data);
+      stringStoreBackData_.emplace(reinterpret_cast<StringView*>(row + offset)->data(), id);
+    }
+    return;
+  }
+  RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
+  stringAllocator_->copyMultipart(*value, row, offset);
 }
 
 void RowContainer::store(

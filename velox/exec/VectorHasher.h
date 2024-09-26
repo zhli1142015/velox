@@ -314,6 +314,19 @@ class VectorHasher {
     return uniqueValues_.size();
   }
 
+  inline uint32_t uniqueValueIdForString(const StringView& value) {
+    if (!value.isInline()) {
+      auto size = value.size();
+      auto data = value.data();
+      UniqueValue unique(data, size);
+      auto iter = uniqueValues_.find(unique);
+      if (iter != uniqueValues_.end()) {
+        return iter->id();
+      }
+    }
+    return kMaxDistinct + 1;
+  }
+
  private:
   static constexpr uint32_t kStringASRangeMaxSize = 7;
   static constexpr uint32_t kStringBufferUnitSize = 1024;

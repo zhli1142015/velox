@@ -297,6 +297,13 @@ class RowContainer {
       vector_size_t index,
       char* row,
       int32_t columnIndex);
+  
+  /// Stores the 'index'th value in 'decoded' into 'row' at 'columnIndex'.
+  void storeString(
+      const StringView* value,
+      uint32_t valueId,
+      char* row,
+      int32_t column);
 
   /// Stores the first 'rows.size' values from the 'decoded' vector into the
   /// 'columnIndex' column of 'rows'.
@@ -1351,11 +1358,23 @@ class RowContainer {
         if (view.isInline()) {
           continue;
         }
+        auto iter = stringStoreBackData_.find(view.data());
+        if (iter != stringStoreBackData_.end()) {
+          auto dataIter = stringStoreData_.find(iter->second);
+          if (dataIter->second.updateRef(-1)) {
+            // erase
+            stringStoreData_.erase(iter->second);
+            stringStoreBackData_.erase(view.data());
+          } else {
+            continue;
+          }
+        }
       } else {
         if (view.empty()) {
           continue;
         }
       }
+      // here we don't have id, so we need to split one map to two map.
       stringAllocator_->free(HashStringAllocator::headerOf(view.data()));
     }
   }
@@ -1442,6 +1461,35 @@ class RowContainer {
   memory::AllocationPool rows_;
 
   int alignment_ = 1;
+
+  // map to store the value id to string + size
+  class StringStoreData {
+   public:
+    explicit StringStoreData(const char* data) {
+      refCount_ = 1;
+      data_ = data;
+    }
+
+    bool updateRef(int cnt) {
+      refCount_ += cnt;
+      return refCount_ == 0;
+    }
+
+    const char* data() const {
+      return data_;
+    }
+
+    uint32_t refCount() const {
+      return refCount_;
+    }
+
+   private:
+    const char* data_;
+    uint32_t refCount_;
+  };
+
+  folly::F14FastMap<uint64_t, StringStoreData> stringStoreData_;
+  folly::F14FastMap<const char*, uint64_t> stringStoreBackData_;
 };
 
 template <>
