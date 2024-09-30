@@ -102,11 +102,11 @@ exec::AggregateRegistrationResult registerSum(
             if (inputType->isShortDecimal()) {
               auto const sumType = getDecimalSumType(resultType);
               if (sumType->isShortDecimal()) {
-                return std::make_unique<exec::SimpleAggregateAdapter<
-                    DecimalSumAggregate<int64_t, int64_t>>>(resultType);
+                return std::make_unique<DecimalSumAggregate<int64_t, int64_t>>(
+                    inputType, resultType, sumType);
               } else if (sumType->isLongDecimal()) {
-                return std::make_unique<exec::SimpleAggregateAdapter<
-                    DecimalSumAggregate<int64_t, int128_t>>>(resultType);
+                return std::make_unique<DecimalSumAggregate<int64_t, int128_t>>(
+                    inputType, resultType, sumType);
               }
             }
             return std::make_unique<SumAggregate<int64_t, int64_t, int64_t>>(
@@ -114,10 +114,11 @@ exec::AggregateRegistrationResult registerSum(
           }
           case TypeKind::HUGEINT: {
             VELOX_CHECK(inputType->isLongDecimal());
+            auto const sumType = getDecimalSumType(resultType);
             // If inputType is long decimal,
             // its output type is always long decimal.
-            return std::make_unique<exec::SimpleAggregateAdapter<
-                DecimalSumAggregate<int128_t, int128_t>>>(resultType);
+            return std::make_unique<DecimalSumAggregate<int128_t, int128_t>>(
+                inputType, resultType, sumType);
           }
           case TypeKind::REAL:
             if (resultType->kind() == TypeKind::REAL) {
@@ -136,14 +137,15 @@ exec::AggregateRegistrationResult registerSum(
           case TypeKind::ROW: {
             VELOX_DCHECK(!exec::isRawInput(step));
             checkAccumulatorRowType(inputType);
-            // For the intermediate aggregation step, input intermediate sum
-            // type is equal to final result sum type.
+            auto const sumType = getDecimalSumType(resultType);
+            // For intermediate input agg, input intermediate sum type
+            // is equal to final result sum type.
             if (inputType->childAt(0)->isShortDecimal()) {
-              return std::make_unique<exec::SimpleAggregateAdapter<
-                  DecimalSumAggregate<int64_t, int64_t>>>(resultType);
+              return std::make_unique<DecimalSumAggregate<int64_t, int64_t>>(
+                  inputType->childAt(0), resultType, sumType);
             } else if (inputType->childAt(0)->isLongDecimal()) {
-              return std::make_unique<exec::SimpleAggregateAdapter<
-                  DecimalSumAggregate<int128_t, int128_t>>>(resultType);
+              return std::make_unique<DecimalSumAggregate<int128_t, int128_t>>(
+                  inputType->childAt(0), resultType, sumType);
             }
           }
             [[fallthrough]];

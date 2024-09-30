@@ -14,170 +14,458 @@
  * limitations under the License.
  */
 #pragma once
-
-#include "velox/exec/SimpleAggregateAdapter.h"
-#include "velox/type/DecimalUtil.h"
+#include <iostream>
+#include "velox/exec/Aggregate.h"
+#include "velox/vector/FlatVector.h"
 
 namespace facebook::velox::functions::aggregate::sparksql {
 
-/// @tparam TInputType The raw input data type.
-/// @tparam TSumType The type of sum in the output of partial aggregation or the
-/// final output type of final aggregation.
-template <typename TInputType, typename TSumType>
-class DecimalSumAggregate {
- public:
-  using InputType = Row<TInputType>;
+/// This struct stores the sum of input values, overflow during accumulation,
+/// and a bool value isEmpty used to indicate whether all inputs are null. The
+/// initial value of sum is 0. We need to keep sum unchanged if the input is
+/// null, as sum function ignores null input. If the isEmpty is true, then it
+/// means there were no values to begin with or all the values were null, so the
+/// result will be null. If the isEmpty is false, then if sum is null that means
+/// an overflow has happened, it returns null.
+struct DecimalSum {
+  int128_t sum{0};
+  int64_t overflow{0};
+  bool isEmpty{true};
 
-  using IntermediateType =
-      Row</*sum*/ TSumType,
-          /*isEmpty*/ bool>;
-
-  using OutputType = TSumType;
-
-  /// Spark's decimal sum doesn't have the concept of a null group, each group
-  /// is initialized with an initial value, where sum = 0 and isEmpty = true.
-  /// The final agg may fallback to being executed in Spark, so the meaning of
-  /// the intermediate data should be consistent with Spark. Therefore, we need
-  /// to use the parameter nonNullGroup in writeIntermediateResult to output a
-  /// null group as sum = 0, isEmpty = true. nonNullGroup is only available when
-  /// default-null behavior is disabled.
-  static constexpr bool default_null_behavior_ = false;
-
-  static bool toIntermediate(
-      exec::out_type<Row<TSumType, bool>>& out,
-      exec::optional_arg_type<TInputType> in) {
-    if (in.has_value()) {
-      out.copy_from(std::make_tuple(static_cast<TSumType>(in.value()), false));
+  std::optional<int128_t> computeFinalValue(const TypePtr& sumType) const {
+    auto adjustedSum = DecimalUtil::adjustSumForOverflow(sum, overflow);
+    auto [rPrecision, rScale] = getDecimalPrecisionScale(*sumType);
+    if (adjustedSum.has_value() &&
+        DecimalUtil::valueInPrecisionRange(adjustedSum, rPrecision)) {
+      return adjustedSum;
     } else {
-      out.copy_from(std::make_tuple(static_cast<TSumType>(0), true));
+      // Find overflow during computing adjusted sum.
+      return std::nullopt;
     }
-    return true;
+  }
+};
+
+template <typename TInputType, typename TResultType>
+class DecimalSumAggregate : public exec::Aggregate {
+ public:
+  // resultType refers to the output type of the aggregate function. For partial
+  // aggregation, the resultType is ROW(DECIMAL, BOOLEAN), and for final
+  // aggregation, the resultType is DECIMAL. sumType refers to the type of
+  // DECIMAL in ROW(DECIMAL, BOOLEAN) used to store the accumulated sum in the
+  // output of partial aggregation or the input of final aggregation.
+  DecimalSumAggregate(TypePtr inputType, TypePtr resultType, TypePtr sumType)
+      : exec::Aggregate(resultType), sumType_(sumType) {
+    if (inputType->isShortDecimal()) {
+      auto precision = 38 - inputType->asShortDecimal().precision();
+      if (precision > 19) {
+        skipOverflowCheckCount_ = std::numeric_limits<uint64_t>::max();
+      } else {
+        skipOverflowCheckCount_ = std::pow(10L, precision);
+      }
+    } else if (inputType->isLongDecimal()) {
+      auto precision = 38 - inputType->asLongDecimal().precision();
+      if (precision > 0) {
+        skipOverflowCheckCount_ = std::pow(10L, precision);
+      }
+    }
   }
 
-  /// This struct stores the sum of input values, overflow during accumulation,
-  /// and a bool value isEmpty used to indicate whether all inputs are null. The
-  /// initial value of sum is 0. We need to keep sum unchanged if the input is
-  /// null, as sum function ignores null input. If the isEmpty is true, then it
-  /// means there were no values to begin with or all the values were null, so
-  /// the result will be null. If the isEmpty is false, then if sum is nullopt
-  /// that means an overflow has happened, it returns null.
-  struct AccumulatorType {
-    std::optional<int128_t> sum{0};
-    int64_t overflow{0};
-    bool isEmpty{true};
+  int32_t accumulatorFixedWidthSize() const override {
+    return sizeof(DecimalSum);
+  }
 
-    static constexpr bool is_aligned_ = true;
+  int32_t accumulatorAlignmentSize() const override {
+    return alignof(int128_t);
+  }
 
-    AccumulatorType() = delete;
-
-    explicit AccumulatorType(HashStringAllocator* /*allocator*/) {}
-
-    std::optional<int128_t> computeFinalResult() const {
-      if (!sum.has_value()) {
-        return std::nullopt;
-      }
-      auto const adjustedSum =
-          DecimalUtil::adjustSumForOverflow(sum.value(), overflow);
-      constexpr uint8_t maxPrecision = std::is_same_v<TSumType, int128_t>
-          ? LongDecimalType::kMaxPrecision
-          : ShortDecimalType::kMaxPrecision;
-      if (adjustedSum.has_value() &&
-          DecimalUtil::valueInPrecisionRange(adjustedSum, maxPrecision)) {
-        return adjustedSum;
-      } else {
-        // Found overflow during computing adjusted sum.
-        return std::nullopt;
-      }
-    }
-
-    bool addInput(
-        HashStringAllocator* /*allocator*/,
-        exec::optional_arg_type<TInputType> data) {
-      if (!data.has_value()) {
-        return false;
-      }
-      if (!sum.has_value()) {
-        // sum is initialized to 0. When it is nullopt, it implies that the
-        // input data must not be empty.
-        VELOX_CHECK(!isEmpty);
-        return true;
-      }
-      int128_t result;
-      overflow +=
-          DecimalUtil::addWithOverflow(result, data.value(), sum.value());
-      sum = result;
-      isEmpty = false;
-      return true;
-    }
-
-    bool combine(
-        HashStringAllocator* /*allocator*/,
-        exec::optional_arg_type<Row<TSumType, bool>> other) {
-      if (!other.has_value()) {
-        return false;
-      }
-      auto const otherSum = other.value().template at<0>();
-      auto const otherIsEmpty = other.value().template at<1>();
-
-      // isEmpty is never null.
-      VELOX_CHECK(otherIsEmpty.has_value());
-      if (isEmpty && otherIsEmpty.value()) {
-        // Both accumulators are empty, no need to do the combination.
-        return false;
-      }
-
-      bool currentOverflow = !isEmpty && !sum.has_value();
-      bool otherOverflow = !otherIsEmpty.value() && !otherSum.has_value();
-      if (currentOverflow || otherOverflow) {
-        sum = std::nullopt;
-        isEmpty = false;
-      } else {
-        int128_t result;
-        overflow +=
-            DecimalUtil::addWithOverflow(result, otherSum.value(), sum.value());
-        sum = result;
-        isEmpty &= otherIsEmpty.value();
-      }
-      return true;
-    }
-
-    bool writeIntermediateResult(
-        bool nonNullGroup,
-        exec::out_type<IntermediateType>& out) {
-      if (!nonNullGroup) {
-        // If a group is null, all values in this group are null. In Spark, this
-        // group will be the initial value, where sum is 0 and isEmpty is true.
-        out = std::make_tuple(static_cast<TSumType>(0), true);
-      } else {
-        auto finalResult = computeFinalResult();
-        if (finalResult.has_value()) {
-          out = std::make_tuple(
-              static_cast<TSumType>(finalResult.value()), isEmpty);
+  void addRawInput(
+      char** groups,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      bool /* mayPushdown */) override {
+    decodedRaw_.decode(*args[0], rows);
+    accumlateRowCount_ += decodedRaw_.size();
+    bool skipOverFlowCheck = skipOverflowCheckCount_ > accumlateRowCount_;
+    if (decodedRaw_.isConstantMapping()) {
+      if (!decodedRaw_.isNullAt(0)) {
+        auto value = decodedRaw_.valueAt<TInputType>(0);
+        if (skipOverFlowCheck) {
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue<true>(groups[i], value, false);
+          });
         } else {
-          // Sum should be set to null on overflow,
-          // and isEmpty should be set to false.
-          out.template set_null_at<0>();
-          out.template get_writer_at<1>() = false;
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue<false>(groups[i], value, false);
+          });
         }
       }
-      return true;
+    } else if (decodedRaw_.mayHaveNulls()) {
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!decodedRaw_.isNullAt(i)) {
+            updateNonNullValue<true>(
+                groups[i], decodedRaw_.valueAt<TInputType>(i), false);
+          }
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!decodedRaw_.isNullAt(i)) {
+            updateNonNullValue<false>(
+                groups[i], decodedRaw_.valueAt<TInputType>(i), false);
+          }
+        });
+      }
+    } else if (!numNulls_ && decodedRaw_.isIdentityMapping()) {
+      auto data = decodedRaw_.data<TInputType>();
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<true, false>(groups[i], data[i], false);
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<false, false>(groups[i], data[i], false);
+        });
+      }
+    } else {
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<true>(
+              groups[i], decodedRaw_.valueAt<TInputType>(i), false);
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<false>(
+              groups[i], decodedRaw_.valueAt<TInputType>(i), false);
+        });
+      }
+    }
+  }
+
+  void addSingleGroupRawInput(
+      char* group,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      bool /* mayPushdown */) override {
+    decodedRaw_.decode(*args[0], rows);
+    accumlateRowCount_ += decodedRaw_.size();
+    bool skipOverFlowCheck = skipOverflowCheckCount_ > accumlateRowCount_;
+    if (decodedRaw_.isConstantMapping()) {
+      if (!decodedRaw_.isNullAt(0)) {
+        auto value = decodedRaw_.valueAt<TInputType>(0);
+        if (skipOverFlowCheck) {
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue<true>(group, value, false);
+          });
+        } else {
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue<false>(group, value, false);
+          });
+        }
+      }
+    } else if (decodedRaw_.mayHaveNulls()) {
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!decodedRaw_.isNullAt(i)) {
+            updateNonNullValue<true>(
+                group, decodedRaw_.valueAt<TInputType>(i), false);
+          }
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!decodedRaw_.isNullAt(i)) {
+            updateNonNullValue<false>(
+                group, decodedRaw_.valueAt<TInputType>(i), false);
+          }
+        });
+      }
+    } else if (!numNulls_ && decodedRaw_.isIdentityMapping()) {
+      auto data = decodedRaw_.data<TInputType>();
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<true, false>(group, data[i], false);
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<false, false>(group, data[i], false);
+        });
+      }
+    } else {
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<true>(
+              group, decodedRaw_.valueAt<TInputType>(i), false);
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<false>(
+              group, decodedRaw_.valueAt<TInputType>(i), false);
+        });
+      }
+    }
+  }
+
+  void addIntermediateResults(
+      char** groups,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      bool /* mayPushdown */) override {
+    decodedPartial_.decode(*args[0], rows);
+    accumlateRowCount_ += decodedPartial_.size();
+    bool skipOverFlowCheck = skipOverflowCheckCount_ > accumlateRowCount_;
+    VELOX_CHECK_EQ(
+        decodedPartial_.base()->encoding(), VectorEncoding::Simple::ROW);
+    auto baseRowVector = decodedPartial_.base()->as<RowVector>();
+    auto sumVector = baseRowVector->childAt(0)->as<SimpleVector<TResultType>>();
+    auto isEmptyVector = baseRowVector->childAt(1)->as<SimpleVector<bool>>();
+
+    if (decodedPartial_.isConstantMapping()) {
+      if (!decodedPartial_.isNullAt(0)) {
+        auto decodedIndex = decodedPartial_.index(0);
+        if (isIntermediateResultOverflow(
+                isEmptyVector, sumVector, decodedIndex)) {
+          rows.applyToSelected([&](vector_size_t i) { setNull(groups[i]); });
+        } else {
+          auto sum = sumVector->valueAt(decodedIndex);
+          auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue<false>(groups[i], sum, isEmpty);
+          });
+        }
+      }
+    } else if (decodedPartial_.mayHaveNulls()) {
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!decodedPartial_.isNullAt(i)) {
+            auto decodedIndex = decodedPartial_.index(i);
+            if (isIntermediateResultOverflow(
+                    isEmptyVector, sumVector, decodedIndex)) {
+              setNull(groups[i]);
+            } else {
+              auto sum = sumVector->valueAt(decodedIndex);
+              auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+              updateNonNullValue<true>(groups[i], sum, isEmpty);
+            }
+          } else {
+            setNull(groups[i]);
+          }
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!decodedPartial_.isNullAt(i)) {
+            auto decodedIndex = decodedPartial_.index(i);
+            if (isIntermediateResultOverflow(
+                    isEmptyVector, sumVector, decodedIndex)) {
+              setNull(groups[i]);
+            } else {
+              auto sum = sumVector->valueAt(decodedIndex);
+              auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+              updateNonNullValue<false>(groups[i], sum, isEmpty);
+            }
+          } else {
+            setNull(groups[i]);
+          }
+        });
+      }
+    } else {
+      if (skipOverFlowCheck) {
+        rows.applyToSelected([&](vector_size_t i) {
+          auto decodedIndex = decodedPartial_.index(i);
+          if (isIntermediateResultOverflow(
+                  isEmptyVector, sumVector, decodedIndex)) {
+            setNull(groups[i]);
+          } else {
+            auto sum = sumVector->valueAt(decodedIndex);
+            auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+            updateNonNullValue<true>(groups[i], sum, isEmpty);
+          }
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          auto decodedIndex = decodedPartial_.index(i);
+          if (isIntermediateResultOverflow(
+                  isEmptyVector, sumVector, decodedIndex)) {
+            setNull(groups[i]);
+          } else {
+            auto sum = sumVector->valueAt(decodedIndex);
+            auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+            updateNonNullValue<false>(groups[i], sum, isEmpty);
+          }
+        });
+      }
+    }
+  }
+
+  void addSingleGroupIntermediateResults(
+      char* group,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      bool /* mayPushdown */) override {
+    decodedPartial_.decode(*args[0], rows);
+    VELOX_CHECK_EQ(
+        decodedPartial_.base()->encoding(), VectorEncoding::Simple::ROW);
+    auto baseRowVector = decodedPartial_.base()->as<RowVector>();
+    auto sumVector = baseRowVector->childAt(0)->as<SimpleVector<TResultType>>();
+    auto isEmptyVector = baseRowVector->childAt(1)->as<SimpleVector<bool>>();
+    if (decodedPartial_.isConstantMapping()) {
+      if (!decodedPartial_.isNullAt(0)) {
+        auto decodedIndex = decodedPartial_.index(0);
+        if (isIntermediateResultOverflow(
+                isEmptyVector, sumVector, decodedIndex)) {
+          setNull(group);
+        } else {
+          auto sum = sumVector->valueAt(decodedIndex);
+          auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue<false>(group, sum, isEmpty);
+          });
+        }
+      }
+    } else if (decodedPartial_.mayHaveNulls()) {
+      rows.applyToSelected([&](vector_size_t i) {
+        if (!decodedPartial_.isNullAt(i)) {
+          auto decodedIndex = decodedPartial_.index(i);
+          if (isIntermediateResultOverflow(
+                  isEmptyVector, sumVector, decodedIndex)) {
+            setNull(group);
+          } else {
+            auto sum = sumVector->valueAt(decodedIndex);
+            auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+            updateNonNullValue<false>(group, sum, isEmpty);
+          }
+        }
+      });
+    } else {
+      rows.applyToSelected([&](vector_size_t i) {
+        auto decodedIndex = decodedPartial_.index(i);
+        if (isIntermediateResultOverflow(
+                isEmptyVector, sumVector, decodedIndex)) {
+          setNull(group);
+        } else {
+          auto sum = sumVector->valueAt(decodedIndex);
+          auto isEmpty = isEmptyVector->valueAt(decodedIndex);
+          updateNonNullValue<false>(group, sum, isEmpty);
+        }
+      });
+    }
+  }
+
+  void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
+      override {
+    VELOX_CHECK_EQ((*result)->encoding(), VectorEncoding::Simple::ROW);
+    auto rowVector = (*result)->as<RowVector>();
+    auto sumVector = rowVector->childAt(0)->asFlatVector<TResultType>();
+    auto isEmptyVector = rowVector->childAt(1)->asFlatVector<bool>();
+
+    rowVector->resize(numGroups);
+    sumVector->resize(numGroups);
+    isEmptyVector->resize(numGroups);
+
+    TResultType* rawSums = sumVector->mutableRawValues();
+    // Bool uses compact representation, use mutableRawValues<uint64_t>
+    // and bits::setBit instead.
+    auto* rawIsEmpty = isEmptyVector->mutableRawValues<uint64_t>();
+    uint64_t* rawNulls = getRawNulls(rowVector);
+
+    for (auto i = 0; i < numGroups; ++i) {
+      char* group = groups[i];
+      clearNull(rawNulls, i);
+      if (isNull(group)) {
+        rawSums[i] = 0;
+        bits::setBit(rawIsEmpty, i, true);
+      } else {
+        auto* decimalSum = accumulator(group);
+        auto finalResult = decimalSum->computeFinalValue(sumType_);
+        if (!finalResult.has_value()) {
+          // Sum should be set to null on overflow, and
+          // isEmpty should be set to false.
+          sumVector->setNull(i, true);
+          bits::setBit(rawIsEmpty, i, false);
+        } else {
+          rawSums[i] = (TResultType)finalResult.value();
+          bits::setBit(rawIsEmpty, i, decimalSum->isEmpty);
+        }
+      }
+    }
+  }
+
+  void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
+      override {
+    VELOX_CHECK_EQ((*result)->encoding(), VectorEncoding::Simple::FLAT);
+    auto vector = (*result)->as<FlatVector<TResultType>>();
+    VELOX_CHECK(vector);
+    vector->resize(numGroups);
+    uint64_t* rawNulls = getRawNulls(vector);
+
+    TResultType* rawValues = vector->mutableRawValues();
+    for (auto i = 0; i < numGroups; ++i) {
+      char* group = groups[i];
+      if (isNull(group)) {
+        vector->setNull(i, true);
+      } else {
+        clearNull(rawNulls, i);
+        auto* decimalSum = accumulator(group);
+        if (decimalSum->isEmpty) {
+          // If isEmpty is true, we should set null.
+          vector->setNull(i, true);
+        } else {
+          auto finalResult = decimalSum->computeFinalValue(sumType_);
+          if (!finalResult.has_value()) {
+            // Sum should be set to null on overflow.
+            vector->setNull(i, true);
+          } else {
+            rawValues[i] = (TResultType)finalResult.value();
+          }
+        }
+      }
+    }
+  }
+
+ protected:
+  void initializeNewGroupsInternal(
+      char** groups,
+      folly::Range<const vector_size_t*> indices) override {
+    setAllNulls(groups, indices);
+    for (auto i : indices) {
+      new (groups[i] + offset_) DecimalSum();
+    }
+  }
+
+ private:
+  template <bool skipOverflowCheck, bool tableHasNulls = true>
+  inline void updateNonNullValue(char* group, TResultType value, bool isEmpty) {
+    if constexpr (tableHasNulls) {
+      clearNull(group);
+    }
+    auto decimalSum = accumulator(group);
+    if constexpr (skipOverflowCheck) {
+      decimalSum->sum = value + decimalSum->sum;
+    } else {
+      decimalSum->overflow +=
+          DecimalUtil::addWithOverflow(decimalSum->sum, value, decimalSum->sum);
     }
 
-    bool writeFinalResult(bool nonNullGroup, exec::out_type<OutputType>& out) {
-      if (!nonNullGroup || isEmpty) {
-        // If isEmpty is true, we should set null.
-        return false;
-      }
-      auto finalResult = computeFinalResult();
-      if (finalResult.has_value()) {
-        out = static_cast<TSumType>(finalResult.value());
-        return true;
-      } else {
-        // Sum should be set to null on overflow.
-        return false;
-      }
-    }
-  };
+    decimalSum->isEmpty &= isEmpty;
+  }
+
+  inline DecimalSum* accumulator(char* group) {
+    return value<DecimalSum>(group);
+  }
+
+  inline bool isIntermediateResultOverflow(
+      const SimpleVector<bool>* isEmptyVector,
+      const SimpleVector<TResultType>* sumVector,
+      vector_size_t index) {
+    // If isEmpty is false and sum is null, it means this intermediate
+    // result has an overflow. The final accumulator of this group will
+    // be null.
+    return !isEmptyVector->valueAt(index) && sumVector->isNullAt(index);
+  }
+
+  DecodedVector decodedRaw_;
+  DecodedVector decodedPartial_;
+  TypePtr sumType_;
+  uint64_t accumlateRowCount_ = 0;
+  uint64_t skipOverflowCheckCount_ = 0;
 };
 
 } // namespace facebook::velox::functions::aggregate::sparksql
