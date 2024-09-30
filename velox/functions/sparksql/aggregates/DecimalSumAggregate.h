@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 #pragma once
-#include <iostream>
 #include "velox/exec/Aggregate.h"
 #include "velox/vector/FlatVector.h"
 
@@ -75,7 +74,7 @@ class DecimalSumAggregate : public exec::Aggregate {
   }
 
   int32_t accumulatorAlignmentSize() const override {
-    return alignof(int128_t);
+    return alignof(DecimalSum);
   }
 
   void addRawInput(
@@ -347,6 +346,35 @@ class DecimalSumAggregate : public exec::Aggregate {
         }
       });
     }
+  }
+
+  bool supportsToIntermediate() const override {
+    return true;
+  }
+
+  void toIntermediate(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      VectorPtr& result) const override {
+    DecodedVector decodedRaw(*args[0], rows);
+    result->ensureWritable(rows);
+    auto rowVector = result->as<RowVector>();
+    auto sumVector = rowVector->childAt(0)->asFlatVector<TResultType>();
+    auto isEmptyVector = rowVector->childAt(1)->asFlatVector<bool>();
+
+    TResultType* rawSums = sumVector->mutableRawValues();
+    auto* rawIsEmpty = isEmptyVector->mutableRawValues<uint64_t>();
+    uint64_t* rawNulls = getRawNulls(rowVector);
+    rows.applyToSelected([&](auto i) {
+      clearNull(rawNulls, i);
+      if (!decodedRaw.isNullAt(i)) {
+        rawSums[i] = (TResultType)decodedRaw.valueAt<TInputType>(i);
+        bits::setBit(rawIsEmpty, i, false);
+      } else {
+        rawSums[i] = (TResultType)0;
+        bits::setBit(rawIsEmpty, i, true);
+      }
+    });
   }
 
   void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
