@@ -102,11 +102,13 @@ exec::AggregateRegistrationResult registerSum(
             if (inputType->isShortDecimal()) {
               auto const sumType = getDecimalSumType(resultType);
               if (sumType->isShortDecimal()) {
-                return std::make_unique<DecimalSumAggregate<int64_t, int64_t>>(
-                    inputType, resultType, sumType);
+                return std::make_unique<DecimalSumAggregateAdapter<
+                    DecimalSumAggregate<int64_t, int64_t>>>(
+                    inputType, resultType);
               } else if (sumType->isLongDecimal()) {
-                return std::make_unique<DecimalSumAggregate<int64_t, int128_t>>(
-                    inputType, resultType, sumType);
+                return std::make_unique<DecimalSumAggregateAdapter<
+                    DecimalSumAggregate<int64_t, int128_t>>>(
+                    inputType, resultType);
               }
             }
             return std::make_unique<SumAggregate<int64_t, int64_t, int64_t>>(
@@ -117,8 +119,9 @@ exec::AggregateRegistrationResult registerSum(
             auto const sumType = getDecimalSumType(resultType);
             // If inputType is long decimal,
             // its output type is always long decimal.
-            return std::make_unique<DecimalSumAggregate<int128_t, int128_t>>(
-                inputType, resultType, sumType);
+            return std::make_unique<DecimalSumAggregateAdapter<
+                DecimalSumAggregate<int128_t, int128_t>>>(
+                inputType, resultType);
           }
           case TypeKind::REAL:
             if (resultType->kind() == TypeKind::REAL) {
@@ -141,11 +144,13 @@ exec::AggregateRegistrationResult registerSum(
             // For intermediate input agg, input intermediate sum type
             // is equal to final result sum type.
             if (inputType->childAt(0)->isShortDecimal()) {
-              return std::make_unique<DecimalSumAggregate<int64_t, int64_t>>(
-                  inputType->childAt(0), resultType, sumType);
+              return std::make_unique<DecimalSumAggregateAdapter<
+                  DecimalSumAggregate<int64_t, int64_t>>>(
+                  inputType->childAt(0), resultType);
             } else if (inputType->childAt(0)->isLongDecimal()) {
-              return std::make_unique<DecimalSumAggregate<int128_t, int128_t>>(
-                  inputType->childAt(0), resultType, sumType);
+              return std::make_unique<DecimalSumAggregateAdapter<
+                  DecimalSumAggregate<int128_t, int128_t>>>(
+                  inputType->childAt(0), resultType);
             }
           }
             [[fallthrough]];
