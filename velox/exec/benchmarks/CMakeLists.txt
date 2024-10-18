@@ -95,3 +95,13 @@ target_link_libraries(
   velox_vector_fuzzer
   velox_vector_test_lib
   ${FOLLY_BENCHMARK})
+
+add_executable(velox_row_container_store_benchmark
+               RowContainerStoreBenchmark.cpp)
+
+target_link_libraries(
+  velox_row_container_store_benchmark
+  velox_exec
+  velox_vector_fuzzer
+  velox_vector_test_lib
+  ${FOLLY_BENCHMARK})
