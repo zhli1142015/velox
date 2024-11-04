@@ -144,6 +144,7 @@ PrefixSortLayout PrefixSortLayout::makeSortLayout(
   std::vector<uint32_t> prefixOffsets;
   std::vector<uint32_t> encodeSizes;
   std::vector<PrefixSortEncoder> encoders;
+  bool lastKeyInPrefixIsPartial = false;
 
   // Calculate encoders and prefix-offsets, and stop the loop if a key that
   // cannot be normalized is encountered.
@@ -160,6 +161,7 @@ PrefixSortLayout PrefixSortLayout::makeSortLayout(
       numNormalizedKeys++;
       if (types[i]->kind() == TypeKind::VARCHAR ||
           types[i]->kind() == TypeKind::VARBINARY) {
+        lastKeyInPrefixIsPartial = true;
         break;
       }
     } else {
@@ -175,7 +177,7 @@ PrefixSortLayout PrefixSortLayout::makeSortLayout(
       numKeys,
       compareFlags,
       numNormalizedKeys == 0,
-      numNormalizedKeys < numKeys,
+      numNormalizedKeys < numKeys || lastKeyInPrefixIsPartial,
       std::move(prefixOffsets),
       std::move(encodeSizes),
       std::move(encoders),
