@@ -39,8 +39,15 @@ FOLLY_ALWAYS_INLINE void encodeRowColumn(
   } else {
     value = *(reinterpret_cast<T*>(row + rowColumn.offset()));
   }
-  prefixSortLayout.encoders[index].encode(
-      value, prefix + prefixSortLayout.prefixOffsets[index]);
+  if constexpr (std::is_same_v<T, StringView>) {
+    prefixSortLayout.encoders[index].encode(
+        value,
+        prefix + prefixSortLayout.prefixOffsets[index],
+        prefixSortLayout.encodeSizes[index]);
+  } else {
+    prefixSortLayout.encoders[index].encode(
+        value, prefix + prefixSortLayout.prefixOffsets[index]);
+  }
 }
 
 FOLLY_ALWAYS_INLINE void extractRowColumnToPrefix(
@@ -73,6 +80,16 @@ FOLLY_ALWAYS_INLINE void extractRowColumnToPrefix(
     }
     case TypeKind::TIMESTAMP: {
       encodeRowColumn<Timestamp>(
+          prefixSortLayout, index, rowColumn, row, prefix);
+      return;
+    }
+    case TypeKind::VARCHAR: {
+      encodeRowColumn<StringView>(
+          prefixSortLayout, index, rowColumn, row, prefix);
+      return;
+    }
+    case TypeKind::VARBINARY: {
+      encodeRowColumn<StringView>(
           prefixSortLayout, index, rowColumn, row, prefix);
       return;
     }
@@ -119,27 +136,32 @@ compareByWord(uint64_t* left, uint64_t* right, int32_t bytes) {
 PrefixSortLayout PrefixSortLayout::makeSortLayout(
     const std::vector<TypePtr>& types,
     const std::vector<CompareFlags>& compareFlags,
-    uint32_t maxNormalizedKeySize) {
+    uint32_t maxNormalizedKeySize,
+    int32_t stringPrefixLength) {
   uint32_t normalizedKeySize = 0;
   uint32_t numNormalizedKeys = 0;
   const uint32_t numKeys = types.size();
   std::vector<uint32_t> prefixOffsets;
+  std::vector<uint32_t> encodeSizes;
   std::vector<PrefixSortEncoder> encoders;
 
   // Calculate encoders and prefix-offsets, and stop the loop if a key that
   // cannot be normalized is encountered.
   for (auto i = 0; i < numKeys; ++i) {
-    if (normalizedKeySize > maxNormalizedKeySize) {
-      break;
-    }
     std::optional<uint32_t> encodedSize =
-        PrefixSortEncoder::encodedSize(types[i]->kind());
-    if (encodedSize.has_value()) {
+        PrefixSortEncoder::encodedSize(types[i]->kind(), stringPrefixLength);
+    if (encodedSize.has_value() &&
+        normalizedKeySize + encodedSize.value() <= maxNormalizedKeySize) {
       prefixOffsets.push_back(normalizedKeySize);
       encoders.push_back(
           {compareFlags[i].ascending, compareFlags[i].nullsFirst});
       normalizedKeySize += encodedSize.value();
+      encodeSizes.push_back(encodedSize.value());
       numNormalizedKeys++;
+      if (types[i]->kind() == TypeKind::VARCHAR ||
+          types[i]->kind() == TypeKind::VARBINARY) {
+        break;
+      }
     } else {
       break;
     }
@@ -155,6 +177,7 @@ PrefixSortLayout PrefixSortLayout::makeSortLayout(
       numNormalizedKeys == 0,
       numNormalizedKeys < numKeys,
       std::move(prefixOffsets),
+      std::move(encodeSizes),
       std::move(encoders),
       padding};
 }
@@ -226,7 +249,10 @@ uint32_t PrefixSort::maxRequiredBytes(
   }
   VELOX_DCHECK_EQ(rowContainer->keyTypes().size(), compareFlags.size());
   const auto sortLayout = PrefixSortLayout::makeSortLayout(
-      rowContainer->keyTypes(), compareFlags, config.maxNormalizedKeySize);
+      rowContainer->keyTypes(),
+      compareFlags,
+      config.maxNormalizedKeySize,
+      config.stringPrefixLength);
   if (sortLayout.noNormalizedKeys) {
     return 0;
   }

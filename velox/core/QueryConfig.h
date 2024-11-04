@@ -393,6 +393,11 @@ class QueryConfig {
   /// derived using micro-benchmarking.
   static constexpr const char* kPrefixSortMinRows = "prefixsort_min_rows";
 
+  /// Length of the prefix to be stored in prefix-sort buffer for a string
+  /// column.
+  static constexpr const char* kPrefixSortStringPrefixLength =
+      "prefixsort_string_prefix_length";
+
   /// Enable query tracing flag.
   static constexpr const char* kQueryTraceEnabled = "query_trace_enabled";
 
@@ -805,6 +810,10 @@ class QueryConfig {
 
   int32_t prefixSortMinRows() const {
     return get<int32_t>(kPrefixSortMinRows, 130);
+  }
+
+  int32_t prefixSortStringPrefixLength() const {
+    return get<int32_t>(kPrefixSortStringPrefixLength, 8);
   }
 
   template <typename T>

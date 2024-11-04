@@ -67,7 +67,8 @@ class PrefixSortTest : public exec::test::OperatorTestBase {
         common::PrefixSortConfig{
             1024,
             // Set threshold to 0 to enable prefix-sort in small dataset.
-            0});
+            0,
+            8});
     const auto beforeBytes = sortPool->peakBytes();
     ASSERT_EQ(sortPool->peakBytes(), 0);
     // Use PrefixSort to sort rows.
@@ -79,7 +80,8 @@ class PrefixSortTest : public exec::test::OperatorTestBase {
         common::PrefixSortConfig{
             1024,
             // Set threshold to 0 to enable prefix-sort in small dataset.
-            0});
+            0,
+            8});
     ASSERT_GE(maxBytes, sortPool->peakBytes() - beforeBytes);
 
     // Extract data from the RowContainer in order.
@@ -167,7 +169,8 @@ TEST_F(PrefixSortTest, singleKey) {
            Timestamp(3, 3),
            Timestamp(2, 2),
            Timestamp(1, 1)}),
-      makeFlatVector<std::string_view>({"eee", "ddd", "ccc", "bbb", "aaa"})};
+      makeFlatVector<std::string_view>({"eee", "ddd", "ccc", "bbb", "aaa"}),
+      makeFlatVector<std::string_view>({"e", "dddddd", "ddddd", "bbb", "aaa"})};
   for (int i = 5; i < columnsSize; ++i) {
     const auto data = makeRowVector({testData[i]});
 
@@ -195,7 +198,9 @@ TEST_F(PrefixSortTest, singleKeyWithNulls) {
            Timestamp(2, 2),
            Timestamp(1, 1)}),
       makeNullableFlatVector<std::string_view>(
-          {"eee", "ddd", std::nullopt, "bbb", "aaa"})};
+          {"eee", "ddd", std::nullopt, "bbb", "aaa"}),
+      makeNullableFlatVector<std::string_view>(
+          {"ee", "aaa", std::nullopt, "d", "aaaaaaaaaaaaaa"})};
 
   for (int i = 5; i < columnsSize; ++i) {
     const auto data = makeRowVector({testData[i]});
@@ -222,12 +227,52 @@ TEST_F(PrefixSortTest, multipleKeys) {
     const auto data = makeRowVector({
         makeNullableFlatVector<int64_t>({5, 2, std::nullopt, 2, 1}),
         makeNullableFlatVector<std::string_view>(
-            {"eee", "ddd", std::nullopt, "bbb", "aaa"}),
+            {"eee", "aaa", std::nullopt, "bbb", "aaaa"}),
     });
 
     testPrefixSort({kAsc, kAsc}, data);
     testPrefixSort({kDesc, kDesc}, data);
   }
+}
+
+TEST_F(PrefixSortTest, makeSortLayout) {
+  std::vector<TypePtr> keyTypes = {VARCHAR(), BIGINT()};
+  std::vector<TypePtr> keyTypes1 = {BIGINT(), VARCHAR(), BIGINT()};
+  std::vector<CompareFlags> compareFlags = {kAsc, kDesc};
+  // Test the normalizedKeySize doesn't exceed the MaxNormalizedKeySize.
+  auto sortLayoutNoKey =
+      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 8, 8);
+  ASSERT_TRUE(sortLayoutNoKey.noNormalizedKeys);
+
+  auto sortLayoutOneKey =
+      PrefixSortLayout::makeSortLayout(keyTypes1, compareFlags, 17, 8);
+  ASSERT_FALSE(sortLayoutOneKey.noNormalizedKeys);
+  ASSERT_TRUE(sortLayoutOneKey.hasNonNormalizedKey);
+  ASSERT_EQ(sortLayoutOneKey.encodeSizes.size(), 1);
+  ASSERT_EQ(sortLayoutOneKey.encodeSizes[0], 9);
+
+  auto sortLayoutOneKey1 =
+      PrefixSortLayout::makeSortLayout(keyTypes1, compareFlags, 18, 9);
+  ASSERT_FALSE(sortLayoutOneKey1.noNormalizedKeys);
+  ASSERT_TRUE(sortLayoutOneKey1.hasNonNormalizedKey);
+  ASSERT_EQ(sortLayoutOneKey1.encodeSizes.size(), 1);
+  ASSERT_EQ(sortLayoutOneKey1.encodeSizes[0], 9);
+
+  // Test makeSortLayout stops at the string column.
+  auto sortLayoutOneKey2 =
+      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 16, 8);
+  ASSERT_FALSE(sortLayoutOneKey2.noNormalizedKeys);
+  ASSERT_TRUE(sortLayoutOneKey2.hasNonNormalizedKey);
+  ASSERT_EQ(sortLayoutOneKey2.encodeSizes.size(), 1);
+  ASSERT_EQ(sortLayoutOneKey2.encodeSizes[0], 9);
+
+  auto sortLayoutTwoKeys =
+      PrefixSortLayout::makeSortLayout(keyTypes1, compareFlags, 26, 8);
+  ASSERT_FALSE(sortLayoutTwoKeys.noNormalizedKeys);
+  ASSERT_TRUE(sortLayoutTwoKeys.hasNonNormalizedKey);
+  ASSERT_EQ(sortLayoutTwoKeys.encodeSizes.size(), 2);
+  ASSERT_EQ(sortLayoutTwoKeys.encodeSizes[0], 9);
+  ASSERT_EQ(sortLayoutTwoKeys.encodeSizes[1], 9);
 }
 
 TEST_F(PrefixSortTest, fuzz) {

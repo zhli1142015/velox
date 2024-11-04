@@ -144,6 +144,10 @@ Generic Configuration
      - integer
      - 130
      - Minimum number of rows to use prefix-sort. The default value has been derived using micro-benchmarking.
+   * - prefixsort_string_prefix_length
+     - integer
+     - 8
+     - Length of the prefix to be stored in prefix-sort buffer for a string column.
 
 .. _expression-evaluation-conf:
 

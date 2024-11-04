@@ -66,7 +66,10 @@ class SortBufferTest : public OperatorTestBase {
   }
 
   const velox::common::PrefixSortConfig prefixSortConfig_ =
-      velox::common::PrefixSortConfig{std::numeric_limits<int32_t>::max(), 130};
+      velox::common::PrefixSortConfig{
+          std::numeric_limits<int32_t>::max(),
+          130,
+          8};
 
   const RowTypePtr inputType_ = ROW(
       {{"c0", BIGINT()},
