@@ -24,8 +24,13 @@ namespace facebook::velox::common {
 struct PrefixSortConfig {
   PrefixSortConfig() = default;
 
-  PrefixSortConfig(int64_t _maxNormalizedKeySize, int32_t _threshold)
-      : maxNormalizedKeySize(_maxNormalizedKeySize), threshold(_threshold) {}
+  PrefixSortConfig(
+      int64_t _maxNormalizedKeySize,
+      int32_t _threshold,
+      int32_t _stringPrefixLength)
+      : maxNormalizedKeySize(_maxNormalizedKeySize),
+        threshold(_threshold),
+        stringPrefixLength(_stringPrefixLength) {}
 
   /// Max number of bytes can store normalized keys in prefix-sort buffer per
   /// entry. Same with QueryConfig kPrefixSortNormalizedKeyMaxBytes.
@@ -33,5 +38,9 @@ struct PrefixSortConfig {
 
   /// PrefixSort will have performance regression when the dateset is too small.
   int32_t threshold{130};
+
+  /// Length of the prefix to be stored in prefix-sort buffer for a string
+  /// column.
+  int32_t stringPrefixLength{12};
 };
 } // namespace facebook::velox::common

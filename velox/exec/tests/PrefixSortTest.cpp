@@ -66,7 +66,8 @@ class PrefixSortTest : public exec::test::OperatorTestBase {
         common::PrefixSortConfig{
             1024,
             // Set threshold to 0 to enable prefix-sort in small dataset.
-            0},
+            0,
+            12},
         sortPool.get());
     const auto beforeBytes = sortPool->peakBytes();
     ASSERT_EQ(sortPool->peakBytes(), 0);
@@ -77,7 +78,8 @@ class PrefixSortTest : public exec::test::OperatorTestBase {
         common::PrefixSortConfig{
             1024,
             // Set threshold to 0 to enable prefix-sort in small dataset.
-            0},
+            0,
+            12},
         sortPool.get(),
         rows);
     ASSERT_GE(maxBytes, sortPool->peakBytes() - beforeBytes);
@@ -152,7 +154,7 @@ const RowVectorPtr PrefixSortTest::generateExpectedResult(
 
 TEST_F(PrefixSortTest, singleKey) {
   const int numRows = 5;
-  const int columnsSize = 7;
+  const int columnsSize = 11;
 
   // Vectors without nulls.
   const std::vector<VectorPtr> testData = {
@@ -173,8 +175,22 @@ TEST_F(PrefixSortTest, singleKey) {
            Timestamp(3, 3),
            Timestamp(2, 2),
            Timestamp(1, 1)}),
-      makeFlatVector<std::string_view>({"eee", "ddd", "ccc", "bbb", "aaa"})};
-  for (int i = 5; i < columnsSize; ++i) {
+      makeFlatVector<std::string_view>({"eee", "ddd", "ccc", "bbb", "aaa"}),
+      makeFlatVector<std::string_view>({"e", "dddddd", "bbb", "ddd", "aaa"}),
+      makeFlatVector<std::string_view>(
+          {"ddd_not_inline",
+           "aaa_is_not_inline",
+           "aaa_is_not_inline_a",
+           "ddd_is_not_inline",
+           "aaa_is_not_inline_b"}),
+      makeNullableFlatVector<std::string_view>(
+          {"\u7231",
+           "\u671B\u5E0C\u2014\u5FF5\u4FE1",
+           "\u671B\u5E0C",
+           "\u7231\u2014",
+           "\u4FE1 \u7231"},
+          VARBINARY())};
+  for (int i = 0; i < columnsSize; ++i) {
     const auto data = makeRowVector({testData[i]});
 
     testPrefixSort({kAsc}, data);
@@ -184,7 +200,7 @@ TEST_F(PrefixSortTest, singleKey) {
 
 TEST_F(PrefixSortTest, singleKeyWithNulls) {
   const int numRows = 5;
-  const int columnsSize = 7;
+  const int columnsSize = 11;
 
   Timestamp ts = {5, 5};
   // Vectors with nulls.
@@ -207,9 +223,24 @@ TEST_F(PrefixSortTest, singleKeyWithNulls) {
            Timestamp(2, 2),
            Timestamp(1, 1)}),
       makeNullableFlatVector<std::string_view>(
-          {"eee", "ddd", std::nullopt, "bbb", "aaa"})};
+          {"eee", "ddd", std::nullopt, "bbb", "aaa"}),
+      makeNullableFlatVector<std::string_view>(
+          {"ee", "aaa", std::nullopt, "d", "aaaaaaaaaaaaaa"}),
+      makeNullableFlatVector<std::string_view>(
+          {"aaa_is_not_inline",
+           "aaa_is_not_inline_2",
+           std::nullopt,
+           "aaa_is_not_inline_1",
+           "aaaaaaaaaaaaaa"}),
+      makeNullableFlatVector<std::string_view>(
+          {"\u7231",
+           "\u671B\u5E0C\u2014\u5FF5\u4FE1",
+           std::nullopt,
+           "\u7231\u2014",
+           "\u4FE1 \u7231"},
+          VARBINARY())};
 
-  for (int i = 5; i < columnsSize; ++i) {
+  for (int i = 0; i < columnsSize; ++i) {
     const auto data = makeRowVector({testData[i]});
 
     testPrefixSort({kAsc}, data);
@@ -234,7 +265,7 @@ TEST_F(PrefixSortTest, multipleKeys) {
     const auto data = makeRowVector({
         makeNullableFlatVector<int64_t>({5, 2, std::nullopt, 2, 1}),
         makeNullableFlatVector<std::string_view>(
-            {"eee", "ddd", std::nullopt, "bbb", "aaa"}),
+            {"eee", "aaa", std::nullopt, "bbb", "aaaa"}),
     });
 
     testPrefixSort({kAsc, kAsc}, data);
@@ -300,30 +331,63 @@ TEST_F(PrefixSortTest, checkMaxNormalizedKeySizeForMultipleKeys) {
   // The normalizedKeySize for BIGINT should be 8 + 1.
   std::vector<TypePtr> keyTypes = {BIGINT(), BIGINT()};
   std::vector<CompareFlags> compareFlags = {kAsc, kDesc};
-  auto sortLayout = PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 8);
+  auto sortLayout =
+      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 8, 9);
   ASSERT_FALSE(sortLayout.hasNormalizedKeys);
 
   auto sortLayoutOneKey =
-      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 9);
+      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 9, 9);
   ASSERT_TRUE(sortLayoutOneKey.hasNormalizedKeys);
   ASSERT_TRUE(sortLayoutOneKey.hasNonNormalizedKey);
   ASSERT_EQ(sortLayoutOneKey.prefixOffsets.size(), 1);
   ASSERT_EQ(sortLayoutOneKey.prefixOffsets[0], 0);
 
   auto sortLayoutOneKey1 =
-      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 17);
+      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 17, 12);
   ASSERT_TRUE(sortLayoutOneKey1.hasNormalizedKeys);
   ASSERT_TRUE(sortLayoutOneKey1.hasNonNormalizedKey);
   ASSERT_EQ(sortLayoutOneKey1.prefixOffsets.size(), 1);
   ASSERT_EQ(sortLayoutOneKey1.prefixOffsets[0], 0);
 
   auto sortLayoutTwoKeys =
-      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 18);
+      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 18, 12);
   ASSERT_TRUE(sortLayoutTwoKeys.hasNormalizedKeys);
   ASSERT_FALSE(sortLayoutTwoKeys.hasNonNormalizedKey);
+  ASSERT_FALSE(
+      sortLayoutTwoKeys.comparisonStartIndex <
+      sortLayoutTwoKeys.numNormalizedKeys);
   ASSERT_EQ(sortLayoutTwoKeys.prefixOffsets.size(), 2);
   ASSERT_EQ(sortLayoutTwoKeys.prefixOffsets[0], 0);
   ASSERT_EQ(sortLayoutTwoKeys.prefixOffsets[1], 9);
+}
+
+TEST_F(PrefixSortTest, makeSortLayoutForString) {
+  std::vector<TypePtr> keyTypes = {VARCHAR(), BIGINT()};
+  std::vector<CompareFlags> compareFlags = {kAsc, kDesc};
+
+  auto sortLayoutOneKey =
+      PrefixSortLayout::makeSortLayout(keyTypes, compareFlags, 24, 12);
+  ASSERT_TRUE(sortLayoutOneKey.hasNormalizedKeys);
+  ASSERT_TRUE(sortLayoutOneKey.hasNonNormalizedKey);
+  ASSERT_TRUE(
+      sortLayoutOneKey.comparisonStartIndex <
+      sortLayoutOneKey.numNormalizedKeys);
+  ASSERT_EQ(sortLayoutOneKey.encodeSizes.size(), 1);
+  ASSERT_EQ(sortLayoutOneKey.encodeSizes[0], 13);
+
+  // Last key type is varbinary, we assume only partail data is encoded in
+  // prefix.
+  std::vector<TypePtr> keyTypes1 = {BIGINT(), VARBINARY()};
+  auto sortLayoutTwoKeys =
+      PrefixSortLayout::makeSortLayout(keyTypes1, compareFlags, 26, 8);
+  ASSERT_TRUE(sortLayoutTwoKeys.hasNormalizedKeys);
+  ASSERT_FALSE(sortLayoutTwoKeys.hasNonNormalizedKey);
+  ASSERT_TRUE(
+      sortLayoutTwoKeys.comparisonStartIndex <
+      sortLayoutTwoKeys.numNormalizedKeys);
+  ASSERT_EQ(sortLayoutTwoKeys.encodeSizes.size(), 2);
+  ASSERT_EQ(sortLayoutTwoKeys.encodeSizes[0], 9);
+  ASSERT_EQ(sortLayoutTwoKeys.encodeSizes[1], 9);
 }
 } // namespace
 } // namespace facebook::velox::exec::prefixsort::test
