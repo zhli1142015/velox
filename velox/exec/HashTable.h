@@ -214,7 +214,8 @@ class BaseHashTable {
   /// returned in 'lookup.hits'.
   virtual void groupProbe(
       HashLookup& lookup,
-      int8_t spillInputStartPartitionBit) = 0;
+      int8_t spillInputStartPartitionBit,
+      bool useBatchRowAllocation = false) = 0;
 
   /// Returns the first hit for each key in 'lookup'. The keys are in
   /// 'lookup.hits' with a nullptr representing a miss. This is for use in hash
@@ -408,6 +409,8 @@ class BaseHashTable {
       int32_t columnIndex,
       const VectorPtr& result) = 0;
 
+  virtual void ClearNewRows() = 0;
+
  protected:
   static FOLLY_ALWAYS_INLINE size_t tableSlotSize() {
     // Each slot is 8 bytes.
@@ -494,8 +497,10 @@ class HashTable : public BaseHashTable {
         pool);
   }
 
-  void groupProbe(HashLookup& lookup, int8_t spillInputStartPartitionBit)
-      override;
+  void groupProbe(
+      HashLookup& lookup,
+      int8_t spillInputStartPartitionBit,
+      bool useBatchRowAllocation = false) override;
 
   void joinProbe(HashLookup& lookup) override;
 
@@ -659,6 +664,13 @@ class HashTable : public BaseHashTable {
         result);
   }
 
+  void ClearNewRows() override {
+    if (!newRows_.empty()) {
+      rows_->recyclyEmptyRows(folly::Range(newRows_.data(), newRows_.size()));
+      newRows_.clear();
+    }
+  }
+
  private:
   // Enables debug stats for collisions for debug build.
 #ifdef NDEBUG
@@ -738,6 +750,7 @@ class HashTable : public BaseHashTable {
   int32_t
   listRows(RowsIterator* iter, int32_t maxRows, uint64_t maxBytes, char** rows);
 
+  template <bool useBatchRowAllocation>
   void arrayGroupProbe(HashLookup& lookup);
 
   void setHashMode(
@@ -872,16 +885,24 @@ class HashTable : public BaseHashTable {
       bool initNormalizedKeys,
       raw_vector<uint64_t>& hashes);
 
+  template <bool useBatchRowAllocation = false>
   char* insertEntry(HashLookup& lookup, uint64_t index, vector_size_t row);
 
   bool compareKeys(const char* group, HashLookup& lookup, vector_size_t row);
 
   bool compareKeys(const char* group, const char* inserted);
 
-  template <bool isJoin, bool isNormalizedKey = false>
+  template <
+      bool isJoin,
+      bool isNormalizedKey = false,
+      bool useBatchRowAllocation = false>
   void fullProbe(HashLookup& lookup, ProbeState& state, bool extraCheck);
 
+  template <bool useBatchRowAllocation>
+  void hashGroupProbe(HashLookup& lookup);
+
   // Shortcut path for group by with normalized keys.
+  template <bool useBatchRowAllocation>
   void groupNormalizedKeyProbe(HashLookup& lookup);
 
   // Array probe with SIMD.
@@ -1090,6 +1111,8 @@ class HashTable : public BaseHashTable {
 
   // If true, avoids using VectorHasher value ranges with kArray hash mode.
   bool disableRangeArrayHash_{false};
+
+  std::vector<char*> newRows_;
 
   friend class ProbeState;
   friend test::HashTableTestHelper<ignoreNullKeys>;

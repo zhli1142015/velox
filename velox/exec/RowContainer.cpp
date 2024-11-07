@@ -337,6 +337,10 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
 
 void RowContainer::eraseRows(folly::Range<char**> rows) {
   freeRowsExtraMemory(rows, /*freeNextRowVector=*/true);
+  recyclyEmptyRows(rows);
+}
+
+void RowContainer::recyclyEmptyRows(folly::Range<char**> rows) {
   for (auto* row : rows) {
     VELOX_CHECK(!bits::isBitSet(row, freeFlagOffset_), "Double free of row");
     bits::setBit(row, freeFlagOffset_);

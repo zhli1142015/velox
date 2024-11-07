@@ -200,7 +200,6 @@ void GroupingSet::noMoreInput() {
   if (hasSpilled()) {
     spill();
   }
-
   ensureOutputFits();
 }
 
@@ -235,7 +234,10 @@ void GroupingSet::addInputForActiveRows(
     return;
   }
 
-  table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
+  table_->groupProbe(
+      *lookup_,
+      BaseHashTable::kNoSpillInputStartPartitionBit,
+      preGroupedKeyChannels_.empty());
   masks_.addInput(input, activeRows_);
 
   auto* groups = lookup_->hits.data();
@@ -721,6 +723,10 @@ bool GroupingSet::getOutput(
     RowVectorPtr& result) {
   TestValue::adjust("facebook::velox::exec::GroupingSet::getOutput", this);
 
+  if (table_) {
+    table_->ClearNewRows();
+  }
+
   if (isGlobal_) {
     return getGlobalAggregationOutput(iterator, result);
   }
@@ -968,7 +974,7 @@ void GroupingSet::spill() {
   if (table_ == nullptr || table_->numDistinct() == 0) {
     return;
   }
-
+  table_->ClearNewRows();
   auto* rows = table_->rows();
   if (!hasSpilled()) {
     VELOX_DCHECK(pool_.trackUsage());

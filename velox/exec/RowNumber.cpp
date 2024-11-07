@@ -86,7 +86,6 @@ void RowNumber::addInput(RowVectorPtr input) {
     table_->prepareForGroupProbe(
         *lookup_, input, rows, BaseHashTable::kNoSpillInputStartPartitionBit);
     table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
-
     // Initialize new partitions with zeros.
     for (auto i : lookup_->newGroups) {
       setNumRows(lookup_->hits[i], 0);
@@ -149,7 +148,6 @@ void RowNumber::restoreNextSpillPartition() {
       table_->prepareForGroupProbe(
           *lookup_, input, rows, spillConfig_->startPartitionBit);
       table_->groupProbe(*lookup_, spillConfig_->startPartitionBit);
-
       auto* counts = data->children().back()->as<FlatVector<int64_t>>();
 
       for (auto i = 0; i < numInput; ++i) {

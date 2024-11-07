@@ -194,7 +194,6 @@ void TopNRowNumber::addInput(RowVectorPtr input) {
     table_->prepareForGroupProbe(
         *lookup_, input, rows, BaseHashTable::kNoSpillInputStartPartitionBit);
     table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
-
     // Initialize new partitions.
     initializeNewPartitions();
 

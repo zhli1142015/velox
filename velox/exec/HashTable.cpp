@@ -15,6 +15,8 @@
  */
 
 #include "velox/exec/HashTable.h"
+#include <iostream>
+#include "boost/stacktrace.hpp"
 #include "velox/common/base/AsyncSource.h"
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/base/Portability.h"
@@ -326,13 +328,25 @@ void HashTable<ignoreNullKeys>::storeRowPointer(
 }
 
 template <bool ignoreNullKeys>
+template <bool useBatchRowAllocation>
 char* HashTable<ignoreNullKeys>::insertEntry(
     HashLookup& lookup,
     uint64_t index,
     vector_size_t row) {
-  char* group = rows_->newRow();
-  lookup.hits[row] = group; // NOLINT
-  storeKeys(lookup, row);
+  // std::cout << "use new row:" << newRows_.size() << std::endl;
+  char* group;
+  if constexpr (useBatchRowAllocation) {
+    group = newRows_.back();
+    newRows_.pop_back();
+    lookup.hits[row] = group; // NOLINT
+    if (hashMode_ == HashMode::kHash) {
+      storeKeys(lookup, row);
+    }
+  } else {
+    group = rows_->newRow();
+    lookup.hits[row] = group; // NOLINT
+    storeKeys(lookup, row);
+  }
   storeRowPointer(index, lookup.hashes[row], group);
   if (hashMode_ == HashMode::kNormalizedKey) {
     // We store the unique digest of key values (normalized key) in
@@ -379,7 +393,7 @@ bool HashTable<ignoreNullKeys>::compareKeys(
 }
 
 template <bool ignoreNullKeys>
-template <bool isJoin, bool isNormalizedKey>
+template <bool isJoin, bool isNormalizedKey, bool useBatchRowAllocation>
 FOLLY_ALWAYS_INLINE void HashTable<ignoreNullKeys>::fullProbe(
     HashLookup& lookup,
     ProbeState& state,
@@ -396,7 +410,9 @@ FOLLY_ALWAYS_INLINE void HashTable<ignoreNullKeys>::fullProbe(
               lookup.normalizedKeys[row];
         },
         [&](int32_t row, uint64_t index) {
-          return isJoin ? nullptr : insertEntry(lookup, index, row);
+          return isJoin
+              ? nullptr
+              : insertEntry<useBatchRowAllocation>(lookup, index, row);
         },
         numTombstones_,
         !isJoin && extraCheck);
@@ -408,7 +424,8 @@ FOLLY_ALWAYS_INLINE void HashTable<ignoreNullKeys>::fullProbe(
       0,
       [&](char* group, int32_t row) { return compareKeys(group, lookup, row); },
       [&](int32_t row, uint64_t index) {
-        return isJoin ? nullptr : insertEntry(lookup, index, row);
+        return isJoin ? nullptr
+                      : insertEntry<useBatchRowAllocation>(lookup, index, row);
       },
       numTombstones_,
       !isJoin && extraCheck);
@@ -451,94 +468,115 @@ void populateNormalizedKeys(HashLookup& lookup, int8_t sizeBits) {
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::groupProbe(
     HashLookup& lookup,
-    int8_t spillInputStartPartitionBit) {
+    int8_t spillInputStartPartitionBit,
+    bool useBatchRowAllocation) {
   incrementProbes(lookup.rows.size());
 
   if (hashMode_ == HashMode::kArray) {
-    arrayGroupProbe(lookup);
+    // std::cout << "start to add new row:" << newRows_.size() << " to " <<
+    // lookup.rows.size() << std::endl;
+    if (useBatchRowAllocation) {
+      while (newRows_.size() < lookup.rows.size()) {
+        newRows_.push_back(rows_->newRow());
+      }
+    }
+    if (useBatchRowAllocation) {
+      arrayGroupProbe<true>(lookup);
+    } else {
+      arrayGroupProbe<false>(lookup);
+    }
+
     return;
   }
   // Do size-based rehash before mixing hashes from normalized keys
   // because the size of the table affects the mixing.
   checkSize(lookup.rows.size(), false, spillInputStartPartitionBit);
+  if (useBatchRowAllocation) {
+    while (newRows_.size() < lookup.rows.size()) {
+      newRows_.push_back(rows_->newRow());
+    }
+  }
   if (hashMode_ == HashMode::kNormalizedKey) {
     populateNormalizedKeys(lookup, sizeBits_);
-    groupNormalizedKeyProbe(lookup);
+    if (useBatchRowAllocation) {
+      groupNormalizedKeyProbe<true>(lookup);
+    } else {
+      groupNormalizedKeyProbe<false>(lookup);
+    }
     return;
   }
-  ProbeState state1;
-  ProbeState state2;
-  ProbeState state3;
-  ProbeState state4;
-  int32_t probeIndex = 0;
-  int32_t numProbes = lookup.rows.size();
-  auto rows = lookup.rows.data();
-  for (; probeIndex + 4 <= numProbes; probeIndex += 4) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 1];
-    state2.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 2];
-    state3.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 3];
-    state4.preProbe(*this, lookup.hashes[row], row);
 
-    state1.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state2.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state3.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state4.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-
-    fullProbe<false>(lookup, state1, false);
-    fullProbe<false>(lookup, state2, true);
-    fullProbe<false>(lookup, state3, true);
-    fullProbe<false>(lookup, state4, true);
-  }
-  for (; probeIndex < numProbes; ++probeIndex) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe(*this, 0);
-    fullProbe<false>(lookup, state1, false);
+  if (useBatchRowAllocation) {
+    hashGroupProbe<true>(lookup);
+  } else {
+    hashGroupProbe<false>(lookup);
   }
 }
 
 template <bool ignoreNullKeys>
+template <bool useBatchRowAllocation>
+void HashTable<ignoreNullKeys>::hashGroupProbe(HashLookup& lookup) {
+  int32_t probeIndex = 0;
+  int32_t numProbes = lookup.rows.size();
+  auto rows = lookup.rows.data();
+  ProbeState states[kPrefetchSize];
+  for (; probeIndex + kPrefetchSize <= numProbes; probeIndex += kPrefetchSize) {
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      int32_t row = rows[probeIndex + i];
+      states[i].preProbe(*this, lookup.hashes[row], row);
+    }
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      states[i].firstProbe<ProbeState::Operation::kInsert>(*this, 0);
+    }
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      fullProbe<false, false, useBatchRowAllocation>(lookup, states[i], i != 0);
+    }
+  }
+  for (; probeIndex < numProbes; ++probeIndex) {
+    int32_t row = rows[probeIndex];
+    states[0].preProbe(*this, lookup.hashes[row], row);
+    states[0].firstProbe(*this, 0);
+    fullProbe<false, false, useBatchRowAllocation>(lookup, states[0], false);
+  }
+}
+
+template <bool ignoreNullKeys>
+template <bool useBatchRowAllocation>
 void HashTable<ignoreNullKeys>::groupNormalizedKeyProbe(HashLookup& lookup) {
-  ProbeState state1;
-  ProbeState state2;
-  ProbeState state3;
-  ProbeState state4;
+  ProbeState states[kPrefetchSize];
   int32_t probeIndex = 0;
   int32_t numProbes = lookup.rows.size();
   auto rows = lookup.rows.data();
   constexpr int32_t kKeyOffset =
       -static_cast<int32_t>(sizeof(normalized_key_t));
-  for (; probeIndex + 4 <= numProbes; probeIndex += 4) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 1];
-    state2.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 2];
-    state3.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 3];
-    state4.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state2.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state3.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state4.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    fullProbe<false, true>(lookup, state1, false);
-    fullProbe<false, true>(lookup, state2, true);
-    fullProbe<false, true>(lookup, state3, true);
-    fullProbe<false, true>(lookup, state4, true);
+  for (; probeIndex + kPrefetchSize <= numProbes; probeIndex += kPrefetchSize) {
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      int32_t row = rows[probeIndex + i];
+      states[i].preProbe(*this, lookup.hashes[row], row);
+    }
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      states[i].firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
+    }
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      fullProbe<false, true, useBatchRowAllocation>(lookup, states[i], i != 0);
+    }
   }
   for (; probeIndex < numProbes; ++probeIndex) {
     int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe(*this, kKeyOffset);
-    fullProbe<false, true>(lookup, state1, false);
+    states[0].preProbe(*this, lookup.hashes[row], row);
+    states[0].firstProbe(*this, kKeyOffset);
+    fullProbe<false, true, useBatchRowAllocation>(lookup, states[0], false);
+  }
+  if constexpr (useBatchRowAllocation) {
+    // store keys
+    for (int i = 0; i < lookup.newGroups.size(); ++i) {
+      storeKeys(lookup, lookup.newGroups[i]);
+    }
   }
 }
 
 template <bool ignoreNullKeys>
+template <bool useBatchRowAllocation>
 void HashTable<ignoreNullKeys>::arrayGroupProbe(HashLookup& lookup) {
   VELOX_DCHECK(!lookup.hashes.empty());
   VELOX_DCHECK(!lookup.hits.empty());
@@ -568,7 +606,7 @@ void HashTable<ignoreNullKeys>::arrayGroupProbe(HashLookup& lookup) {
           auto index = hashes[row];
           auto hit = table_[index];
           if (!hit) {
-            hit = insertEntry(lookup, index, row);
+            hit = insertEntry<useBatchRowAllocation>(lookup, index, row);
           }
           groups[row] = hit;
         }
@@ -582,9 +620,15 @@ void HashTable<ignoreNullKeys>::arrayGroupProbe(HashLookup& lookup) {
     VELOX_DCHECK_LT(index, capacity_);
     char* group = table_[index];
     if (UNLIKELY(!group)) {
-      group = insertEntry(lookup, index, row);
+      group = insertEntry<useBatchRowAllocation>(lookup, index, row);
     }
     groups[row] = group; // NOLINT
+  }
+  if constexpr (useBatchRowAllocation) {
+    // store keys
+    for (int i = 0; i < lookup.newGroups.size(); ++i) {
+      storeKeys(lookup, lookup.newGroups[i]);
+    }
   }
 }
 
@@ -733,6 +777,7 @@ void HashTable<ignoreNullKeys>::allocateTables(
 
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::clear(bool freeTable) {
+  ClearNewRows();
   for (auto* rowContainer : allRows()) {
     rowContainer->clear();
   }
@@ -1328,6 +1373,8 @@ void HashTable<ignoreNullKeys>::rehash(
     int8_t spillInputStartPartitionBit) {
   ++numRehashes_;
   constexpr int32_t kHashBatchSize = 1024;
+  // std::cout << "clear new rows" << std::endl;
+  ClearNewRows();
   if (canApplyParallelJoinBuild()) {
     parallelJoinBuild();
     return;
@@ -2227,6 +2274,7 @@ void HashTable<ignoreNullKeys>::prepareForGroupProbe(
   if (rehash || capacity() == 0) {
     if (mode != BaseHashTable::HashMode::kHash) {
       decideHashMode(input->size(), spillInputStartPartitionBit);
+
       // Do not forward 'ignoreNullKeys' to avoid redundant evaluation of
       // deselectRowsWithNulls.
       prepareForGroupProbe(lookup, input, rows, spillInputStartPartitionBit);

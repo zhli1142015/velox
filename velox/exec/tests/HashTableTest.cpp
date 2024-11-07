@@ -281,7 +281,9 @@ class HashTableTest : public testing::TestWithParam<bool>,
       insertGroups(input, rows, lookup, table);
       return;
     }
-    table.groupProbe(lookup, BaseHashTable::kNoSpillInputStartPartitionBit);
+    table.groupProbe(
+        lookup, BaseHashTable::kNoSpillInputStartPartitionBit, true);
+    table.ClearNewRows();
   }
 
   std::string describeTable() {
