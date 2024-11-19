@@ -34,14 +34,18 @@ class PrefixSortEncoder {
   /// int32_t, uint16_t, int16_t, float, double, Timestamp).
   /// 1. The first byte of the encoded result is null byte. The value is 0 if
   ///    (nulls first and value is null) or (nulls last and value is not null).
-  ///    Otherwise, the value is 1.
+  ///    Otherwise, the value is 1. If this column has no null values, we can
+  ///    skip the null byte.
   /// 2. The remaining bytes are the encoding result of value:
   ///    -If value is null, we set the remaining sizeof(T) bytes to '0', they
   ///     do not affect the comparison results at all.
   ///    -If value is not null, the result is set by calling encodeNoNulls.
   template <typename T>
-  FOLLY_ALWAYS_INLINE void encode(std::optional<T> value, char* dest) const {
-    if (value.has_value()) {
+  FOLLY_ALWAYS_INLINE void
+  encode(std::optional<T> value, char* dest, bool includeNullByte) const {
+    if (!includeNullByte) {
+      encodeNoNulls(value.value(), dest);
+    } else if (value.has_value()) {
       dest[0] = nullsFirst_ ? 1 : 0;
       encodeNoNulls(value.value(), dest + 1);
     } else {
@@ -57,11 +61,14 @@ class PrefixSortEncoder {
   FOLLY_ALWAYS_INLINE void encode(
       std::optional<StringView> value,
       char* dest,
-      int32_t encodeSize) const {
-    auto* destDataPtr = dest + 1;
-    const auto stringPrefixSize = encodeSize - 1;
-    if (value.has_value()) {
-      dest[0] = nullsFirst_ ? 1 : 0;
+      int32_t encodeSize,
+      bool includeNullByte) const {
+    auto* destDataPtr = includeNullByte ? dest + 1 : dest;
+    const auto stringPrefixSize = includeNullByte ? encodeSize - 1 : encodeSize;
+    if (!includeNullByte || value.has_value()) {
+      if (includeNullByte) {
+        dest[0] = nullsFirst_ ? 1 : 0;
+      }
       auto data = value.value();
       const int32_t copySize = std::min<int32_t>(data.size(), stringPrefixSize);
       if (data.isInline() ||
@@ -83,7 +90,7 @@ class PrefixSortEncoder {
       }
 
       if (!ascending_) {
-        for (auto i = 1; i < encodeSize; ++i) {
+        for (auto i = includeNullByte ? 1 : 0; i < encodeSize; ++i) {
           dest[i] = ~dest[i];
         }
       }
@@ -110,34 +117,37 @@ class PrefixSortEncoder {
   ///         For not supported types, returns 'std::nullopt'.
   FOLLY_ALWAYS_INLINE static std::optional<uint32_t> encodedSize(
       TypeKind typeKind,
-      int32_t stringPrefixLength) {
-    // NOTE: one byte is reserved for nullable comparison.
+      int32_t stringPrefixLength,
+      bool columnHasNulls) {
+    // NOTE: if columnHasNulls is true, one byte is reserved for nullable
+    // comparison.
+    const uint32_t nullByteSize = columnHasNulls ? 1 : 0;
     switch ((typeKind)) {
       case ::facebook::velox::TypeKind::SMALLINT: {
-        return 3;
+        return 2 + nullByteSize;
       }
       case ::facebook::velox::TypeKind::INTEGER: {
-        return 5;
+        return 4 + nullByteSize;
       }
       case ::facebook::velox::TypeKind::BIGINT: {
-        return 9;
+        return 8 + nullByteSize;
       }
       case ::facebook::velox::TypeKind::REAL: {
-        return 5;
+        return 4 + nullByteSize;
       }
       case ::facebook::velox::TypeKind::DOUBLE: {
-        return 9;
+        return 8 + nullByteSize;
       }
       case ::facebook::velox::TypeKind::TIMESTAMP: {
-        return 17;
+        return 16 + nullByteSize;
       }
       case ::facebook::velox::TypeKind::HUGEINT: {
-        return 17;
+        return 16 + nullByteSize;
       }
       case ::facebook::velox::TypeKind::VARBINARY:
         [[fallthrough]];
       case ::facebook::velox::TypeKind::VARCHAR: {
-        return 1 + stringPrefixLength;
+        return nullByteSize + stringPrefixLength;
       }
       default:
         return std::nullopt;

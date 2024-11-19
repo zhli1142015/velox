@@ -747,6 +747,10 @@ class RowContainer {
     return keyTypes_;
   }
 
+  const auto& columnHasNulls() const {
+    return columnHasNulls_;
+  }
+
   /// Returns true if specified column may have nulls, false otherwise.
   inline bool columnHasNulls(int32_t columnIndex) const {
     return columnHasNulls_[columnIndex];

@@ -34,19 +34,24 @@ FOLLY_ALWAYS_INLINE void encodeRowColumn(
     char* row,
     char* prefixBuffer) {
   std::optional<T> value;
-  if (RowContainer::isNullAt(row, rowColumn.nullByte(), rowColumn.nullMask())) {
-    value = std::nullopt;
-  } else {
+  if (!prefixSortLayout.normalizedKeyHasNullByte[index] ||
+      !RowContainer::isNullAt(
+          row, rowColumn.nullByte(), rowColumn.nullMask())) {
     value = *(reinterpret_cast<T*>(row + rowColumn.offset()));
+  } else {
+    value = std::nullopt;
   }
   if constexpr (std::is_same_v<T, StringView>) {
     prefixSortLayout.encoders[index].encode(
         value,
         prefixBuffer + prefixSortLayout.prefixOffsets[index],
-        prefixSortLayout.encodeSizes[index]);
+        prefixSortLayout.encodeSizes[index],
+        prefixSortLayout.normalizedKeyHasNullByte[index]);
   } else {
     prefixSortLayout.encoders[index].encode(
-        value, prefixBuffer + prefixSortLayout.prefixOffsets[index]);
+        value,
+        prefixBuffer + prefixSortLayout.prefixOffsets[index],
+        prefixSortLayout.normalizedKeyHasNullByte[index]);
   }
 }
 
@@ -142,10 +147,13 @@ compareByWord(uint64_t* left, uint64_t* right, int32_t bytes) {
 
 PrefixSortLayout PrefixSortLayout::makeSortLayout(
     const std::vector<TypePtr>& types,
+    const std::vector<bool>& columnHasNulls,
     const std::vector<CompareFlags>& compareFlags,
     uint32_t maxNormalizedKeySize,
     int32_t stringPrefixLength) {
   const uint32_t numKeys = types.size();
+  std::vector<bool> normalizedKeyHasNullByte;
+  normalizedKeyHasNullByte.reserve(numKeys);
   std::vector<uint32_t> prefixOffsets;
   prefixOffsets.reserve(numKeys);
   std::vector<uint32_t> encodeSizes;
@@ -161,8 +169,8 @@ PrefixSortLayout PrefixSortLayout::makeSortLayout(
 
   bool lastKeyInPrefixIsPartial{false};
   for (auto i = 0; i < numKeys; ++i) {
-    const std::optional<uint32_t> encodedSize =
-        PrefixSortEncoder::encodedSize(types[i]->kind(), stringPrefixLength);
+    const std::optional<uint32_t> encodedSize = PrefixSortEncoder::encodedSize(
+        types[i]->kind(), stringPrefixLength, columnHasNulls[i]);
     if (!encodedSize.has_value() ||
         normalizedKeySize + encodedSize.value() > maxNormalizedKeySize) {
       break;
@@ -170,6 +178,7 @@ PrefixSortLayout PrefixSortLayout::makeSortLayout(
     prefixOffsets.push_back(normalizedKeySize);
     encoders.push_back({compareFlags[i].ascending, compareFlags[i].nullsFirst});
     encodeSizes.push_back(encodedSize.value());
+    normalizedKeyHasNullByte.push_back(columnHasNulls[i]);
     normalizedKeySize += encodedSize.value();
     ++numNormalizedKeys;
     // Since we can't be certain that the maximum length of the string keys is
@@ -194,6 +203,7 @@ PrefixSortLayout PrefixSortLayout::makeSortLayout(
       numNormalizedKeys != 0,
       numNormalizedKeys < numKeys,
       lastKeyInPrefixIsPartial ? numNormalizedKeys - 1 : numNormalizedKeys,
+      std::move(normalizedKeyHasNullByte),
       std::move(prefixOffsets),
       std::move(encodeSizes),
       std::move(encoders),
@@ -274,6 +284,7 @@ uint32_t PrefixSort::maxRequiredBytes(
   VELOX_CHECK_EQ(rowContainer->keyTypes().size(), compareFlags.size());
   const auto sortLayout = PrefixSortLayout::makeSortLayout(
       rowContainer->keyTypes(),
+      rowContainer->columnHasNulls(),
       compareFlags,
       config.maxNormalizedKeySize,
       config.stringPrefixLength);

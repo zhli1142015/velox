@@ -95,21 +95,21 @@ class PrefixEncoderTest : public testing::Test,
       return std::memcmp(left, right, sizeof(T) + 1);
     };
 
-    ascNullsFirstEncoder_.encode(nullValue, encoded);
+    ascNullsFirstEncoder_.encode(nullValue, encoded, true);
     ASSERT_EQ(compare(nullFirst, encoded), 0);
-    ascNullsLastEncoder_.encode(nullValue, encoded);
+    ascNullsLastEncoder_.encode(nullValue, encoded, true);
     ASSERT_EQ(compare(nullLast, encoded), 0);
 
-    ascNullsFirstEncoder_.encode(value, encoded);
+    ascNullsFirstEncoder_.encode(value, encoded, true);
     ASSERT_EQ(encoded[0], 1);
     ASSERT_EQ(std::memcmp(encoded + 1, expectedAsc, sizeof(T)), 0);
-    ascNullsLastEncoder_.encode(value, encoded);
+    ascNullsLastEncoder_.encode(value, encoded, true);
     ASSERT_EQ(encoded[0], 0);
     ASSERT_EQ(std::memcmp(encoded + 1, expectedAsc, sizeof(T)), 0);
-    descNullsFirstEncoder_.encode(value, encoded);
+    descNullsFirstEncoder_.encode(value, encoded, true);
     ASSERT_EQ(encoded[0], 1);
     ASSERT_EQ(std::memcmp(encoded + 1, expectedDesc, sizeof(T)), 0);
-    descNullsLastEncoder_.encode(value, encoded);
+    descNullsLastEncoder_.encode(value, encoded, true);
     ASSERT_EQ(encoded[0], 0);
     ASSERT_EQ(std::memcmp(encoded + 1, expectedDesc, sizeof(T)), 0);
   }
@@ -118,6 +118,22 @@ class PrefixEncoderTest : public testing::Test,
   void testEncode(T value, char* expectedAsc, char* expectedDesc) {
     testEncodeNoNull<T>(value, expectedAsc, expectedDesc);
     testEncodeWithNull<T>(value, expectedAsc, expectedDesc);
+  }
+
+  template <typename T>
+  void testEncodeWithColumnNoNulls(
+      std::optional<T> value,
+      char* expectedAsc,
+      char* expectedDesc) {
+    char encoded[sizeof(T)];
+    ascNullsFirstEncoder_.encode(value, encoded, false);
+    ASSERT_EQ(std::memcmp(encoded, expectedAsc, sizeof(T)), 0);
+    ascNullsLastEncoder_.encode(value, encoded, false);
+    ASSERT_EQ(std::memcmp(encoded, expectedAsc, sizeof(T)), 0);
+    descNullsFirstEncoder_.encode(value, encoded, false);
+    ASSERT_EQ(std::memcmp(encoded, expectedDesc, sizeof(T)), 0);
+    descNullsLastEncoder_.encode(value, encoded, false);
+    ASSERT_EQ(std::memcmp(encoded, expectedDesc, sizeof(T)), 0);
   }
 
   template <typename T>
@@ -130,9 +146,9 @@ class PrefixEncoderTest : public testing::Test,
     char encodedMin[sizeof(T) + 1];
 
     auto encode = [&](auto& encoder) {
-      encoder.encode(nullValue, encodedNull);
-      encoder.encode(min, encodedMin);
-      encoder.encode(max, encodedMax);
+      encoder.encode(nullValue, encodedNull, true);
+      encoder.encode(min, encodedMin, true);
+      encoder.encode(max, encodedMax, true);
     };
 
     auto compare = [](char* left, char* right) {
@@ -156,12 +172,12 @@ class PrefixEncoderTest : public testing::Test,
       std::optional<T> nan = TypeLimits<T>::nan();
       char encodedNaN[sizeof(T) + 1];
 
-      ascNullsFirstEncoder_.encode(nan, encodedNaN);
-      ascNullsFirstEncoder_.encode(max, encodedMax);
+      ascNullsFirstEncoder_.encode(nan, encodedNaN, true);
+      ascNullsFirstEncoder_.encode(max, encodedMax, true);
       ASSERT_GT(compare(encodedNaN, encodedMax), 0);
 
-      ascNullsFirstEncoder_.encode(nan, encodedNaN);
-      ascNullsFirstEncoder_.encode(nullValue, encodedNull);
+      ascNullsFirstEncoder_.encode(nan, encodedNaN, true);
+      ascNullsFirstEncoder_.encode(nullValue, encodedNull, true);
       ASSERT_LT(compare(encodedNull, encodedNaN), 0);
     }
   }
@@ -175,9 +191,9 @@ class PrefixEncoderTest : public testing::Test,
     char encodedMin[sizeof(T) + 1];
     char encodedMid[sizeof(T) + 1];
     auto encode = [&](auto& encoder) {
-      encoder.encode(mid, encodedMid);
-      encoder.encode(min, encodedMin);
-      encoder.encode(max, encodedMax);
+      encoder.encode(mid, encodedMid, true);
+      encoder.encode(min, encodedMin, true);
+      encoder.encode(max, encodedMax, true);
     };
 
     auto compare = [](char* left, char* right) {
@@ -254,11 +270,11 @@ class PrefixEncoderTest : public testing::Test,
             : std::optional<ValueDataType>(rightVector->valueAt(i));
         if constexpr (
             Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-          encoder.encode(leftValue, leftEncoded, 17);
-          encoder.encode(rightValue, rightEncoded, 17);
+          encoder.encode(leftValue, leftEncoded, 17, true);
+          encoder.encode(rightValue, rightEncoded, 17, true);
         } else {
-          encoder.encode(leftValue, leftEncoded);
-          encoder.encode(rightValue, rightEncoded);
+          encoder.encode(leftValue, leftEncoded, true);
+          encoder.encode(rightValue, rightEncoded, true);
         }
 
         const auto result = compare(leftEncoded, rightEncoded);
@@ -392,23 +408,100 @@ TEST_F(PrefixEncoderTest, encodeString) {
     return std::memcmp(left, right, encodeSize);
   };
 
-  ascNullsFirstEncoder().encode(nullValue, encoded, encodeSize);
+  ascNullsFirstEncoder().encode(nullValue, encoded, encodeSize, true);
   ASSERT_EQ(compare(nullFirst, encoded), 0);
-  ascNullsLastEncoder().encode(nullValue, encoded, encodeSize);
+  ascNullsLastEncoder().encode(nullValue, encoded, encodeSize, true);
   ASSERT_EQ(compare(nullLast, encoded), 0);
 
-  ascNullsFirstEncoder().encode(value, encoded, encodeSize);
+  ascNullsFirstEncoder().encode(value, encoded, encodeSize, true);
   ASSERT_EQ(encoded[0], 1);
   ASSERT_EQ(std::memcmp(encoded + 1, expectedAsc, encodeSize - 1), 0);
-  ascNullsLastEncoder().encode(value, encoded, encodeSize);
+  ascNullsLastEncoder().encode(value, encoded, encodeSize, true);
   ASSERT_EQ(encoded[0], 0);
   ASSERT_EQ(std::memcmp(encoded + 1, expectedAsc, encodeSize - 1), 0);
-  descNullsFirstEncoder().encode(value, encoded, encodeSize);
+  descNullsFirstEncoder().encode(value, encoded, encodeSize, true);
   ASSERT_EQ(encoded[0], 1);
   ASSERT_EQ(std::memcmp(encoded + 1, expectedDesc, encodeSize - 1), 0);
-  descNullsLastEncoder().encode(value, encoded, encodeSize);
+  descNullsLastEncoder().encode(value, encoded, encodeSize, true);
   ASSERT_EQ(encoded[0], 0);
   ASSERT_EQ(std::memcmp(encoded + 1, expectedDesc, encodeSize - 1), 0);
+}
+
+TEST_F(PrefixEncoderTest, encodeWithColumnNoNulls) {
+  {
+    uint64_t ascExpected = 0x8877665544332211;
+    uint64_t descExpected = 0x778899aabbccddee;
+    testEncodeWithColumnNoNulls<uint64_t>(
+        0x1122334455667788, (char*)&ascExpected, (char*)&descExpected);
+  }
+
+  {
+    int64_t ascExpected = 0x8877665544332291;
+    int64_t descExpected = 0x778899aabbccdd6e;
+    testEncodeWithColumnNoNulls<int64_t>(
+        0x1122334455667788, (char*)&ascExpected, (char*)&descExpected);
+  }
+  {
+    uint32_t ascExpected = 0x44332211;
+    uint32_t descExpected = 0xbbccddee;
+    testEncodeWithColumnNoNulls<uint32_t>(
+        0x11223344, (char*)&ascExpected, (char*)&descExpected);
+  }
+  {
+    int32_t ascExpected = 0x44332291;
+    int32_t descExpected = 0xbbccdd6e;
+    testEncodeWithColumnNoNulls<int32_t>(
+        0x11223344, (char*)&ascExpected, (char*)&descExpected);
+  }
+
+  {
+    uint16_t ascExpected = 0x2211;
+    uint16_t descExpected = 0xddee;
+    testEncodeWithColumnNoNulls<uint16_t>(
+        0x1122, (char*)&ascExpected, (char*)&descExpected);
+  }
+  {
+    int16_t ascExpected = 0x2291;
+    int16_t descExpected = 0xdd6e;
+    testEncodeWithColumnNoNulls<int16_t>(
+        0x1122, (char*)&ascExpected, (char*)&descExpected);
+  }
+
+  {
+    uint32_t ascExpected = 0x0050c3c7;
+    uint32_t descExpected = 0xffaf3c38;
+    testEncodeWithColumnNoNulls<float>(
+        100000.00, (char*)&ascExpected, (char*)&descExpected);
+  }
+
+  {
+    uint64_t ascExpected = 0x00000000006af8c0;
+    uint64_t descExpected = 0xffffffffff95073f;
+    testEncodeWithColumnNoNulls<double>(
+        100000.00, (char*)&ascExpected, (char*)&descExpected);
+  }
+
+  {
+    char ascExpected[16] = {
+        -128, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, -56};
+    char descExpected[16] = {
+        127, -1, -1, -1, -1, -1, -1, -11, -1, -1, -1, -1, -1, -1, -1, 55};
+    int128_t value = HugeInt::build(10, 200);
+    testEncodeWithColumnNoNulls<int128_t>(
+        value, (char*)ascExpected, (char*)descExpected);
+  }
+
+  {
+    Timestamp value = Timestamp(0x000000011223344, 0x000000011223344);
+    uint64_t ascExpected[2];
+    uint64_t descExpected[2];
+    ascExpected[0] = 0x4433221100000080;
+    ascExpected[1] = 0x4433221100000000;
+    descExpected[0] = 0xbbccddeeffffff7f;
+    descExpected[1] = 0xbbccddeeffffffff;
+    testEncodeWithColumnNoNulls<Timestamp>(
+        value, (char*)ascExpected, (char*)descExpected);
+  }
 }
 
 TEST_F(PrefixEncoderTest, compare) {

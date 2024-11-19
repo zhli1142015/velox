@@ -57,6 +57,9 @@ struct PrefixSortLayout {
   /// numNormalizedKeys - 1. Otherwise, start from numNormalizedKeys.
   const uint32_t comparisonStartIndex;
 
+  /// A vector indicating whether each normalized key contains a null byte.
+  const std::vector<bool> normalizedKeyHasNullByte;
+
   /// Offsets of normalized keys, used to find write locations when
   /// extracting columns
   const std::vector<uint32_t> prefixOffsets;
@@ -73,6 +76,7 @@ struct PrefixSortLayout {
 
   static PrefixSortLayout makeSortLayout(
       const std::vector<TypePtr>& types,
+      const std::vector<bool>& columnHasNulls,
       const std::vector<CompareFlags>& compareFlags,
       uint32_t maxNormalizedKeySize,
       int32_t stringPrefixLength);
@@ -122,6 +126,7 @@ class PrefixSort {
     VELOX_CHECK_EQ(rowContainer->keyTypes().size(), compareFlags.size());
     const auto sortLayout = PrefixSortLayout::makeSortLayout(
         rowContainer->keyTypes(),
+        rowContainer->columnHasNulls(),
         compareFlags,
         config.maxNormalizedKeySize,
         config.stringPrefixLength);
