@@ -681,8 +681,9 @@ simdjson::error_code appendMapKey<TypeKind::TIMESTAMP>(
 template <typename Input>
 struct CastFromJsonTypedImpl {
   template <TypeKind kind>
-  static simdjson::error_code apply(Input input, exec::GenericWriter& writer) {
-    return KindDispatcher<kind>::apply(input, writer);
+  static simdjson::error_code
+  apply(Input input, exec::GenericWriter& writer, bool enablePartialResults) {
+    return KindDispatcher<kind>::apply(input, writer, enablePartialResults);
   }
 
  private:
@@ -690,7 +691,7 @@ struct CastFromJsonTypedImpl {
   // class.
   template <TypeKind kind, typename Dummy = void>
   struct KindDispatcher {
-    static simdjson::error_code apply(Input, exec::GenericWriter&) {
+    static simdjson::error_code apply(Input, exec::GenericWriter&, bool) {
       VELOX_NYI(
           "Casting from JSON to {} is not supported.", TypeTraits<kind>::name);
       return simdjson::error_code::UNEXPECTED_ERROR; // Make compiler happy.
@@ -699,9 +700,8 @@ struct CastFromJsonTypedImpl {
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::VARCHAR, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       SIMDJSON_ASSIGN_OR_RAISE(auto type, value.type());
       std::string_view s;
       if (isJsonType(writer.type())) {
@@ -727,9 +727,8 @@ struct CastFromJsonTypedImpl {
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::BOOLEAN, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       SIMDJSON_ASSIGN_OR_RAISE(auto type, value.type());
       auto& w = writer.castTo<bool>();
       switch (type) {
@@ -769,63 +768,56 @@ struct CastFromJsonTypedImpl {
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::TINYINT, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       return castJsonToInt<int8_t>(value, writer);
     }
   };
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::SMALLINT, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       return castJsonToInt<int16_t>(value, writer);
     }
   };
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::INTEGER, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       return castJsonToInt<int32_t>(value, writer);
     }
   };
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::BIGINT, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       return castJsonToInt<int64_t>(value, writer);
     }
   };
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::REAL, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       return castJsonToFloatingPoint<float>(value, writer);
     }
   };
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::DOUBLE, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       return castJsonToFloatingPoint<double>(value, writer);
     }
   };
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::ARRAY, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       auto& writerTyped = writer.castTo<Array<Any>>();
       auto& elementType = writer.type()->childAt(0);
       SIMDJSON_ASSIGN_OR_RAISE(auto array, value.get_array());
@@ -840,7 +832,8 @@ struct CastFromJsonTypedImpl {
               CastFromJsonTypedImpl<simdjson::ondemand::value>::apply,
               elementType->kind(),
               element,
-              writerTyped.add_item()));
+              writerTyped.add_item(),
+              enablePartialResults));
         }
       }
       return simdjson::SUCCESS;
@@ -849,9 +842,8 @@ struct CastFromJsonTypedImpl {
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::MAP, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       auto& writerTyped = writer.castTo<Map<Any, Any>>();
       auto& keyType = writer.type()->childAt(0);
       auto& valueType = writer.type()->childAt(1);
@@ -872,7 +864,8 @@ struct CastFromJsonTypedImpl {
               CastFromJsonTypedImpl<simdjson::ondemand::value>::apply,
               valueType->kind(),
               field.value(),
-              std::get<1>(writers)));
+              std::get<1>(writers),
+              enablePartialResults));
         }
       }
       return simdjson::SUCCESS;
@@ -900,9 +893,8 @@ struct CastFromJsonTypedImpl {
 
   template <typename Dummy>
   struct KindDispatcher<TypeKind::ROW, Dummy> {
-    static simdjson::error_code apply(
-        Input value,
-        exec::GenericWriter& writer) {
+    static simdjson::error_code
+    apply(Input value, exec::GenericWriter& writer, bool enablePartialResults) {
       auto& rowType = writer.type()->asRow();
       auto& writerTyped = writer.castTo<DynamicRow>();
       SIMDJSON_ASSIGN_OR_RAISE(auto type, value.type());
@@ -922,12 +914,13 @@ struct CastFromJsonTypedImpl {
                 CastFromJsonTypedImpl<simdjson::ondemand::value>::apply,
                 rowType.childAt(i)->kind(),
                 element,
-                writerTyped.get_writer_at(i)));
+                writerTyped.get_writer_at(i),
+                enablePartialResults));
           }
           ++i;
         }
       } else {
-        SIMDJSON_ASSIGN_OR_RAISE(auto object, value.get_object());
+        // SIMDJSON_ASSIGN_OR_RAISE(auto object, value.get_object());
 
         // TODO Populate this mapping once, not per-row.
         // Mapping from lower-case field names of the target RowType to their
@@ -942,9 +935,28 @@ struct CastFromJsonTypedImpl {
 
         auto fieldIndices = makeFieldIndicesMap(rowType, allFieldsAreAscii);
 
+        auto&& tmpObject = value.get_object();
+        if (tmpObject.error() != ::simdjson::SUCCESS) {
+          if (!enablePartialResults) {
+            return tmpObject.error();
+          }
+          for (const auto& [key, index] : fieldIndices) {
+            writerTyped.set_null_at(index);
+          }
+          return simdjson::SUCCESS;
+        }
+        auto object = std::move(tmpObject).value_unsafe();
+
         std::string key;
         for (auto fieldResult : object) {
-          SIMDJSON_ASSIGN_OR_RAISE(auto field, fieldResult);
+          if (fieldResult.error() != ::simdjson::SUCCESS) {
+            if (enablePartialResults) {
+              continue;
+            } else {
+              return fieldResult.error();
+            }
+          }
+          auto field = fieldResult.value_unsafe();
           if (!field.value().is_null()) {
             SIMDJSON_ASSIGN_OR_RAISE(key, field.unescaped_key(true));
 
@@ -963,11 +975,19 @@ struct CastFromJsonTypedImpl {
               VELOX_USER_CHECK_GE(index, 0, "Duplicate field: {}", key);
               it->second = -1;
 
-              SIMDJSON_TRY(VELOX_DYNAMIC_TYPE_DISPATCH(
+              auto res = VELOX_DYNAMIC_TYPE_DISPATCH(
                   CastFromJsonTypedImpl<simdjson::ondemand::value>::apply,
                   rowType.childAt(index)->kind(),
                   field.value(),
-                  writerTyped.get_writer_at(index)));
+                  writerTyped.get_writer_at(index),
+                  enablePartialResults);
+              if (res != simdjson::SUCCESS) {
+                if (enablePartialResults) {
+                  writerTyped.set_null_at(index);
+                } else {
+                  return res;
+                }
+              }
             }
           }
         }
@@ -1066,14 +1086,15 @@ struct CastFromJsonTypedImpl {
 template <TypeKind kind>
 simdjson::error_code castFromJsonOneRow(
     simdjson::padded_string_view input,
-    exec::VectorWriter<Any>& writer) {
+    exec::VectorWriter<Any>& writer,
+    bool enablePartialResults) {
   SIMDJSON_ASSIGN_OR_RAISE(auto doc, simdjsonParse(input));
   if (doc.is_null()) {
     writer.commitNull();
   } else {
     SIMDJSON_TRY(
         CastFromJsonTypedImpl<simdjson::ondemand::document&>::apply<kind>(
-            doc, writer.current()));
+            doc, writer.current(), enablePartialResults));
     writer.commit(true);
   }
   return simdjson::SUCCESS;
@@ -1098,6 +1119,9 @@ bool isSupportedBasicType(const TypePtr& type) {
 /// Custom operator for casts from and to Json type.
 class JsonCastOperator : public exec::CastOperator {
  public:
+  explicit JsonCastOperator(bool enablePartialResults)
+      : enablePartialResults_(enablePartialResults) {}
+
   bool isSupportedFromType(const TypePtr& other) const override;
 
   bool isSupportedToType(const TypePtr& other) const override;
@@ -1156,7 +1180,8 @@ class JsonCastOperator : public exec::CastOperator {
       memcpy(paddedInput_.data(), input.data(), input.size());
       simdjson::padded_string_view paddedInput(
           paddedInput_.data(), input.size(), paddedInput_.size());
-      if (auto error = castFromJsonOneRow<kind>(paddedInput, writer)) {
+      if (auto error = castFromJsonOneRow<kind>(
+              paddedInput, writer, enablePartialResults_)) {
         context.setVeloxExceptionError(row, errors_[error]);
         writer.commitNull();
       }
@@ -1167,6 +1192,7 @@ class JsonCastOperator : public exec::CastOperator {
   mutable folly::once_flag initializeErrors_;
   mutable std::exception_ptr errors_[simdjson::NUM_ERROR_CODES];
   mutable std::string paddedInput_;
+  const bool enablePartialResults_;
 };
 
 bool JsonCastOperator::isSupportedFromType(const TypePtr& other) const {
@@ -1279,21 +1305,26 @@ void JsonCastOperator::castFrom(
 
 class JsonTypeFactories : public CustomTypeFactories {
  public:
-  JsonTypeFactories() = default;
+  JsonTypeFactories(bool enablePartialResults)
+      : enablePartialResults_(enablePartialResults) {}
 
   TypePtr getType() const override {
     return JSON();
   }
 
   exec::CastOperatorPtr getCastOperator() const override {
-    return std::make_shared<JsonCastOperator>();
+    return std::make_shared<JsonCastOperator>(enablePartialResults_);
   }
+
+ private:
+  const bool enablePartialResults_;
 };
 
 } // namespace
 
-void registerJsonType() {
-  registerCustomType("json", std::make_unique<const JsonTypeFactories>());
+void registerJsonType(bool enablePartialResults) {
+  registerCustomType(
+      "json", std::make_unique<const JsonTypeFactories>(enablePartialResults));
 }
 
 } // namespace facebook::velox

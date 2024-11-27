@@ -70,6 +70,6 @@ struct JsonT {
 
 using Json = CustomType<JsonT>;
 
-void registerJsonType();
+void registerJsonType(bool enablePartialResults = false);
 
 } // namespace facebook::velox

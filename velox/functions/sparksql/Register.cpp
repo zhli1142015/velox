@@ -55,6 +55,7 @@
 #include "velox/functions/sparksql/Uuid.h"
 #include "velox/functions/sparksql/specialforms/AtLeastNNonNulls.h"
 #include "velox/functions/sparksql/specialforms/DecimalRound.h"
+#include "velox/functions/sparksql/specialforms/FromJson.h"
 #include "velox/functions/sparksql/specialforms/MakeDecimal.h"
 #include "velox/functions/sparksql/specialforms/SparkCastExpr.h"
 
@@ -152,6 +153,10 @@ void registerAllSpecialFormGeneralFunctions() {
   exec::registerFunctionCallToSpecialForm(
       AtLeastNNonNullsCallToSpecialForm::kAtLeastNNonNulls,
       std::make_unique<AtLeastNNonNullsCallToSpecialForm>());
+  registerJsonType(true);
+  exec::registerFunctionCallToSpecialForm(
+      FromJsonCallToSpecialForm::kFromJson,
+      std::make_unique<FromJsonCallToSpecialForm>());
 }
 
 namespace {
