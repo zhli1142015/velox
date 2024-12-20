@@ -50,8 +50,8 @@ JSON Functions
     Casts a JSON string to an ARRAY, MAP, or ROW type, with the output type 
     determined by the expression. Returns NULL, if the input string is unparsable.
     Supported element types include BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, 
-    REAL, DOUBLE, DATE, VARCHAR, ARRAY, MAP, and ROW. When casting to ARRAY or MAP, 
-    the element type of the array or the value type of the map must be one of 
+    REAL, DOUBLE, DECIMAL, DATE, VARCHAR, ARRAY, MAP, and ROW. When casting to ARRAY 
+    or MAP, the element type of the array or the value type of the map must be one of 
     these supported types, and for maps, the key type must be VARCHAR. Casting 
     to ROW supports only JSON objects, where the keys must exactly match the ROW 
     field names (case sensitivity).
