@@ -15,15 +15,27 @@
  */
 #pragma once
 
+#include "velox/exec/art/art.h"
+
 #include <folly/container/F14Set.h>
 
 #include <velox/type/Filter.h>
 #include "velox/common/base/RawVector.h"
 #include "velox/exec/Operator.h"
+#include "velox/type/StringView.h"
 #include "velox/vector/FlatVector.h"
 #include "velox/vector/VectorTypeUtils.h"
 
 namespace facebook::velox::exec {
+
+struct ArtTreeDeleter {
+  void operator()(art_tree *ptr) const {
+    if (ptr) {
+      art_tree_destroy(ptr);
+      delete ptr;
+    }
+  }
+};
 
 // Represents a unique scalar or string value and its mapping to a
 // small integer range for use as part of a normalized key or array
@@ -31,22 +43,16 @@ namespace facebook::velox::exec {
 class UniqueValue {
  public:
   explicit UniqueValue(int64_t value) {
-    size_ = sizeof(int64_t);
     data_ = value;
   }
 
   explicit UniqueValue(const char* value, uint32_t size) {
-    size_ = size;
     data_ = 0;
     if (size <= sizeof(data_)) {
       memcpy(&data_, value, size);
     } else {
       data_ = reinterpret_cast<int64_t>(value);
     }
-  }
-
-  uint32_t size() const {
-    return size_;
   }
 
   uint32_t id() const {
@@ -67,51 +73,18 @@ class UniqueValue {
 
  private:
   uint64_t data_;
-  uint32_t size_;
   uint32_t id_;
 };
 
 struct UniqueValueHasher {
   size_t operator()(const UniqueValue& value) const {
-    auto size = value.size();
-    if (size <= sizeof(int64_t)) {
-      return simd::crc32U64(0, value.data());
-    }
-
-    uint32_t hash = 0;
-    auto data = reinterpret_cast<const uint64_t*>(value.data());
-
-    size_t wordIndex = 0;
-    auto numFullWords = size / 8;
-    for (; wordIndex < numFullWords; ++wordIndex) {
-      hash = simd::crc32U64(hash, *(data + wordIndex));
-    }
-
-    auto numBytesRemaining = size - wordIndex * 8;
-    if (numBytesRemaining > 0) {
-      auto lastWord = bits::loadPartialWord(
-          reinterpret_cast<const uint8_t*>(data + wordIndex),
-          numBytesRemaining);
-      hash = simd::crc32U64(hash, lastWord);
-    }
-
-    return hash;
+    return simd::crc32U64(0, value.data());
   }
 };
 
 struct UniqueValueComparer {
   bool operator()(const UniqueValue& left, const UniqueValue& right) const {
-    auto size = left.size();
-    if (size != right.size()) {
-      return false;
-    }
-    if (size <= sizeof(int64_t)) {
-      return left.data() == right.data();
-    }
-    return memcmp(
-               reinterpret_cast<const char*>(left.data()),
-               reinterpret_cast<const char*>(right.data()),
-               size) == 0;
+    return left.data() == right.data();
   }
 };
 
@@ -139,6 +112,9 @@ class VectorHasher {
       min_ = 0;
       max_ = 1;
     }
+    ArtTreeDeleter d;
+    artTrie_ = std::unique_ptr<art_tree, ArtTreeDeleter>(new art_tree(), d);
+    art_tree_init(artTrie_.get());
   }
 
   static std::unique_ptr<VectorHasher> create(
@@ -246,7 +222,10 @@ class VectorHasher {
 
   void resetStats() {
     uniqueValues_.clear();
-    uniqueValuesStorage_.clear();
+    artTrie_.reset();
+    ArtTreeDeleter d;
+    artTrie_ = std::unique_ptr<art_tree, ArtTreeDeleter>(new art_tree(), d);
+    art_tree_init(artTrie_.get());
   }
 
   // Sets 'this' to range mode and adds 'reservePct' values to the
@@ -305,14 +284,19 @@ class VectorHasher {
 
   // true if no values have been added.
   bool empty() const {
-    return !hasRange_ && uniqueValues_.empty();
+    return !hasRange_ && uniqueValues_.empty() && art_size(artTrie_.get()) == 0;
   }
 
   std::string toString() const;
 
   size_t numUniqueValues() const {
-    return uniqueValues_.size();
+    return uniqueValues_.size() + art_size(artTrie_.get());
   }
+
+  void setAllocator(HashStringAllocator* allocator) {
+    allocator_ = std::make_unique<StlAllocator<char>>(allocator);
+    
+  } 
 
  private:
   static constexpr uint32_t kStringASRangeMaxSize = 7;
@@ -524,8 +508,6 @@ class VectorHasher {
     }
   }
 
-  void copyStringToLocal(const UniqueValue* unique);
-
   void setDistinctOverflow();
 
   void setRangeOverflow();
@@ -579,9 +561,11 @@ class VectorHasher {
   folly::F14FastSet<UniqueValue, UniqueValueHasher, UniqueValueComparer>
       uniqueValues_;
 
-  // Memory for unique string values.
-  std::vector<std::string> uniqueValuesStorage_;
-  uint64_t distinctStringsBytes_ = 0;
+  std::unique_ptr<art_tree, ArtTreeDeleter> artTrie_;
+
+  std::unique_ptr<StlAllocator<char>> allocator_;
+
+  // reference the HashStringAllocator
 };
 
 template <>
@@ -618,14 +602,11 @@ inline uint64_t VectorHasher::valueId(StringView value) {
     }
     return number - min_ + 1;
   }
-
-  UniqueValue unique(data, size);
-  unique.setId(uniqueValues_.size() + 1);
-  auto pair = uniqueValues_.insert(unique);
-  if (!pair.second) {
-    return pair.first->id();
+  auto res = art_insert_no_replace(artTrie_.get(), reinterpret_cast<const unsigned char*>(value.data()), value.size(), (void *)(art_size(artTrie_.get()) + 1l));
+  if (res != nullptr) {
+    return (uint64_t)res;
   }
-  copyStringToLocal(&*pair.first);
+  // copyStringToLocal(&*pair.first);
   if (!rangeOverflow_) {
     if (size > kStringASRangeMaxSize) {
       setRangeOverflow();
@@ -633,10 +614,10 @@ inline uint64_t VectorHasher::valueId(StringView value) {
       updateRange(stringAsNumber(data, size));
     }
   }
-  if (uniqueValues_.size() >= rangeSize_ || distinctOverflow_) {
+  if (art_size(artTrie_.get()) >= rangeSize_ || distinctOverflow_) {
     return kUnmappable;
   }
-  return unique.id();
+  return art_size(artTrie_.get());
 }
 
 template <>
@@ -653,10 +634,9 @@ inline uint64_t VectorHasher::lookupValueId(StringView value) const {
     }
     return number - min_ + 1;
   }
-  UniqueValue unique(data, size);
-  auto iter = uniqueValues_.find(unique);
-  if (iter != uniqueValues_.end()) {
-    return iter->id();
+  auto res = art_search(artTrie_.get(), reinterpret_cast<const unsigned char*>(value.data()), value.size());
+  if (res != nullptr) {
+    return (uint64_t)res;
   }
   return kUnmappable;
 }

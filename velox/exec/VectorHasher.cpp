@@ -611,52 +611,23 @@ void VectorHasher::analyzeValue(StringView value) {
     }
   }
   if (!distinctOverflow_) {
-    UniqueValue unique(data, size);
-    unique.setId(uniqueValues_.size() + 1);
-    auto pair = uniqueValues_.insert(unique);
-    if (pair.second) {
-      if (uniqueValues_.size() > kMaxDistinct) {
+    auto res = art_insert_no_replace(artTrie_.get(), reinterpret_cast<const unsigned char*>(value.data()), value.size(), (void *)(art_size(artTrie_.get()) + 1l));
+    if (res == nullptr) {
+      if (art_size(artTrie_.get()) > kMaxDistinct) {
         setDistinctOverflow();
-        return;
       }
-      copyStringToLocal(&*pair.first);
+      // copyStringToLocal(&*pair.first);
     }
   }
-}
-
-void VectorHasher::copyStringToLocal(const UniqueValue* unique) {
-  auto size = unique->size();
-  if (size <= sizeof(int64_t)) {
-    return;
-  }
-  if (distinctStringsBytes_ > kMaxDistinctStringsBytes) {
-    setDistinctOverflow();
-    return;
-  }
-  if (uniqueValuesStorage_.empty()) {
-    uniqueValuesStorage_.emplace_back();
-    uniqueValuesStorage_.back().reserve(std::max(kStringBufferUnitSize, size));
-    distinctStringsBytes_ += uniqueValuesStorage_.back().capacity();
-  }
-  auto str = &uniqueValuesStorage_.back();
-  if (str->size() + size > str->capacity()) {
-    uniqueValuesStorage_.emplace_back();
-    uniqueValuesStorage_.back().reserve(std::max(kStringBufferUnitSize, size));
-    distinctStringsBytes_ += uniqueValuesStorage_.back().capacity();
-    str = &uniqueValuesStorage_.back();
-  }
-  auto start = str->size();
-  str->resize(start + size);
-  memcpy(str->data() + start, reinterpret_cast<char*>(unique->data()), size);
-  const_cast<UniqueValue*>(unique)->setData(
-      reinterpret_cast<int64_t>(str->data() + start));
 }
 
 void VectorHasher::setDistinctOverflow() {
   distinctOverflow_ = true;
   uniqueValues_.clear();
-  uniqueValuesStorage_.clear();
-  distinctStringsBytes_ = 0;
+  artTrie_.reset();
+  ArtTreeDeleter d;
+  artTrie_ = std::unique_ptr<art_tree, ArtTreeDeleter>(new art_tree(), d);
+  art_tree_init(artTrie_.get());
 }
 
 void VectorHasher::setRangeOverflow() {
@@ -758,6 +729,11 @@ int64_t addIdReserve(size_t numDistinct, int32_t reservePct) {
   return std::min<int64_t>(
       VectorHasher::kMaxDistinct, numDistinct * (1 + (reservePct / 100.0)));
 }
+  int artCopy(void *data, const unsigned char* key, uint32_t key_len, void *val) {
+    art_tree* other = (art_tree*)data;
+    art_insert_no_replace(other, key, key_len, val);
+    return 0;
+  }
 } // namespace
 
 void VectorHasher::cardinality(
@@ -797,16 +773,17 @@ void VectorHasher::cardinality(
     return;
   }
   // Padded count of values + 1 for null.
-  asDistincts = addIdReserve(uniqueValues_.size(), reservePct) + 1;
+  asDistincts = addIdReserve(uniqueValues_.size() + art_size(artTrie_.get()), reservePct) + 1;
 }
 
 uint64_t VectorHasher::enableValueIds(uint64_t multiplier, int32_t reservePct) {
   VELOX_CHECK_NE(
       typeKind_,
       TypeKind::BOOLEAN,
-      "A boolean VectorHasher should  always be by range");
+      "A boolean VectorHasher should always be by range");
   multiplier_ = multiplier;
-  rangeSize_ = addIdReserve(uniqueValues_.size(), reservePct) + 1;
+  rangeSize_ = addIdReserve(uniqueValues_.size() + art_size(artTrie_.get()), reservePct) + 1;
+  std::cout << "rangeSize_: " << rangeSize_ << " art_size(artTrie_.get()):" << art_size(artTrie_.get()) << std::endl;
   isRange_ = false;
   uint64_t result;
   if (__builtin_mul_overflow(multiplier_, rangeSize_, &result)) {
@@ -844,6 +821,8 @@ void VectorHasher::copyStatsFrom(const VectorHasher& other) {
   min_ = other.min_;
   max_ = other.max_;
   uniqueValues_ = other.uniqueValues_;
+  // artTrie_ = other.artTrie_;
+  art_iter(other.artTrie_.get(), artCopy, artTrie_.get());
 }
 
 void VectorHasher::merge(const VectorHasher& other) {
@@ -874,6 +853,8 @@ void VectorHasher::merge(const VectorHasher& other) {
       value.setId(uniqueValues_.size() + 1);
       uniqueValues_.insert(value);
     }
+
+    art_iter(other.artTrie_.get(), artCopy, artTrie_.get());
   } else {
     setDistinctOverflow();
   }
@@ -887,7 +868,7 @@ std::string VectorHasher::toString() const {
     out << " range size " << rangeSize_ << ": [" << min_ << ", " << max_ << "]";
   }
   if (!distinctOverflow_) {
-    out << " numDistinct: " << uniqueValues_.size();
+    out << " numDistinct: " << (uniqueValues_.size() + art_size(artTrie_.get()));
   }
   return out.str();
 }

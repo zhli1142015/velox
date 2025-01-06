@@ -79,6 +79,7 @@ GroupingSet::GroupingSet(
 
   for (auto& hasher : hashers_) {
     keyChannels_.push_back(hasher->channel());
+    hasher->setAllocator(&stringAllocator_);
   }
 
   if (groupingKeyOutputProjections_.empty()) {

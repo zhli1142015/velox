@@ -95,7 +95,8 @@ velox_add_library(
   Window.cpp
   WindowBuild.cpp
   WindowFunction.cpp
-  WindowPartition.cpp)
+  WindowPartition.cpp
+  art/art.c)
 
 velox_link_libraries(
   velox_exec
