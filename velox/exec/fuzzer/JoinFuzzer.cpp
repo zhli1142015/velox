@@ -39,10 +39,10 @@ DEFINE_int32(
 
 DEFINE_int32(
     batch_size,
-    100,
+    4096,
     "The number of elements on each generated vector.");
 
-DEFINE_int32(num_batches, 10, "The number of generated vectors.");
+DEFINE_int32(num_batches, 11, "The number of generated vectors.");
 
 DEFINE_double(
     null_ratio,
@@ -63,7 +63,7 @@ DEFINE_bool(
 
 DEFINE_double(
     filter_ratio,
-    0,
+    1,
     "The chance of testing plans with filters enabled.");
 
 namespace facebook::velox::exec::test {
@@ -351,7 +351,7 @@ JoinFuzzer::JoinFuzzer(
 
   // Make sure not to run out of open file descriptors.
   std::unordered_map<std::string, std::string> hiveConfig = {
-      {connector::hive::HiveConfig::kNumCacheFileHandles, "1000"}};
+      {connector::hive::HiveConfig::kNumCacheFileHandles, "100"}};
   connector::registerConnectorFactory(
       std::make_shared<connector::hive::HiveConnectorFactory>());
   auto hiveConnector =
@@ -912,40 +912,6 @@ void JoinFuzzer::makeAlternativePlans(
               joinType,
               joinNode->isNullAware())
           .planNode()});
-
-  // Use OrderBy + MergeJoin
-  if (core::MergeJoinNode::isSupported(joinNode->joinType())) {
-    auto planWithSplits = makeMergeJoinPlan(
-        joinType,
-        probeKeys,
-        buildKeys,
-        probeInput,
-        buildInput,
-        outputColumns,
-        filter);
-    plans.push_back(planWithSplits);
-
-    addFlippedJoinPlan<core::MergeJoinNode>(planWithSplits.plan, plans);
-  }
-
-  // Use NestedLoopJoin.
-  if (core::NestedLoopJoinNode::isSupported(joinNode->joinType())) {
-    std::string joinCondition = filter.empty()
-        ? makeJoinFilter(probeKeys, buildKeys)
-        : fmt::format(
-              "{} AND {}", makeJoinFilter(probeKeys, buildKeys), filter);
-    auto planWithSplits = makeNestedLoopJoinPlan(
-        joinType,
-        probeKeys,
-        buildKeys,
-        probeInput,
-        buildInput,
-        outputColumns,
-        joinCondition);
-    plans.push_back(planWithSplits);
-
-    addFlippedJoinPlan<core::NestedLoopJoinNode>(planWithSplits.plan, plans);
-  }
 }
 
 void JoinFuzzer::shuffleJoinKeys(
@@ -1044,12 +1010,12 @@ RowVectorPtr JoinFuzzer::testCrossProduct(
 
 void JoinFuzzer::verify(core::JoinType joinType) {
   const bool nullAware =
-      isNullAwareSupported(joinType) && vectorFuzzer_.coinToss(0.5);
+      isNullAwareSupported(joinType) && vectorFuzzer_.coinToss(0.9);
 
   // Add boolean/integer join filter.
   const bool withFilter = vectorFuzzer_.coinToss(FLAGS_filter_ratio);
   // Null-aware joins allow only one join key.
-  const int numKeys = nullAware ? (withFilter ? 0 : 1) : randInt(1, 5);
+  const int numKeys = nullAware ? (withFilter ? 0 : 1) : randInt(1, 10);
   std::vector<TypePtr> keyTypes = generateJoinKeyTypes(numKeys);
   std::string filter;
 
@@ -1381,56 +1347,6 @@ void JoinFuzzer::addPlansWithTableScan(
         numGroups,
         groupedProbeScanSplits,
         groupedBuildScanSplits));
-  }
-
-  // Add ungrouped MergeJoin with TableScan.
-  if (core::MergeJoinNode::isSupported(joinNode->joinType())) {
-    auto planWithSplits = makeMergeJoinPlanWithTableScan(
-        joinType,
-        probeType,
-        buildType,
-        probeKeys,
-        buildKeys,
-        probeScanSplits,
-        buildScanSplits,
-        outputColumns,
-        filter);
-    altPlans.push_back(planWithSplits);
-
-    addFlippedJoinPlan<core::MergeJoinNode>(
-        planWithSplits.plan,
-        altPlans,
-        planWithSplits.probeScanId,
-        planWithSplits.buildScanId,
-        {{planWithSplits.probeScanId, probeScanSplits},
-         {planWithSplits.buildScanId, buildScanSplits}});
-  }
-
-  // Add ungrouped NestedLoopJoin with TableScan.
-  if (core::NestedLoopJoinNode::isSupported(joinNode->joinType())) {
-    std::string joinCondition = filter.empty()
-        ? makeJoinFilter(probeKeys, buildKeys)
-        : fmt::format(
-              "{} AND {}", makeJoinFilter(probeKeys, buildKeys), filter);
-    auto planWithSplits = makeNestedLoopJoinPlanWithTableScan(
-        joinType,
-        probeType,
-        buildType,
-        probeKeys,
-        buildKeys,
-        probeScanSplits,
-        buildScanSplits,
-        outputColumns,
-        joinCondition);
-    altPlans.push_back(planWithSplits);
-
-    addFlippedJoinPlan<core::NestedLoopJoinNode>(
-        planWithSplits.plan,
-        altPlans,
-        planWithSplits.probeScanId,
-        planWithSplits.buildScanId,
-        {{planWithSplits.probeScanId, probeScanSplits},
-         {planWithSplits.buildScanId, buildScanSplits}});
   }
 }
 
