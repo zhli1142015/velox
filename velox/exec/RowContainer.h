@@ -171,16 +171,16 @@ class RowColumn {
    public:
     Stats() = default;
 
-    void addCellSize(int32_t bytes) {
-      if (UNLIKELY(nonNullCount_ == 0)) {
-        minBytes_ = bytes;
-        maxBytes_ = bytes;
-      } else {
-        minBytes_ = std::min(minBytes_, bytes);
-        maxBytes_ = std::max(maxBytes_, bytes);
-      }
+    void initialize(bool fixedWidth, int32_t maxBytes, int32_t minBytes) {
+      fixedWidth_ = fixedWidth;
+      minBytes_ = minBytes; // std::numeric_limits<int32_t>::max();
+      maxBytes_ = maxBytes; // std::numeric_limits<int32_t>::min();
+    }
+
+    void addVariableWidthCellSize(int32_t bytes) {
+      minBytes_ = std::min(minBytes_, bytes);
+      maxBytes_ = std::max(maxBytes_, bytes);
       sumBytes_ += bytes;
-      ++nonNullCount_;
     }
 
     void addNullCell() {
@@ -197,27 +197,26 @@ class RowColumn {
       return minBytes_;
     }
 
-    uint64_t sumBytes() const {
+    uint64_t sumBytes(uint32_t rows) const {
+      if (fixedWidth_) {
+        return static_cast<uint64_t>(minBytes_) * nonNullCount(rows);
+      }
       return sumBytes_;
     }
 
-    uint64_t avgBytes() const {
-      if (nonNullCount_ == 0) {
+    uint64_t avgBytes(uint32_t rows) const {
+      if (nonNullCount(rows) == 0) {
         return 0;
       }
-      return sumBytes_ / nonNullCount_;
+      return sumBytes(rows) / nonNullCount(rows);
     }
 
-    uint32_t nonNullCount() const {
-      return nonNullCount_;
+    uint32_t nonNullCount(uint32_t rows) const {
+      return rows - nullCount_;
     }
 
     uint32_t nullCount() const {
       return nullCount_;
-    }
-
-    uint32_t numCells() const {
-      return nullCount_ + nonNullCount_;
     }
 
     void invalidateMinMaxColumnStats() {
@@ -235,11 +234,10 @@ class RowColumn {
     // Aggregated stats for non-null rows of the column.
     int32_t minBytes_{0};
     int32_t maxBytes_{0};
-    bool minMaxStatsValid_{true};
-    uint64_t sumBytes_{0};
-
-    uint32_t nonNullCount_{0};
     uint32_t nullCount_{0};
+    bool minMaxStatsValid_{true};
+    bool fixedWidth_{false};
+    uint64_t sumBytes_{0};
   };
 
  private:
@@ -838,8 +836,7 @@ class RowContainer {
 
   /// Returns true if specified column has nulls, false otherwise.
   inline bool columnHasNulls(int32_t columnIndex) const {
-    return columnStats(columnIndex)->numCells() > 0 &&
-        columnStats(columnIndex)->nullCount() > 0;
+    return numRows_ > 0 && columnStats(columnIndex)->nullCount() > 0;
   }
 
   const std::vector<Accumulator>& accumulators() const {
@@ -1038,12 +1035,14 @@ class RowContainer {
       // Do not leave an uninitialized value in the case of a
       // null. This is an error with valgrind/asan.
       *reinterpret_cast<T*>(row + offset) = T();
+      rowColumnsStats_[columnIndex].addNullCell();
       return;
     }
     if constexpr (std::is_same_v<T, StringView>) {
       RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
-      stringAllocator_->copyMultipart(
-          decoded.valueAt<T>(rowIndex), row, offset);
+      auto value = decoded.valueAt<T>(rowIndex);
+      rowColumnsStats_[columnIndex].addVariableWidthCellSize(value.size());
+      stringAllocator_->copyMultipart(value, row, offset);
     } else {
       *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(rowIndex);
     }
@@ -1055,12 +1054,14 @@ class RowContainer {
       vector_size_t rowIndex,
       bool isKey,
       char* row,
-      int32_t offset) {
+      int32_t offset,
+      int32_t columnIndex) {
     using T = typename TypeTraits<Kind>::NativeType;
     if constexpr (std::is_same_v<T, StringView>) {
       RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
-      stringAllocator_->copyMultipart(
-          decoded.valueAt<T>(rowIndex), row, offset);
+      auto value = decoded.valueAt<T>(rowIndex);
+      rowColumnsStats_[columnIndex].addVariableWidthCellSize(value.size());
+      stringAllocator_->copyMultipart(value, row, offset);
     } else {
       *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(rowIndex);
     }
@@ -1078,7 +1079,6 @@ class RowContainer {
     for (int32_t i = 0; i < rows.size(); ++i) {
       storeWithNulls<Kind>(
           decoded, i, isKey, rows[i], offset, nullByte, nullMask, column);
-      updateColumnStats(decoded, i, rows[i], column);
     }
   }
 
@@ -1090,8 +1090,7 @@ class RowContainer {
       int32_t offset,
       int32_t column) {
     for (int32_t i = 0; i < rows.size(); ++i) {
-      storeNoNulls<Kind>(decoded, i, isKey, rows[i], offset);
-      updateColumnStats(decoded, i, rows[i], column);
+      storeNoNulls<Kind>(decoded, i, isKey, rows[i], offset, column);
     }
   }
 
@@ -1369,9 +1368,9 @@ class RowContainer {
       bool isKey,
       char* row,
       int32_t offset,
+      int32_t column,
       int32_t nullByte = 0,
-      uint8_t nullMask = 0,
-      int32_t column = 0);
+      uint8_t nullMask = 0);
 
   template <bool useRowNumbers>
   static void extractComplexType(
@@ -1482,12 +1481,6 @@ class RowContainer {
 
   void freeRowsExtraMemory(folly::Range<char**> rows, bool freeNextRowVector);
 
-  inline void updateColumnStats(
-      const DecodedVector& decoded,
-      vector_size_t rowIndex,
-      char* row,
-      int32_t columnIndex);
-
   // Updates column stats for serialized row.
   inline void updateColumnStats(char* row, int32_t columnIndex);
 
@@ -1587,7 +1580,7 @@ inline void RowContainer::storeWithNulls<TypeKind::ROW>(
     uint8_t nullMask,
     int32_t columnIndex) {
   storeComplexType(
-      decoded, rowIndex, isKey, row, offset, nullByte, nullMask, columnIndex);
+      decoded, rowIndex, isKey, row, offset, columnIndex, nullByte, nullMask);
 }
 
 template <>
@@ -1596,8 +1589,9 @@ inline void RowContainer::storeNoNulls<TypeKind::ROW>(
     vector_size_t rowIndex,
     bool isKey,
     char* row,
-    int32_t offset) {
-  storeComplexType(decoded, rowIndex, isKey, row, offset);
+    int32_t offset,
+    int32_t columnIndex) {
+  storeComplexType(decoded, rowIndex, isKey, row, offset, columnIndex);
 }
 
 template <>
@@ -1611,7 +1605,7 @@ inline void RowContainer::storeWithNulls<TypeKind::ARRAY>(
     uint8_t nullMask,
     int32_t columnIndex) {
   storeComplexType(
-      decoded, rowIndex, isKey, row, offset, nullByte, nullMask, columnIndex);
+      decoded, rowIndex, isKey, row, offset, columnIndex, nullByte, nullMask);
 }
 
 template <>
@@ -1620,8 +1614,9 @@ inline void RowContainer::storeNoNulls<TypeKind::ARRAY>(
     vector_size_t rowIndex,
     bool isKey,
     char* row,
-    int32_t offset) {
-  storeComplexType(decoded, rowIndex, isKey, row, offset);
+    int32_t offset,
+    int32_t columnIndex) {
+  storeComplexType(decoded, rowIndex, isKey, row, offset, columnIndex);
 }
 
 template <>
@@ -1635,7 +1630,7 @@ inline void RowContainer::storeWithNulls<TypeKind::MAP>(
     uint8_t nullMask,
     int32_t columnIndex) {
   storeComplexType(
-      decoded, rowIndex, isKey, row, offset, nullByte, nullMask, columnIndex);
+      decoded, rowIndex, isKey, row, offset, columnIndex, nullByte, nullMask);
 }
 
 template <>
@@ -1644,8 +1639,9 @@ inline void RowContainer::storeNoNulls<TypeKind::MAP>(
     vector_size_t rowIndex,
     bool isKey,
     char* row,
-    int32_t offset) {
-  storeComplexType(decoded, rowIndex, isKey, row, offset);
+    int32_t offset,
+    int32_t columnIndex) {
+  storeComplexType(decoded, rowIndex, isKey, row, offset, columnIndex);
 }
 
 template <>
@@ -1660,6 +1656,7 @@ inline void RowContainer::storeWithNulls<TypeKind::HUGEINT>(
     int32_t columnIndex) {
   if (decoded.isNullAt(rowIndex)) {
     row[nullByte] |= nullMask;
+    rowColumnsStats_[columnIndex].addNullCell();
     memset(row + offset, 0, sizeof(int128_t));
     return;
   }
@@ -1672,7 +1669,8 @@ inline void RowContainer::storeNoNulls<TypeKind::HUGEINT>(
     vector_size_t rowIndex,
     bool /*isKey*/,
     char* row,
-    int32_t offset) {
+    int32_t offset,
+    int32_t columnIndex) {
   HugeInt::serialize(decoded.valueAt<int128_t>(rowIndex), row + offset);
 }
 

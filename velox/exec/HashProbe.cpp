@@ -300,6 +300,12 @@ std::optional<uint64_t> HashProbe::estimatedRowSize(
   static const double kToleranceRatio = 10.0;
   std::vector<RowColumn::Stats> varSizeListColumnsStats;
   varSizeListColumnsStats.reserve(varSizedColumns.size());
+  const auto rowContainers = table_->allRows();
+  uint32_t numRows = 0;
+  for (const auto* rowContainer : rowContainers) {
+    numRows += rowContainer->numRows();
+  }
+
   for (uint32_t i = 0; i < varSizedColumns.size(); ++i) {
     const auto statsOpt = columnStats(varSizedColumns[i]);
     if (!statsOpt.has_value() || !statsOpt->minMaxColumnStatsValid()) {
@@ -311,7 +317,7 @@ std::optional<uint64_t> HashProbe::estimatedRowSize(
   uint64_t totalAvgBytes{totalFixedColumnsBytes};
   uint64_t totalMaxBytes{totalFixedColumnsBytes};
   for (const auto& stats : varSizeListColumnsStats) {
-    totalAvgBytes += stats.avgBytes();
+    totalAvgBytes += stats.avgBytes(numRows);
     totalMaxBytes += stats.maxBytes();
   }
   if (totalAvgBytes == 0) {
