@@ -221,6 +221,26 @@ TEST_F(AverageAggregationTest, avgDecimal) {
            makeFlatVector(std::vector<int128_t>{-24976667}, DECIMAL(19, 6))})};
 
   testAggregations(inputRows, {"c0"}, {"spark_avg(c1)"}, expectedResult);
+
+  auto valueA = HugeInt::parse("11999999998800000000");
+  auto valueB = HugeInt::parse("12000000000000000000");
+  auto longDecimalInputRows = {makeRowVector(
+      {makeNullableFlatVector<int32_t>({1, 1, 1, 1, 1, 1, 1}),
+       makeFlatVector<int128_t>(
+           {valueA, valueA, valueA, valueB, valueB, valueB, valueB},
+           DECIMAL(38, 18))})};
+
+  auto longDecimalExpectedResult = {makeRowVector(
+      {makeNullableFlatVector<int32_t>({1}),
+       makeFlatVector(
+           std::vector<int128_t>{HugeInt::parse("119999999994857142857143")},
+           DECIMAL(38, 22))})};
+
+  testAggregations(
+      longDecimalInputRows,
+      {"c0"},
+      {"spark_avg(c1)"},
+      longDecimalExpectedResult);
 }
 
 TEST_F(AverageAggregationTest, avgDecimalWithMultipleRowVectors) {

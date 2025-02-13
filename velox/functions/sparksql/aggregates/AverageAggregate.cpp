@@ -278,6 +278,7 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
         getDecimalPrecisionScale(*this->sumType_.get());
     auto [avgPrecision, avgScale] = computeResultPrecisionScale(
         sumPrecision, sumScale, countPrecision, countScale);
+    avgScale = std::max<uint8_t>(avgScale, resultScale);
     auto sumRescale = computeRescaleFactor(sumScale, countScale, avgScale);
     auto countDecimal = accumulator->count;
     int128_t avg = 0;
