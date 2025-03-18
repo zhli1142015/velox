@@ -12,6 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+add_executable(velox_decimal_sum_aggregate_bm DecimalSumAggregateBenchmark.cpp)
+
+target_link_libraries(
+  velox_decimal_sum_aggregate_bm
+  velox_functions_spark_aggregates
+  velox_hive_connector
+  velox_functions_lib
+  velox_exec_test_lib
+  velox_functions_spark
+  velox_dwio_common_exception
+  velox_vector_fuzzer
+  velox_vector_test_lib
+  Folly::folly
+  Folly::follybenchmark
+  gflags::gflags)
+
 add_executable(
   velox_functions_spark_aggregates_test
   AverageAggregationTest.cpp
