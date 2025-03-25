@@ -1191,7 +1191,7 @@ void HashTable<ignoreNullKeys>::pushNext(
     HashStringAllocator* allocator) {
   VELOX_CHECK_GT(nextOffset_, 0);
   hasDuplicates_ = true;
-  rows->appendNextRow(row, next, allocator);
+  rows->appendNextRow(row, next);
 }
 
 template <bool ignoreNullKeys>
@@ -1850,6 +1850,11 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
         iter, includeMisses, inputRows, hits, maxBytes);
   }
 
+  if (hashMode_ != HashMode::kArray) {
+    return listJoinResultsGeneral(
+        iter, includeMisses, inputRows, hits, maxBytes);
+  }
+
   size_t numOut = 0;
   auto maxOut = inputRows.size();
   uint64_t totalBytes{0};
@@ -1905,6 +1910,62 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
     }
     if (numOut >= maxOut || totalBytes >= maxBytes) {
       return numOut;
+    }
+  }
+  return numOut;
+}
+
+template <bool ignoreNullKeys>
+int32_t HashTable<ignoreNullKeys>::listJoinResultsGeneral(
+    JoinResultIterator& iter,
+    bool includeMisses,
+    folly::Range<vector_size_t*> inputRows,
+    folly::Range<char**> hits,
+    uint64_t maxBytes) {
+  size_t numOut = 0;
+  auto maxOut = inputRows.size();
+  uint64_t totalBytes{0};
+  while (iter.lastRowIndex < iter.rows->size()) {
+    if (!iter.nextHit) {
+      auto row = (*iter.rows)[iter.lastRowIndex];
+      iter.nextHit = (*iter.hits)[row]; // NOLINT
+      if (!iter.nextHit) {
+        ++iter.lastRowIndex;
+
+        if (includeMisses) {
+          inputRows[numOut] = row; // NOLINT
+          hits[numOut] = nullptr;
+          ++numOut;
+          if (numOut >= maxOut) {
+            return numOut;
+          }
+        }
+        continue;
+      }
+    }
+    while (iter.nextHit) {
+      char* next = nullptr;
+      if (nextOffset_) {
+        next = *reinterpret_cast<char**>(iter.nextHit + nextOffset_);
+        if (next) {
+          __builtin_prefetch(reinterpret_cast<char*>(next) + nextOffset_);
+        }
+      }
+      inputRows[numOut] = (*iter.rows)[iter.lastRowIndex]; // NOLINT
+      hits[numOut] = iter.nextHit;
+      totalBytes += iter.estimatedRowSize.has_value()
+          ? iter.estimatedRowSize.value()
+          : (joinProjectedVarColumnsSize(
+                 iter.varSizeListColumns, iter.nextHit) +
+             iter.fixedSizeListColumnsSizeSum);
+      ++numOut;
+      iter.nextHit = next;
+      if (!iter.nextHit) {
+        ++iter.lastRowIndex;
+      }
+      if (numOut >= maxOut || totalBytes >= maxBytes) {
+        return numOut;
+      }
     }
   }
   return numOut;
@@ -2055,28 +2116,38 @@ int32_t HashTable<false>::listNullKeyRows(
     iter->initialized = true;
   }
   size_t numRows = 0;
-  if (numRows < maxRows && iter->nextHit) {
-    auto nextRows = rows_->getNextRowVector(iter->nextHit);
-    if (nextRows) {
-      auto num = std::min(
-          nextRows->size() - iter->lastDuplicateRowIndex, maxRows - numRows);
-      std::memcpy(
-          rows + numRows,
-          nextRows->data() + iter->lastDuplicateRowIndex,
-          num * sizeof(char*));
-      iter->lastDuplicateRowIndex += num;
-      numRows += num;
-      if (iter->lastDuplicateRowIndex >= nextRows->size()) {
+  if (hashMode_ == HashMode::kArray) {
+    if (numRows < maxRows && iter->nextHit) {
+      auto nextRows = rows_->getNextRowVector(iter->nextHit);
+      if (nextRows) {
+        auto num = std::min(
+            nextRows->size() - iter->lastDuplicateRowIndex, maxRows - numRows);
+        std::memcpy(
+            rows + numRows,
+            nextRows->data() + iter->lastDuplicateRowIndex,
+            num * sizeof(char*));
+        iter->lastDuplicateRowIndex += num;
+        numRows += num;
+        if (iter->lastDuplicateRowIndex >= nextRows->size()) {
+          iter->nextHit = nullptr;
+          iter->lastDuplicateRowIndex = 0;
+        }
+      } else {
+        rows[numRows++] = iter->nextHit;
         iter->nextHit = nullptr;
-        iter->lastDuplicateRowIndex = 0;
       }
-    } else {
-      rows[numRows++] = iter->nextHit;
-      iter->nextHit = nullptr;
     }
-  }
 
-  return numRows;
+    return numRows;
+  } else {
+    char* hit = iter->nextHit;
+    while (numRows < maxRows && hit) {
+      rows[numRows++] = hit;
+      hit = *reinterpret_cast<char**>(hit + nextOffset_);
+    }
+    iter->nextHit = hit;
+    return numRows;
+  }
 }
 
 template <>

@@ -767,6 +767,12 @@ class RowContainer {
     return *reinterpret_cast<NextRowVector**>(row + nextOffset_);
   }
 
+  void appendNextRow(char* current, char* nextRow);
+
+  inline char*& getNextRow(char* row) const {
+    return *reinterpret_cast<char**>(row + nextOffset_);
+  }
+
   /// Hashes the values of 'columnIndex' for 'rows'.  If 'mix' is true, mixes
   /// the hash with the existing value in 'result'.
   void hash(
@@ -1523,6 +1529,7 @@ class RowContainer {
   // Indicates if this row container has rows with duplicate keys. This only
   // applies if 'nextOffset_' is set.
   tsan_atomic<bool> hasDuplicateRows_{false};
+  tsan_atomic<bool> hasNextRowVectors_{false};
   // Bit position of null bit  in the row. 0 if no null flag. Order is keys,
   // accumulators, dependent.
   std::vector<int32_t> nullOffsets_;

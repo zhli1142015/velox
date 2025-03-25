@@ -418,10 +418,17 @@ void RowContainer::appendNextRow(
     nextRowArrayPtr = new (allocator->allocate(kNextRowVectorSize)->begin())
         NextRowVector(StlAllocator<char*>(allocator));
     hasDuplicateRows_ = true;
+    hasNextRowVectors_ = true;
     nextRowArrayPtr->emplace_back(current);
   }
   nextRowArrayPtr->emplace_back(nextRow);
   getNextRowVector(nextRow) = nextRowArrayPtr;
+}
+
+void RowContainer::appendNextRow(char* current, char* nextRow) {
+  auto previousNext = getNextRow(current);
+  getNextRow(current) = nextRow;
+  getNextRow(nextRow) = previousNext;
 }
 
 void RowContainer::freeVariableWidthFields(folly::Range<char**> rows) {
@@ -450,7 +457,7 @@ void RowContainer::freeAggregates(folly::Range<char**> rows) {
 }
 
 void RowContainer::freeNextRowVectors(folly::Range<char**> rows) {
-  if (!nextOffset_ || !hasDuplicateRows_) {
+  if (!nextOffset_ || !hasDuplicateRows_ || !hasNextRowVectors_) {
     return;
   }
 

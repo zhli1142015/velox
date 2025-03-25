@@ -157,6 +157,7 @@ class BaseHashTable {
     void reset(const HashLookup& lookup) {
       rows = &lookup.rows;
       hits = &lookup.hits;
+      nextHit = nullptr;
       lastRowIndex = 0;
       lastDuplicateRowIndex = 0;
     }
@@ -178,6 +179,7 @@ class BaseHashTable {
 
     vector_size_t lastRowIndex{0};
     vector_size_t lastDuplicateRowIndex{0};
+    char* nextHit{nullptr};
   };
 
   struct RowsIterator {
@@ -518,6 +520,13 @@ class HashTable : public BaseHashTable {
       folly::Range<vector_size_t*> inputRows,
       folly::Range<char**> hits,
       uint64_t maxBytes) override;
+
+  int32_t listJoinResultsGeneral(
+      JoinResultIterator& iter,
+      bool includeMisses,
+      folly::Range<vector_size_t*> inputRows,
+      folly::Range<char**> hits,
+      uint64_t maxBytes);
 
   int32_t listNotProbedRows(
       RowsIterator* iter,
