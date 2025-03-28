@@ -66,6 +66,11 @@ void extractColumns(
     memory::MemoryPool* pool,
     const std::vector<TypePtr>& resultTypes,
     std::vector<VectorPtr>& resultVectors) {
+  if (table->canApplyParallelExtractColumns()) {
+    table->parallelExtractColumns(
+        rows, projections, pool, resultTypes, resultVectors);
+    return;
+  }
   VELOX_CHECK_EQ(resultTypes.size(), resultVectors.size());
   for (auto projection : projections) {
     const auto resultChannel = projection.outputChannel;

@@ -873,6 +873,90 @@ bool HashTable<ignoreNullKeys>::canApplyParallelJoinBuild() const {
 }
 
 template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::parallelExtractColumns(
+    folly::Range<char* const*> rows,
+    folly::Range<const IdentityProjection*> projections,
+    memory::MemoryPool* pool,
+    const std::vector<TypePtr>& resultTypes,
+    std::vector<VectorPtr>& resultVectors) {
+  std::vector<IdentityProjection> parallelExtractProjections;
+  std::vector<IdentityProjection> sequenceExtractProjections;
+  std::vector<std::shared_ptr<AsyncSource<bool>>> extractSteps;
+  for (auto projection : projections) {
+    const auto resultChannel = projection.outputChannel;
+    VELOX_CHECK_LT(resultChannel, resultVectors.size());
+
+    auto& child = resultVectors[resultChannel];
+    // TODO: Consider reuse of complex types.
+    if (!child || !BaseVector::isVectorWritable(child) ||
+        !child->isFlatEncoding()) {
+      child = BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
+    }
+    child->resize(rows.size());
+    bool canExtractInParallel = false;
+    if (resultTypes[resultChannel]->isFixedWidth()) {
+      canExtractInParallel = true;
+    } else if (
+        resultTypes[resultChannel]->kind() == TypeKind::VARCHAR ||
+        resultTypes[resultChannel]->kind() == TypeKind::VARBINARY) {
+      auto statsOpt = rows_->columnStats(projection.inputChannel);
+      if (statsOpt.has_value() && statsOpt.value().minMaxColumnStatsValid() &&
+          statsOpt.value().maxBytes() <= 12) {
+        canExtractInParallel = true;
+      }
+    }
+    if (canExtractInParallel) {
+      parallelExtractProjections.push_back(projection);
+    } else {
+      sequenceExtractProjections.push_back(projection);
+    }
+  }
+  auto sync = folly::makeGuard([&]() {
+    // This is executed on returning path, possibly in unwinding, so must not
+    // throw.
+    std::exception_ptr error;
+    syncWorkItems(extractSteps, error, offThreadExtractTiming_, true);
+  });
+  const DriverCtx* driverCtx{nullptr};
+  if (const auto* driverThreadCtx = driverThreadContext()) {
+    driverCtx = driverThreadCtx->driverCtx();
+  }
+  for (int i = 0; i < parallelExtractProjections.size(); ++i) {
+    const auto resultChannel = parallelExtractProjections[i].outputChannel;
+    const auto columnIndex = parallelExtractProjections[i].inputChannel;
+    extractSteps.push_back(std::make_shared<AsyncSource<bool>>(
+        [data = rows.data(),
+         size = rows.size(),
+         column = rows_->columnAt(columnIndex),
+         columnHasNulls = columnHasNulls_[columnIndex],
+         result = resultVectors[resultChannel]]() {
+          RowContainer::extractColumn(
+              data, size, column, columnHasNulls, result);
+          return std::make_unique<bool>(true);
+        }));
+    buildExecutor_->add([driverCtx, step = extractSteps.back()]() {
+      ScopedDriverThreadContext scopedDriverThreadContext(driverCtx);
+      step->prepare();
+    });
+  }
+  for (int i = 0; i < sequenceExtractProjections.size(); ++i) {
+    const auto resultChannel = sequenceExtractProjections[i].outputChannel;
+    const auto columnIndex = sequenceExtractProjections[i].inputChannel;
+    RowContainer::extractColumn(
+        rows.data(),
+        rows.size(),
+        rows_->columnAt(columnIndex),
+        columnHasNulls_[columnIndex],
+        resultVectors[resultChannel]);
+  }
+  std::exception_ptr error;
+  syncWorkItems(extractSteps, error, offThreadExtractTiming_);
+  if (error != nullptr) {
+    std::rethrow_exception(error);
+  }
+}
+
+template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::parallelJoinBuild() {
   process::TraceContext trace("HashTable::parallelJoinBuild");
   TestValue::adjust(

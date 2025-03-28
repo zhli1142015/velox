@@ -413,6 +413,10 @@ class BaseHashTable {
     return offThreadBuildTiming_;
   }
 
+  const CpuWallTiming& offThreadExtractTiming() const {
+    return offThreadExtractTiming_;
+  }
+
   /// Copies the values at 'columnIndex' into 'result' for the 'rows.size' rows
   /// pointed to by 'rows'. If an entry in 'rows' is null, sets corresponding
   /// row in 'result' to null.
@@ -420,6 +424,15 @@ class BaseHashTable {
       folly::Range<char* const*> rows,
       int32_t columnIndex,
       const VectorPtr& result) = 0;
+
+  virtual bool canApplyParallelExtractColumns() const = 0;
+
+  virtual void parallelExtractColumns(
+      folly::Range<char* const*> rows,
+      folly::Range<const IdentityProjection*> projections,
+      memory::MemoryPool* pool,
+      const std::vector<TypePtr>& resultTypes,
+      std::vector<VectorPtr>& resultVectors) = 0;
 
  protected:
   static FOLLY_ALWAYS_INLINE size_t tableSlotSize() {
@@ -437,6 +450,8 @@ class BaseHashTable {
 
   // Time spent in build outside of the calling thread.
   CpuWallTiming offThreadBuildTiming_;
+
+  CpuWallTiming offThreadExtractTiming_;
 };
 
 FOLLY_ALWAYS_INLINE std::ostream& operator<<(
@@ -660,6 +675,17 @@ class HashTable : public BaseHashTable {
         columnHasNulls_[columnIndex],
         result);
   }
+
+  bool canApplyParallelExtractColumns() const override {
+    return buildExecutor_ != nullptr;
+  }
+
+  void parallelExtractColumns(
+      folly::Range<char* const*> rows,
+      folly::Range<const IdentityProjection*> projections,
+      memory::MemoryPool* pool,
+      const std::vector<TypePtr>& resultTypes,
+      std::vector<VectorPtr>& resultVectors) override;
 
   auto& testingOtherTables() const {
     return otherTables_;
