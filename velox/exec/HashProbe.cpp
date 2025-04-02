@@ -66,20 +66,8 @@ void extractColumns(
     memory::MemoryPool* pool,
     const std::vector<TypePtr>& resultTypes,
     std::vector<VectorPtr>& resultVectors) {
-  VELOX_CHECK_EQ(resultTypes.size(), resultVectors.size());
-  for (auto projection : projections) {
-    const auto resultChannel = projection.outputChannel;
-    VELOX_CHECK_LT(resultChannel, resultVectors.size());
-
-    auto& child = resultVectors[resultChannel];
-    // TODO: Consider reuse of complex types.
-    if (!child || !BaseVector::isVectorWritable(child) ||
-        !child->isFlatEncoding()) {
-      child = BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
-    }
-    child->resize(rows.size());
-    table->extractColumn(rows, projection.inputChannel, child);
-  }
+  table->extractColumns(
+      rows.data(), rows.size(), projections, pool, resultTypes, resultVectors);
 }
 
 BlockingReason fromStateToBlockingReason(ProbeOperatorState state) {

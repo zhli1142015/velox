@@ -2193,6 +2193,123 @@ void HashTable<ignoreNullKeys>::checkConsistency() const {
       numDistinct_);
 }
 
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::extractColumns(
+    const char* const* rows,
+    int32_t numRows,
+    folly::Range<const IdentityProjection*> projections,
+    memory::MemoryPool* pool,
+    const std::vector<TypePtr>& resultTypes,
+    std::vector<VectorPtr>& resultVectors) {
+  VELOX_CHECK_EQ(resultTypes.size(), resultVectors.size());
+  std::vector<bool> noNulls;
+  noNulls.reserve(resultTypes.size());
+  std::vector<int32_t> offsets;
+  offsets.reserve(resultTypes.size());
+  std::vector<uint8_t> nullMasks;
+  nullMasks.reserve(resultTypes.size());
+  std::vector<int32_t> nullBytes;
+  nullBytes.reserve(resultTypes.size());
+  std::vector<uint64_t*> nulls;
+  nulls.reserve(resultTypes.size());
+  std::vector<VectorPtr> results;
+  std::vector<std::function<void(const char*, int32_t, VectorPtr&, int32_t)>>
+      extractors;
+  for (auto projection : projections) {
+    const auto resultChannel = projection.outputChannel;
+    VELOX_CHECK_LT(resultChannel, resultVectors.size());
+
+    auto& child = resultVectors[resultChannel];
+    // TODO: Consider reuse of complex types.
+    if (!child || !BaseVector::isVectorWritable(child) ||
+        !child->isFlatEncoding()) {
+      child = BaseVector::create(resultTypes[resultChannel], numRows, pool);
+    }
+    child->resize(numRows);
+
+    results.push_back(child);
+    auto column = rows_->columnAt(projection.inputChannel);
+    auto nullMask = column.nullMask();
+    nullMasks.push_back(nullMask);
+    nullBytes.push_back(column.nullByte());
+    offsets.push_back(column.offset());
+    noNulls.push_back(!nullMask || !columnHasNulls_[projection.inputChannel]);
+
+    BufferPtr& nullBuffer = child->mutableNulls(numRows, true);
+    nulls.push_back(nullBuffer->asMutable<uint64_t>());
+
+    switch (resultTypes[resultChannel]->kind()) {
+#define SCALAR_CASE(kind)                                                   \
+  case TypeKind::kind: {                                                    \
+    extractors.push_back([](const char* row,                                \
+                            int32_t offset,                                 \
+                            VectorPtr& result,                              \
+                            int32_t i) INLINE_LAMBDA {                      \
+      auto value =                                                          \
+          *reinterpret_cast<const TypeTraits<TypeKind::kind>::NativeType*>( \
+              row + offset);                                                \
+      result->asFlatVector<TypeTraits<TypeKind::kind>::NativeType>()->set(  \
+          i, value);                                                        \
+    });                                                                     \
+    break;                                                                  \
+  }
+      SCALAR_CASE(BOOLEAN)
+      SCALAR_CASE(TINYINT)
+      SCALAR_CASE(SMALLINT)
+      SCALAR_CASE(INTEGER)
+      SCALAR_CASE(BIGINT)
+      SCALAR_CASE(HUGEINT)
+      SCALAR_CASE(REAL)
+      SCALAR_CASE(DOUBLE)
+      SCALAR_CASE(TIMESTAMP)
+      SCALAR_CASE(UNKNOWN)
+#undef SCALAR_CASE
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY: {
+        extractors.push_back(
+            [](const char* row, int32_t offset, VectorPtr& result, int32_t i)
+                INLINE_LAMBDA {
+                  RowContainer::extractStringAt(
+                      row, offset, result->asFlatVector<StringView>(), i);
+                });
+        break;
+      }
+      case TypeKind::ARRAY:
+      case TypeKind::MAP:
+      case TypeKind::ROW: {
+        extractors.push_back(
+            [](const char* row, int32_t offset, VectorPtr& result, int32_t i)
+                INLINE_LAMBDA {
+                  RowContainer::extractComplexTypeAt(row, offset, result, i);
+                });
+        break;
+      }
+      default:
+        VELOX_UNSUPPORTED(
+            "Unsupported type for extractColumns: {}",
+            resultTypes[resultChannel]->toString());
+    }
+  }
+
+  for (int i = 0; i < numRows; ++i) {
+    const char* row = rows[i];
+    if (!row) {
+      for (int col = 0; col < projections.size(); ++col) {
+        bits::setNull(nulls[col], i, true);
+      }
+      continue;
+    }
+    for (int col = 0; col < projections.size(); ++col) {
+      auto isNotNull =
+          noNulls[col] || (row[nullBytes[col]] & nullMasks[col]) == 0;
+      bits::setNull(nulls[col], i, !isNotNull);
+      if (isNotNull) {
+        extractors[col](row, offsets[col], results[col], i);
+      }
+    }
+  }
+}
+
 template class HashTable<true>;
 template class HashTable<false>;
 

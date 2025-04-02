@@ -421,6 +421,14 @@ class BaseHashTable {
       int32_t columnIndex,
       const VectorPtr& result) = 0;
 
+  virtual void extractColumns(
+      const char* const* rows,
+      int32_t numRows,
+      folly::Range<const IdentityProjection*> projections,
+      memory::MemoryPool* pool,
+      const std::vector<TypePtr>& resultTypes,
+      std::vector<VectorPtr>& resultVectors) = 0;
+
  protected:
   static FOLLY_ALWAYS_INLINE size_t tableSlotSize() {
     // Each slot is 8 bytes.
@@ -660,6 +668,14 @@ class HashTable : public BaseHashTable {
         columnHasNulls_[columnIndex],
         result);
   }
+
+  void extractColumns(
+      const char* const* rows,
+      int32_t numRows,
+      folly::Range<const IdentityProjection*> projections,
+      memory::MemoryPool* pool,
+      const std::vector<TypePtr>& resultTypes,
+      std::vector<VectorPtr>& resultVectors) override;
 
   auto& testingOtherTables() const {
     return otherTables_;

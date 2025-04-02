@@ -896,6 +896,23 @@ class RowContainer {
     return mutable_;
   }
 
+  static inline void extractStringAt(
+      const char* row,
+      int32_t offset,
+      FlatVector<StringView>* result,
+      int32_t resultIndex) {
+    extractString(valueAt<StringView>(row, offset), result, resultIndex);
+  }
+
+  static inline void extractComplexTypeAt(
+      const char* row,
+      int32_t offset,
+      VectorPtr& result,
+      int32_t resultIndex) {
+    auto stream = prepareRead(row, offset);
+    ContainerRowSerde::deserialize(stream, resultIndex, result.get());
+  }
+
   /// Returns a summary of the container: key types, dependent types, number of
   /// accumulators and number of rows.
   std::string toString() const;
