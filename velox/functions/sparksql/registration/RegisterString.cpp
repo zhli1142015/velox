@@ -24,6 +24,7 @@
 #include "velox/functions/sparksql/Split.h"
 #include "velox/functions/sparksql/String.h"
 #include "velox/functions/sparksql/StringToMap.h"
+#include "velox/functions/sparksql/UnBase64Function.h"
 
 namespace facebook::velox::functions {
 void registerSparkStringFunctions(const std::string& prefix) {
@@ -152,6 +153,7 @@ void registerStringFunctions(const std::string& prefix) {
   registerFunction<LuhnCheckFunction, bool, Varchar>({prefix + "luhn_check"});
 
   registerFunction<Base64Function, Varchar, Varbinary>({prefix + "base64"});
+  registerFunction<UnBase64Function, Varbinary, Varchar>({prefix + "unbase64"});
 }
 } // namespace sparksql
 } // namespace facebook::velox::functions
