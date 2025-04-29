@@ -114,6 +114,10 @@ class Base64 {
   /// Inserts a CRLF every kMaxLineLength output characters.
   static void
   encodeMime(const char* input, size_t inputSize, char* outputBuffer);
+  /// Decodes a Base64 MIME‐mode buffer back to binary.
+  /// Skips any non-Base64 chars (e.g. CR/LF).
+  static Status
+  decodeMime(const char* input, size_t inputSize, char* outputBuffer);
 
   /// Calculates the encoded size based on input 'inputSize'.
   static size_t calculateEncodedSize(size_t inputSize, bool withPadding = true);
@@ -127,6 +131,11 @@ class Base64 {
   /// Computes the exact output length for MIME‐mode Base64 encoding,
   /// including required CRLF line breaks.
   static size_t calculateMimeEncodedSize(size_t inputSize);
+  /// Calculates the decoded binary size of a MIME‐mode Base64 input,
+  /// accounting for padding and ignoring whitespace.
+  static Expected<size_t> calculateMimeDecodedSize(
+      const char* input,
+      const size_t inputSize);
 
  private:
   // Padding character used in encoding.
