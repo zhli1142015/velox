@@ -86,13 +86,15 @@ void skipUnreadLengthsAndNulls(dwio::common::SelectiveColumnReader& reader) {
 void enqueueChildren(
     dwio::common::SelectiveColumnReader* reader,
     uint32_t index,
-    dwio::common::BufferedInput& input) {
+    dwio::common::BufferedInput& input,
+    const RowRanges& rowRanges) {
   auto children = reader->children();
   if (children.empty()) {
-    return reader->formatData().as<ParquetData>().enqueueRowGroup(index, input);
+    return reader->formatData().as<ParquetData>().enqueueRowGroup(
+        index, input, rowRanges);
   }
   for (auto* child : children) {
-    enqueueChildren(child, index, input);
+    enqueueChildren(child, index, input, rowRanges);
   }
 }
 } // namespace
@@ -142,8 +144,9 @@ MapColumnReader::MapColumnReader(
 
 void MapColumnReader::enqueueRowGroup(
     uint32_t index,
-    dwio::common::BufferedInput& input) {
-  enqueueChildren(this, index, input);
+    dwio::common::BufferedInput& input,
+    const RowRanges& rowRanges) {
+  enqueueChildren(this, index, input, rowRanges);
 }
 
 void MapColumnReader::seekToRowGroup(int64_t index) {
@@ -225,6 +228,15 @@ void MapColumnReader::filterRowGroups(
   // empty placeholder to avoid incorrect calling on parent's impl
 }
 
+void MapColumnReader::collectIndexPageInfoMap(
+    uint32_t index,
+    PageIndexInfoMap& map) {}
+
+void MapColumnReader::filterDataPages(
+    uint32_t index,
+    folly::F14FastMap<uint32_t, std::unique_ptr<ColumnPageIndex>>& pageIndices,
+    RowRanges& range) {}
+
 ListColumnReader::ListColumnReader(
     const dwio::common::ColumnReaderOptions& columnReaderOptions,
     const TypePtr& requestedType,
@@ -250,8 +262,9 @@ ListColumnReader::ListColumnReader(
 
 void ListColumnReader::enqueueRowGroup(
     uint32_t index,
-    dwio::common::BufferedInput& input) {
-  enqueueChildren(this, index, input);
+    dwio::common::BufferedInput& input,
+    const RowRanges& rowRanges) {
+  enqueueChildren(this, index, input, rowRanges);
 }
 
 void ListColumnReader::seekToRowGroup(int64_t index) {
@@ -331,5 +344,14 @@ void ListColumnReader::filterRowGroups(
     dwio::common::FormatData::FilterRowGroupsResult& result) const {
   // empty placeholder to avoid incorrect calling on parent's impl
 }
+
+void ListColumnReader::collectIndexPageInfoMap(
+    uint32_t index,
+    PageIndexInfoMap& map) {}
+
+void ListColumnReader::filterDataPages(
+    uint32_t index,
+    folly::F14FastMap<uint32_t, std::unique_ptr<ColumnPageIndex>>& pageIndices,
+    RowRanges& range) {}
 
 } // namespace facebook::velox::parquet
