@@ -105,6 +105,19 @@ bool HiveConfig::isParquetUseColumnNames(
       config_->get<bool>(kParquetUseColumnNames, false));
 }
 
+bool HiveConfig::isParquetReaderEnablePageIndex(
+    const config::ConfigBase* session) const {
+  // When pushdown filters exist and the Parquet file contains index pages,
+  // we read the corresponding page index and use its information for page
+  // pruning. Typically, this optimization should improve performance, but it is
+  // not overhead-free. The main overhead comes from reading index pages and
+  // fragmented data reads after page pruning. If enabling this feature degrades
+  // performance, it can be disabled using this config.
+  return session->get<bool>(
+      kParquetReaderEnablePageIndexSession,
+      config_->get<bool>(kParquetReaderEnablePageIndex, true));
+}
+
 bool HiveConfig::isFileColumnNamesReadAsLowerCase(
     const config::ConfigBase* session) const {
   return session->get<bool>(

@@ -84,6 +84,14 @@ class HiveConfig {
   static constexpr const char* kParquetUseColumnNamesSession =
       "parquet_use_column_names";
 
+  /// Whether to enable page index for Parquet reader.
+  /// If enabled, the page index will be used to skip reading pages that do not
+  /// match the filter.
+  static constexpr const char* kParquetReaderEnablePageIndex =
+      "hive.parquet.enable-page-index";
+  static constexpr const char* kParquetReaderEnablePageIndexSession =
+      "parquet_enable_page_index";
+
   /// Reads the source file column name as lower case.
   static constexpr const char* kFileColumnNamesReadAsLowerCase =
       "file-column-names-read-as-lower-case";
@@ -207,6 +215,8 @@ class HiveConfig {
   bool isOrcUseColumnNames(const config::ConfigBase* session) const;
 
   bool isParquetUseColumnNames(const config::ConfigBase* session) const;
+
+  bool isParquetReaderEnablePageIndex(const config::ConfigBase* session) const;
 
   bool isFileColumnNamesReadAsLowerCase(
       const config::ConfigBase* session) const;
