@@ -1400,6 +1400,30 @@ TEST_F(ParquetTableScanTest, intToBigintRead) {
   assertEqualVectors(bigintDataFileVectors->childAt(0), rows->childAt(0));
 }
 
+TEST_F(ParquetTableScanTest, jsonLogicalType) {
+  loadData(
+      getExampleFilePath("json_converted.parquet"),
+      ROW({"js"}, {VARCHAR()}),
+      makeRowVector(
+          {"js"},
+          {
+              makeFlatVector<StringView>({"{\"x\":1}"}),
+          }));
+  assertSelect({"js"}, "SELECT js FROM tmp");
+}
+
+TEST_F(ParquetTableScanTest, bsonLogicalType) {
+  loadData(
+      getExampleFilePath("bson_converted.parquet"),
+      ROW({"bson"}, {VARCHAR()}),
+      makeRowVector(
+          {"bson"},
+          {
+              makeFlatVector<StringView>({"\u0001\u0002\u0003\u0004"}),
+          }));
+  assertSelect({"bson"}, "SELECT bson FROM tmp");
+}
+
 TEST_F(ParquetTableScanTest, shortAndLongDecimalReadWithLargerPrecision) {
   // decimal.parquet holds two columns (a: DECIMAL(5, 2), b: DECIMAL(20, 5)) and
   // 20 rows (10 rows per group). Data is in plain uncompressed format:

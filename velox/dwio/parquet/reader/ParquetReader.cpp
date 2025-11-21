@@ -958,6 +958,42 @@ TypePtr ReaderBase::convertType(
             VELOX_FAIL(
                 "UTF8 converted type can only be set for thrift::Type::(FIXED_LEN_)BYTE_ARRAY");
         }
+      case thrift::ConvertedType::JSON:
+        if (schemaElement.type == thrift::Type::BYTE_ARRAY) {
+          VELOX_CHECK(
+              !requestedType ||
+                  isCompatible(
+                      requestedType,
+                      isRepeated,
+                      [](const TypePtr& type) {
+                        return type->kind() == TypeKind::VARCHAR;
+                      }),
+              kTypeMappingErrorFmtStr,
+              "VARCHAR",
+              requestedType->toString());
+          return VARCHAR();
+        } else {
+          VELOX_FAIL(
+              "JSON converted type can only be set for thrift::Type::BYTE_ARRAY");
+        }
+      case thrift::ConvertedType::BSON:
+        if (schemaElement.type == thrift::Type::BYTE_ARRAY) {
+          VELOX_CHECK(
+              !requestedType ||
+                  isCompatible(
+                      requestedType,
+                      isRepeated,
+                      [](const TypePtr& type) {
+                        return type->kind() == TypeKind::VARBINARY;
+                      }),
+              kTypeMappingErrorFmtStr,
+              "VARBINARY",
+              requestedType->toString());
+          return VARBINARY();
+        } else {
+          VELOX_FAIL(
+              "BSON converted type can only be set for thrift::Type::BYTE_ARRAY");
+        }
       case thrift::ConvertedType::ENUM: {
         VELOX_CHECK_EQ(
             schemaElement.type,
@@ -981,8 +1017,6 @@ TypePtr ReaderBase::convertType(
       case thrift::ConvertedType::LIST:
       case thrift::ConvertedType::TIME_MILLIS:
       case thrift::ConvertedType::TIME_MICROS:
-      case thrift::ConvertedType::JSON:
-      case thrift::ConvertedType::BSON:
       case thrift::ConvertedType::INTERVAL:
       default:
         VELOX_FAIL(
