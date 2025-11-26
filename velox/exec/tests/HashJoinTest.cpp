@@ -8493,5 +8493,100 @@ DEBUG_ONLY_TEST_F(
 
   ASSERT_TRUE(spillTriggered.load());
 }
+
+// Test that lazy vectors are properly loaded for left outer join when the
+// probe input has a duplicate lazy vector column. This reproduces a bug where
+// an unloaded lazy vector could be wrapped by two different dictionary vectors
+// when the same lazy column appears multiple times in the probe input,
+// causing "An unloaded lazy vector cannot be wrapped by two different top level
+// vectors" error.
+//
+// The original issue occurred with a plan like:
+//   Scan -> Project [col1, col2, col2] -> LeftOuterJoin
+// where col2 appears twice in the projection, and the join wraps both
+// references to the same unloaded lazy vector.
+TEST_F(HashJoinTest, leftJoinWithDuplicateLazyColumn) {
+  // Create probe vectors
+  const vector_size_t probeSize = 1'000;
+  auto probeVectors = makeBatches(1, [&](int32_t /*unused*/) {
+    return makeRowVector(
+        {"pk", "pv1"},
+        {// Join key - values 0-999
+         makeFlatVector<int32_t>(probeSize, [](auto row) { return row; }),
+         // Value column that will be duplicated in projection
+         makeFlatVector<int64_t>(
+             probeSize, [](auto row) { return row * 10; })});
+  });
+
+  // Create build vectors - small to ensure many miss rows
+  const vector_size_t buildSize = 100;
+  auto buildVectors = makeBatches(1, [&](int32_t /*unused*/) {
+    return makeRowVector(
+        {"bk", "bv"},
+        {makeFlatVector<int32_t>(buildSize, [](auto row) { return row; }),
+         makeFlatVector<StringView>(buildSize, [](auto row) {
+           return StringView::makeInline(fmt::format("bval{}", row));
+         })});
+  });
+
+  // Write to files to get lazy vectors
+  std::shared_ptr<TempFilePath> probeFile = TempFilePath::create();
+  writeToFile(probeFile->getPath(), probeVectors);
+
+  std::shared_ptr<TempFilePath> buildFile = TempFilePath::create();
+  writeToFile(buildFile->getPath(), buildVectors);
+
+  createDuckDbTable("probe", probeVectors);
+  createDuckDbTable("build", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  core::PlanNodeId probeScanId;
+  core::PlanNodeId buildScanId;
+
+  // Scan -> Project (duplicate pv1 column) -> Left Join
+  // The project creates two references to the same lazy vector pv1
+  auto op = PlanBuilder(planNodeIdGenerator)
+                .tableScan(asRowType(probeVectors[0]->type()))
+                .capturePlanNodeId(probeScanId)
+                // Project duplicates pv1 column - both pv1 and pv1_dup refer
+                // to the same underlying lazy vector
+                .project({"pk", "pv1", "pv1 AS pv1_dup"})
+                .hashJoin(
+                    {"pk"},
+                    {"bk"},
+                    PlanBuilder(planNodeIdGenerator)
+                        .tableScan(asRowType(buildVectors[0]->type()))
+                        .capturePlanNodeId(buildScanId)
+                        .planNode(),
+                    "", // No filter
+                    {"pv1", "pv1_dup", "bv"},
+                    core::JoinType::kLeft)
+                .planNode();
+
+  auto splitInput = [&]() {
+    return [&] {
+      SplitInput splitInput;
+      splitInput.emplace(
+          probeScanId,
+          std::vector<exec::Split>{
+              exec::Split(makeHiveConnectorSplit(probeFile->getPath()))});
+      splitInput.emplace(
+          buildScanId,
+          std::vector<exec::Split>{
+              exec::Split(makeHiveConnectorSplit(buildFile->getPath()))});
+      return splitInput;
+    };
+  };
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .planNode(std::move(op))
+      .makeInputSplits(splitInput())
+      .checkSpillStats(false)
+      .referenceQuery(
+          "SELECT probe.pv1, probe.pv1 AS pv1_dup, build.bv "
+          "FROM probe "
+          "LEFT JOIN build ON probe.pk = build.bk")
+      .run();
+}
 } // namespace
 } // namespace facebook::velox::exec

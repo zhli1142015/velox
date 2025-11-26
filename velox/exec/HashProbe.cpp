@@ -841,12 +841,27 @@ void HashProbe::fillLeftSemiProjectMatchColumn(vector_size_t size) {
 void HashProbe::fillOutput(vector_size_t size) {
   prepareOutput(size);
 
+  // Use a map to cache wrapped vectors by the underlying vector pointer. This
+  // handles the case where multiple output columns reference the same
+  // underlying vector (e.g., when Project duplicates a column like
+  // "c1 as pv1, c1 as pv1_dup"). Without caching, the same underlying lazy
+  // vector would be wrapped multiple times, which is not allowed for unloaded
+  // lazy vectors.
+  std::unordered_map<const BaseVector*, VectorPtr> wrappedInputs;
   for (auto [in, out] : projectedInputColumns_) {
-    // Load input vector if it is being split into multiple batches. It is not
-    // safe to wrap unloaded LazyVector into two different dictionaries.
-    ensureLoadedIfNotAtEnd(in);
     auto inputChild = input_->childAt(in);
-    output_->childAt(out) = wrapChild(size, outputRowMapping_, inputChild);
+    auto* rawPtr = inputChild.get();
+    auto it = wrappedInputs.find(rawPtr);
+    if (it == wrappedInputs.end()) {
+      // Load input vector if it is being split into multiple batches. It is
+      // not safe to wrap unloaded LazyVector into two different dictionaries.
+      ensureLoadedIfNotAtEnd(in);
+      auto wrapped = wrapChild(size, outputRowMapping_, inputChild);
+      wrappedInputs[rawPtr] = wrapped;
+      output_->childAt(out) = std::move(wrapped);
+    } else {
+      output_->childAt(out) = it->second;
+    }
   }
 
   if (isLeftSemiProjectJoin(joinType_)) {
