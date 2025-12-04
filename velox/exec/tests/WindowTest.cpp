@@ -1036,5 +1036,137 @@ DEBUG_ONLY_TEST_F(WindowTest, releaseWindowBuildInTime) {
               "ORDER BY d");
 }
 
+// Test that RowsStreamingWindowBuild does not support spill.
+// When window functions support rows streaming mode (e.g., row_number()),
+// canReclaim() returns false even if spill is enabled, because
+// RowsStreamingWindowBuild::canSpill() returns false.
+TEST_F(WindowTest, rowsStreamingWindowBuildNoSpill) {
+  const vector_size_t size = 1'000;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {
+          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+          makeFlatVector<int16_t>(size, [](auto row) { return row / 100; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  createDuckDbTable({data});
+
+  core::PlanNodeId windowId;
+  // Use row_number() which supports rows streaming mode, causing
+  // RowsStreamingWindowBuild to be used instead of
+  // PartitionStreamingWindowBuild.
+  auto plan =
+      PlanBuilder()
+          .values(split(data, 10))
+          .streamingWindow({"row_number() over (partition by p order by s)"})
+          .capturePlanNodeId(windowId)
+          .planNode();
+
+  auto spillDirectory = TempDirectoryPath::create();
+  // Even with spill injection, RowsStreamingWindowBuild should not spill.
+  TestScopedSpillInjection scopedSpillInjection(100);
+
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
+          .config(core::QueryConfig::kSpillEnabled, "true")
+          .config(core::QueryConfig::kWindowSpillEnabled, "true")
+          .spillDirectory(spillDirectory->getPath())
+          .assertResults(
+              "SELECT *, row_number() over (partition by p order by s) FROM tmp");
+
+  auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& stats = taskStats.at(windowId);
+
+  // RowsStreamingWindowBuild does not spill because canSpill() returns false.
+  ASSERT_EQ(stats.spilledBytes, 0);
+  ASSERT_EQ(stats.spilledRows, 0);
+}
+
+// Test that RowsStreamingWindowBuild does not support spill even with empty
+// partition keys (the whole data is one partition). This tests the case where
+// WindowNode::canSpill() returns true (because inputsSorted=true) but the
+// actual WindowBuild does not support spill.
+TEST_F(WindowTest, rowsStreamingWindowBuildNoSpillEmptyPartitionKeys) {
+  const vector_size_t size = 1'000;
+  auto data = makeRowVector(
+      {"d", "s"},
+      {
+          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  createDuckDbTable({data});
+
+  core::PlanNodeId windowId;
+  // Use row_number() with no partition key, only order by. row_number()
+  // supports rows streaming mode, so RowsStreamingWindowBuild is used.
+  auto plan = PlanBuilder()
+                  .values(split(data, 10))
+                  .streamingWindow({"row_number() over (order by s)"})
+                  .capturePlanNodeId(windowId)
+                  .planNode();
+
+  auto spillDirectory = TempDirectoryPath::create();
+  TestScopedSpillInjection scopedSpillInjection(100);
+
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
+          .config(core::QueryConfig::kSpillEnabled, "true")
+          .config(core::QueryConfig::kWindowSpillEnabled, "true")
+          .spillDirectory(spillDirectory->getPath())
+          .assertResults("SELECT *, row_number() over (order by s) FROM tmp");
+
+  auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& stats = taskStats.at(windowId);
+
+  // RowsStreamingWindowBuild does not spill even with empty partition keys.
+  ASSERT_EQ(stats.spilledBytes, 0);
+  ASSERT_EQ(stats.spilledRows, 0);
+}
+
+// Test that SortWindowBuild also supports spill.
+TEST_F(WindowTest, sortWindowBuildWithSpill) {
+  const vector_size_t size = 1'000;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {
+          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+          makeFlatVector<int16_t>(size, [](auto row) { return row / 100; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  createDuckDbTable({data});
+
+  core::PlanNodeId windowId;
+  // Use window() instead of streamingWindow() to use SortWindowBuild.
+  auto plan = PlanBuilder()
+                  .values(split(data, 10))
+                  .window({"last_value(d) over (partition by p order by s)"})
+                  .capturePlanNodeId(windowId)
+                  .planNode();
+
+  auto spillDirectory = TempDirectoryPath::create();
+  TestScopedSpillInjection scopedSpillInjection(100);
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
+          .config(core::QueryConfig::kSpillEnabled, "true")
+          .config(core::QueryConfig::kWindowSpillEnabled, "true")
+          .spillDirectory(spillDirectory->getPath())
+          .assertResults(
+              "SELECT *, last_value(d) over (partition by p order by s) FROM tmp");
+
+  auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& stats = taskStats.at(windowId);
+
+  // SortWindowBuild can spill during data accumulation (before noMoreInput),
+  // but not during output.
+  ASSERT_GT(stats.spilledBytes, 0);
+  ASSERT_GT(stats.spilledRows, 0);
+}
+
 } // namespace
 } // namespace facebook::velox::exec

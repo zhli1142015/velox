@@ -4887,11 +4887,22 @@ class WindowNode : public PlanNode {
   }
 
   bool canSpill(const QueryConfig& queryConfig) const override {
-    // No partitioning keys means the whole input is one big partition. In
-    // this case, spilling is not helpful because we need to have a full
-    // partition in memory to produce results.
-    return !partitionKeys_.empty() && !inputsSorted_ &&
-        queryConfig.windowSpillEnabled();
+    if (!queryConfig.windowSpillEnabled()) {
+      return false;
+    }
+    // When input is pre-sorted (inputsSorted=true),
+    // PartitionStreamingWindowBuild is used which supports spill even with
+    // empty partition keys. When input is not sorted, SortWindowBuild is used
+    // which requires non-empty partition keys because with empty keys the whole
+    // input is one big partition and we need to have a full partition in memory
+    // to produce results. Note: RowsStreamingWindowBuild (which doesn't support
+    // spill) may still be selected at runtime for pre-sorted input if window
+    // functions support rows streaming mode. In that case, Window operator will
+    // disable spill.
+    if (inputsSorted_) {
+      return true;
+    }
+    return !partitionKeys_.empty();
   }
 
   const RowTypePtr& inputType() const {

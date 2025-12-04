@@ -91,6 +91,7 @@ add_executable(
   SortBufferTest.cpp
   SpatialIndexTest.cpp
   HilbertIndexTest.cpp
+  SpillableWindowPartitionTest.cpp
   SpillerTest.cpp
   SpillTest.cpp
   SplitListenerTest.cpp
@@ -108,6 +109,7 @@ add_executable(
   ValuesTest.cpp
   VectorHasherTest.cpp
   WindowFunctionRegistryTest.cpp
+  WindowSpillTest.cpp
   WindowTest.cpp
   WriterFuzzerUtilTest.cpp
 )

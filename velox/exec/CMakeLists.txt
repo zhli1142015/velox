@@ -87,6 +87,7 @@ velox_add_library(
   SpatialJoinBuild.cpp
   SpatialJoinProbe.cpp
   Spill.cpp
+  SpillableWindowPartition.cpp
   SpillFile.cpp
   Spiller.cpp
   StreamingAggregation.cpp

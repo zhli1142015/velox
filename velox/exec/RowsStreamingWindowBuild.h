@@ -37,8 +37,12 @@ class RowsStreamingWindowBuild : public WindowBuild {
 
   void addInput(RowVectorPtr input) override;
 
+  bool canSpill() const override {
+    return false;
+  }
+
   void spill() override {
-    VELOX_UNREACHABLE();
+    VELOX_UNREACHABLE("RowsStreamingWindowBuild does not support spill");
   }
 
   std::optional<common::SpillStats> spilledStats() const override {

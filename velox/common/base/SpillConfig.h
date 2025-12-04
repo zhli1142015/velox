@@ -80,7 +80,9 @@ struct SpillConfig {
       const std::string& _compressionKind,
       std::optional<PrefixSortConfig> _prefixSortConfig = std::nullopt,
       const std::string& _fileCreateConfig = {},
-      uint32_t _windowMinReadBatchRows = 1'000);
+      uint32_t _windowMinReadBatchRows = 1'000,
+      uint64_t _windowSpillCacheMaxRows = 100'000,
+      uint64_t _windowSpillCacheMaxBytes = 1ULL << 30);
 
   /// Returns the spilling level with given 'startBitOffset' and
   /// 'numPartitionBits'.
@@ -168,5 +170,15 @@ struct SpillConfig {
 
   /// The minimum number of rows to read when processing spilled window data.
   uint32_t windowMinReadBatchRows;
+
+  /// The maximum number of rows to cache when reading spilled window data.
+  /// If loading new rows would exceed this limit, old rows are evicted first.
+  /// Default is 100,000 rows.
+  uint64_t windowSpillCacheMaxRows;
+
+  /// The maximum memory (in bytes) for caching spilled window data.
+  /// If memory usage exceeds this limit, old rows are evicted.
+  /// Default is 1GB.
+  uint64_t windowSpillCacheMaxBytes;
 };
 } // namespace facebook::velox::common

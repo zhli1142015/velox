@@ -23,13 +23,15 @@
 /// WindowPartition supports partial window partitioning to facilitate
 /// RowsStreamingWindowBuild which can start data processing with a portion set
 /// of rows without having to wait until an entire partition of rows are ready.
-
-/// TODO: This implementation will be revised for Spill to disk semantics.
+///
+/// For spill support, see SpillableWindowPartition which extends this class
+/// to handle partitions that don't fit in memory.
 
 namespace facebook::velox::exec {
 
 class WindowPartition {
  public:
+  virtual ~WindowPartition() = default;
   /// The WindowPartition is used by the Window operator and WindowFunction
   /// objects to access the underlying data and columns of a partition of rows.
   /// The WindowPartition is constructed by WindowBuild from the input data.
@@ -64,13 +66,14 @@ class WindowPartition {
   void removeProcessedRows(vector_size_t numRows);
 
   /// Returns the number of rows in the current WindowPartition.
-  vector_size_t numRows() const {
+  virtual vector_size_t numRows() const {
     return partition_.size();
   }
 
   /// Returns the number of rows in a window partition remaining for data
   /// processing.
-  vector_size_t numRowsForProcessing(vector_size_t partitionOffset) const;
+  virtual vector_size_t numRowsForProcessing(
+      vector_size_t partitionOffset) const;
 
   bool complete() const {
     return complete_;
@@ -90,7 +93,7 @@ class WindowPartition {
   /// Copies the values at 'columnIndex' into 'result' (starting at
   /// 'resultOffset') for the rows at positions in the 'rowNumbers'
   /// array from the partition input data.
-  void extractColumn(
+  virtual void extractColumn(
       int32_t columnIndex,
       folly::Range<const vector_size_t*> rowNumbers,
       vector_size_t resultOffset,
@@ -99,7 +102,7 @@ class WindowPartition {
   /// Copies the values at 'columnIndex' into 'result' (starting at
   /// 'resultOffset') for 'numRows' starting at positions 'partitionOffset'
   /// in the partition input data.
-  void extractColumn(
+  virtual void extractColumn(
       int32_t columnIndex,
       vector_size_t partitionOffset,
       vector_size_t numRows,
@@ -109,7 +112,7 @@ class WindowPartition {
   /// Extracts null positions at 'columnIndex' into 'nullsBuffer' for
   /// 'numRows' starting at positions 'partitionOffset' in the partition
   /// input data.
-  void extractNulls(
+  virtual void extractNulls(
       int32_t columnIndex,
       vector_size_t partitionOffset,
       vector_size_t numRows,
@@ -123,7 +126,7 @@ class WindowPartition {
   /// The pair is returned only if null values are found in the nulls
   /// extracted. The first value of the pair is the smallest frameStart for
   /// nulls. The second is the number of frames extracted.
-  std::optional<std::pair<vector_size_t, vector_size_t>> extractNulls(
+  virtual std::optional<std::pair<vector_size_t, vector_size_t>> extractNulls(
       column_index_t col,
       const SelectivityVector& validRows,
       const BufferPtr& frameStarts,
@@ -141,7 +144,7 @@ class WindowPartition {
   /// keys). So peerStart and peerEnd of the last row of this call are returned
   /// to be passed as prevPeerStart and prevPeerEnd to the subsequent
   /// call to computePeerBuffers.
-  std::pair<vector_size_t, vector_size_t> computePeerBuffers(
+  virtual std::pair<vector_size_t, vector_size_t> computePeerBuffers(
       vector_size_t start,
       vector_size_t end,
       vector_size_t prevPeerStart,
@@ -161,7 +164,7 @@ class WindowPartition {
   /// @param validFrames SelectivityVector to keep track of valid frames.
   /// This function unselect rows in validFrames where the frame bounds are NaN
   /// that are invalid.
-  void computeKRangeFrameBounds(
+  virtual void computeKRangeFrameBounds(
       bool isStartBound,
       bool isPreceding,
       column_index_t frameColumn,
@@ -171,7 +174,18 @@ class WindowPartition {
       vector_size_t* rawFrameBounds,
       SelectivityVector& validFrames) const;
 
- private:
+ protected:
+  /// Protected constructor for derived classes like SpillableWindowPartition
+  /// that manage their own row tracking but use the shared data_ RowContainer.
+  /// This constructor initializes columns_ from data_ but does not require
+  /// rows to be provided upfront.
+  WindowPartition(
+      RowContainer* data,
+      const std::vector<column_index_t>& inputMapping,
+      const std::vector<std::pair<column_index_t, core::SortOrder>>&
+          sortKeyInfo,
+      bool spillable);
+
   WindowPartition(
       RowContainer* data,
       const folly::Range<char**>& rows,
@@ -183,6 +197,51 @@ class WindowPartition {
 
   bool compareRowsWithSortKeys(const char* lhs, const char* rhs) const;
 
+  // Indicates if this is a partial partition for RowStreamWindowBuild
+  // processing.
+  const bool partial_;
+
+  // The RowContainer associated with the partition.
+  // It is owned by the WindowBuild that creates the partition.
+  RowContainer* const data_;
+
+  // Points to the input rows for partial partition.
+  std::vector<char*> rows_;
+
+  // folly::Range is for the partition rows iterator provided by the
+  // Window operator. The pointers are to rows from a RowContainer owned
+  // by the operator. We can assume these are valid values for the lifetime
+  // of WindowPartition.
+  folly::Range<char**> partition_;
+
+  // Indicates if a partial partition has received all the input rows. For a
+  // non-partial partition, this is always true.
+  bool complete_ = true;
+
+  // Mapping from window input column -> index in data_. This is required
+  // because the WindowBuild reorders data_ to place partition and sort keys
+  // before other columns in data_. But the Window Operator and Function code
+  // accesses WindowPartition using the indexes of Window input type.
+  const std::vector<column_index_t> inputMapping_;
+
+  // ORDER BY column info for this partition.
+  const std::vector<std::pair<column_index_t, core::SortOrder>> sortKeyInfo_;
+
+  // Copy of the input RowColumn objects that are used for
+  // accessing the partition row columns. These RowColumn objects
+  // index into RowContainer data_ above and can retrieve the column values.
+  // The order of these columns is the same as that of the input row
+  // of the Window operator. The WindowFunctions know the
+  // corresponding indexes of their input arguments into this vector.
+  // They will request for column vector values at the respective index.
+  std::vector<exec::RowColumn> columns_;
+
+  // The partition offset of the first row in 'rows_'. It is updated for
+  // partial partition during the data processing but always zero for
+  // non-partial partition.
+  vector_size_t startRow_{0};
+
+ private:
   // Finds the index of the last peer row in range of ['startRow', 'lastRow'].
   vector_size_t findPeerRowEndIndex(
       vector_size_t startRow,
@@ -237,50 +296,6 @@ class WindowPartition {
       const vector_size_t* rawPeerBounds,
       vector_size_t* rawFrameBounds,
       SelectivityVector& validFrames) const;
-
-  // Indicates if this is a partial partition for RowStreamWindowBuild
-  // processing.
-  const bool partial_;
-
-  // The RowContainer associated with the partition.
-  // It is owned by the WindowBuild that creates the partition.
-  RowContainer* const data_;
-
-  // Points to the input rows for partial partition.
-  std::vector<char*> rows_;
-
-  // folly::Range is for the partition rows iterator provided by the
-  // Window operator. The pointers are to rows from a RowContainer owned
-  // by the operator. We can assume these are valid values for the lifetime
-  // of WindowPartition.
-  folly::Range<char**> partition_;
-
-  // Indicates if a partial partition has received all the input rows. For a
-  // non-partial partition, this is always true.
-  bool complete_ = true;
-
-  // Mapping from window input column -> index in data_. This is required
-  // because the WindowBuild reorders data_ to place partition and sort keys
-  // before other columns in data_. But the Window Operator and Function code
-  // accesses WindowPartition using the indexes of Window input type.
-  const std::vector<column_index_t> inputMapping_;
-
-  // ORDER BY column info for this partition.
-  const std::vector<std::pair<column_index_t, core::SortOrder>> sortKeyInfo_;
-
-  // Copy of the input RowColumn objects that are used for
-  // accessing the partition row columns. These RowColumn objects
-  // index into RowContainer data_ above and can retrieve the column values.
-  // The order of these columns is the same as that of the input row
-  // of the Window operator. The WindowFunctions know the
-  // corresponding indexes of their input arguments into this vector.
-  // They will request for column vector values at the respective index.
-  std::vector<exec::RowColumn> columns_;
-
-  // The partition offset of the first row in 'rows_'. It is updated for
-  // partial partition during the data processing but always zero for
-  // non-partial partition.
-  vector_size_t startRow_{0};
 
   // Points to the last row from the previous processed peer group if not null.
   // This is only set for a partial window partition and always null for a

@@ -19,6 +19,24 @@ namespace facebook::velox::exec {
 
 WindowPartition::WindowPartition(
     RowContainer* data,
+    const std::vector<column_index_t>& inputMapping,
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo,
+    bool spillable)
+    : partial_(false),
+      data_(data),
+      complete_(true),
+      inputMapping_(inputMapping),
+      sortKeyInfo_(sortKeyInfo) {
+  VELOX_CHECK_NOT_NULL(data_);
+  // Initialize columns_ from data_ for spillable partitions.
+  // These partitions manage their own row pointers (cachedRows_) separately.
+  for (auto index : inputMapping_) {
+    columns_.emplace_back(data_->columnAt(index));
+  }
+}
+
+WindowPartition::WindowPartition(
+    RowContainer* data,
     const folly::Range<char**>& rows,
     const std::vector<column_index_t>& inputMapping,
     const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo,

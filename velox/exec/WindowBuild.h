@@ -44,8 +44,28 @@ class WindowBuild {
   /// Adds new input rows to the WindowBuild.
   virtual void addInput(RowVectorPtr input) = 0;
 
+  /// Returns true if this window build supports spilling.
+  /// RowsStreamingWindowBuild does not support spill.
+  virtual bool canSpill() const {
+    return spillConfig_ != nullptr;
+  }
+
+  /// Returns true if this window build supports spilling after noMoreInput().
+  /// Only PartitionStreamingWindowBuild supports this because it processes
+  /// partitions one at a time and can spill during output.
+  virtual bool canSpillAfterNoMoreInput() const {
+    return false;
+  }
+
   /// Can be called any time before noMoreInput().
   virtual void spill() = 0;
+
+  /// Ensures there is enough memory to produce output rows. This is called
+  /// before allocating output vectors in Window::getOutput(). If memory is
+  /// tight, this may trigger spilling to free up memory. The default
+  /// implementation does nothing. Only PartitionStreamingWindowBuild overrides
+  /// this to support memory-aware output.
+  virtual void ensureOutputFits(vector_size_t /*numOutputRows*/) {}
 
   /// Returns the spiller stats including total bytes and rows spilled so far.
   virtual std::optional<common::SpillStats> spilledStats() const = 0;

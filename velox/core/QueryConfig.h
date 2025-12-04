@@ -285,6 +285,18 @@ class QueryConfig {
   static constexpr const char* kWindowSpillMinReadBatchRows =
       "window_spill_min_read_batch_rows";
 
+  /// The maximum number of rows to cache when reading spilled window data.
+  /// If loading new rows would exceed this limit, old rows are evicted first.
+  /// Default is 100,000 rows.
+  static constexpr const char* kWindowSpillCacheMaxRows =
+      "window_spill_cache_max_rows";
+
+  /// The maximum memory (in bytes) for caching spilled window data.
+  /// If memory usage exceeds this limit, old rows are evicted.
+  /// Default is 1GB.
+  static constexpr const char* kWindowSpillCacheMaxBytes =
+      "window_spill_cache_max_bytes";
+
   /// If true, the memory arbitrator will reclaim memory from table writer by
   /// flushing its buffered data to disk. only applies if "spill_enabled" flag
   /// is set.
@@ -1000,6 +1012,14 @@ class QueryConfig {
 
   uint32_t windowSpillMinReadBatchRows() const {
     return get<uint32_t>(kWindowSpillMinReadBatchRows, 1'000);
+  }
+
+  uint64_t windowSpillCacheMaxRows() const {
+    return get<uint64_t>(kWindowSpillCacheMaxRows, 100'000);
+  }
+
+  uint64_t windowSpillCacheMaxBytes() const {
+    return get<uint64_t>(kWindowSpillCacheMaxBytes, 1ULL << 30);
   }
 
   bool writerSpillEnabled() const {

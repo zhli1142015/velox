@@ -64,7 +64,11 @@ Window::Window(
           windowNode_, pool(), spillConfig, &nonReclaimableSection_);
     } else {
       windowBuild_ = std::make_unique<PartitionStreamingWindowBuild>(
-          windowNode, pool(), spillConfig, &nonReclaimableSection_);
+          windowNode,
+          pool(),
+          spillConfig,
+          &nonReclaimableSection_,
+          spillStats_.get());
     }
   } else {
     if (auto numSubPartitions =
@@ -272,9 +276,8 @@ void Window::reclaim(
   VELOX_CHECK(canReclaim());
   VELOX_CHECK(!nonReclaimableSection_);
 
-  if (noMoreInput_) {
+  if (noMoreInput_ && !windowBuild_->canSpillAfterNoMoreInput()) {
     ++stats.numNonReclaimableAttempts;
-    // TODO Add support for spilling after noMoreInput().
     LOG(WARNING)
         << "Can't reclaim from window operator which has started producing output: "
         << pool()->name() << ", usage: " << succinctBytes(pool()->usedBytes())
@@ -282,6 +285,11 @@ void Window::reclaim(
     return;
   }
 
+  // For PartitionStreamingWindowBuild, spill() can be called even after
+  // noMoreInput() because it processes partitions one at a time:
+  // 1. Spill active partition via SpillableWindowPartition::spill()
+  // 2. Spill waiting partitions (completed but not yet processed)
+  // 3. Spill building partition (only if noMoreInput_ is false)
   windowBuild_->spill();
 }
 
@@ -732,6 +740,11 @@ RowVectorPtr Window::getOutput() {
   }
 
   const auto numOutputRows = std::min(numRowsPerOutput_, numRowsLeft);
+
+  // Ensure there is enough memory for output rows. This may trigger spilling
+  // if memory is tight. Only PartitionStreamingWindowBuild implements this.
+  windowBuild_->ensureOutputFits(numOutputRows);
+
   auto result = BaseVector::create<RowVector>(
       outputType_, numOutputRows, operatorCtx_->pool());
 

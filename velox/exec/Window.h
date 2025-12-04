@@ -64,6 +64,12 @@ class Window : public Operator {
     return noMoreInput_ && numRows_ == numProcessedRows_;
   }
 
+  bool canReclaim() const override {
+    // RowsStreamingWindowBuild does not support spill, so we need to check
+    // the actual windowBuild's capability.
+    return canSpill() && windowBuild_->canSpill();
+  }
+
   void reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats)
       override;
 
