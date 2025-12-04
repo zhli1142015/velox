@@ -24,6 +24,10 @@ namespace {
 // Minimum cache capacity to ensure reasonable batch sizes.
 constexpr vector_size_t kMinCacheCapacity = 100;
 
+// Maximum rows to load at once to prevent excessive memory usage in
+// spillRowContainer_. When a request exceeds this, we process in batches.
+constexpr vector_size_t kMaxBatchSize = 100000;
+
 // Computes cache capacity based on buffer size and row size.
 vector_size_t computeCacheCapacity(
     uint64_t bufferSize,
@@ -31,6 +35,28 @@ vector_size_t computeCacheCapacity(
   auto rowSize = container->fixedRowSize() + container->rowSizeOffset();
   auto capacity = static_cast<vector_size_t>(bufferSize / rowSize);
   return std::max(capacity, kMinCacheCapacity);
+}
+
+// Helper template that processes rows in batches.
+// 'loadFunc' is called to load rows into cache: loadFunc(batchStart, batchEnd)
+// 'processFunc' is called to process each batch: processFunc(batchStart,
+// batchSize, processedRows)
+template <typename LoadFunc, typename ProcessFunc>
+void processInBatches(
+    vector_size_t startRow,
+    vector_size_t numRows,
+    LoadFunc loadFunc,
+    ProcessFunc processFunc) {
+  vector_size_t processedRows = 0;
+  while (processedRows < numRows) {
+    auto batchSize = std::min(numRows - processedRows, kMaxBatchSize);
+    auto batchStart = startRow + processedRows;
+
+    loadFunc(batchStart, batchStart + batchSize);
+    processFunc(batchStart, batchSize, processedRows);
+
+    processedRows += batchSize;
+  }
 }
 } // namespace
 
@@ -207,23 +233,60 @@ void SpillableWindowPartition::extractColumnScattered(
     return;
   }
 
-  ensureRowsLoaded(minRow, maxRow + 1);
+  auto rangeSize = maxRow - minRow + 1;
 
-  // Build row pointers (nullptr for negative row numbers).
-  std::vector<const char*> rowPtrs(rowNumbers.size());
-  for (size_t i = 0; i < rowNumbers.size(); ++i) {
-    rowPtrs[i] = rowNumbers[i] >= 0 ? getRowPtr(rowNumbers[i]) : nullptr;
+  // If the range is small enough, load all at once.
+  if (rangeSize <= kMaxBatchSize) {
+    ensureRowsLoaded(minRow, maxRow + 1);
+
+    // Build row pointers (nullptr for negative row numbers).
+    std::vector<const char*> rowPtrs(rowNumbers.size());
+    for (size_t i = 0; i < rowNumbers.size(); ++i) {
+      rowPtrs[i] = rowNumbers[i] >= 0 ? getRowPtr(rowNumbers[i]) : nullptr;
+    }
+
+    std::vector<vector_size_t> indices(rowNumbers.size());
+    std::iota(indices.begin(), indices.end(), 0);
+
+    spillRowContainer_->extractColumn(
+        rowPtrs.data(),
+        folly::Range<const vector_size_t*>(indices.data(), indices.size()),
+        inputMapping_[columnIndex],
+        resultOffset,
+        result);
+    return;
   }
 
-  std::vector<vector_size_t> indices(rowNumbers.size());
-  std::iota(indices.begin(), indices.end(), 0);
+  // For large ranges, process in batches by row number ranges.
+  // First, resize result to accommodate all rows.
+  result->resize(resultOffset + rowNumbers.size());
 
-  spillRowContainer_->extractColumn(
-      rowPtrs.data(),
-      folly::Range<const vector_size_t*>(indices.data(), indices.size()),
-      inputMapping_[columnIndex],
-      resultOffset,
-      result);
+  // Process in batches based on partition row ranges.
+  for (vector_size_t batchStart = minRow; batchStart <= maxRow;
+       batchStart += kMaxBatchSize) {
+    auto batchEnd = std::min(batchStart + kMaxBatchSize, maxRow + 1);
+    ensureRowsLoaded(batchStart, batchEnd);
+
+    // Process only the rowNumbers that fall within this batch range.
+    for (size_t i = 0; i < rowNumbers.size(); ++i) {
+      auto rowNum = rowNumbers[i];
+      if (rowNum >= 0 && rowNum >= batchStart &&
+          rowNum < static_cast<vector_size_t>(batchEnd)) {
+        // Extract this single value.
+        const char* rowPtr = getRowPtr(rowNum);
+        spillRowContainer_->extractColumn(
+            &rowPtr,
+            folly::Range<const vector_size_t*>(
+                reinterpret_cast<const vector_size_t*>(&i), 1),
+            inputMapping_[columnIndex],
+            resultOffset,
+            result);
+      } else if (rowNum < 0 && batchStart == minRow) {
+        // Handle negative row numbers (nulls) only in first batch.
+        result->setNull(resultOffset + i, true);
+      }
+    }
+  }
 }
 
 void SpillableWindowPartition::extractColumn(
@@ -242,9 +305,23 @@ void SpillableWindowPartition::extractColumn(
     return;
   }
 
-  ensureRowsLoaded(partitionOffset, partitionOffset + numRows);
-  extractColumnFromCache(
-      columnIndex, partitionOffset, numRows, resultOffset, result);
+  processInBatches(
+      partitionOffset,
+      numRows,
+      [this](vector_size_t start, vector_size_t end) {
+        ensureRowsLoaded(start, end);
+      },
+      [this, columnIndex, resultOffset, &result](
+          vector_size_t batchStart,
+          vector_size_t batchSize,
+          vector_size_t processedRows) {
+        extractColumnFromCache(
+            columnIndex,
+            batchStart,
+            batchSize,
+            resultOffset + processedRows,
+            result);
+      });
 }
 
 void SpillableWindowPartition::extractColumnFromCache(
@@ -280,16 +357,29 @@ void SpillableWindowPartition::extractNulls(
     return;
   }
 
-  ensureRowsLoaded(partitionOffset, partitionOffset + numRows);
-  VELOX_DCHECK_GE(partitionOffset, cacheStartRow_);
-  VELOX_DCHECK_LE(partitionOffset + numRows, cacheEndRow_);
+  auto rawNulls = nullsBuffer->asMutable<uint64_t>();
+  // Use spillRowContainer_'s column metadata with proper mapping.
+  auto mappedColumn = spillRowContainer_->columnAt(inputMapping_[columnIndex]);
 
-  vector_size_t cacheOffset = partitionOffset - cacheStartRow_;
-  spillRowContainer_->extractNulls(
-      reinterpret_cast<const char* const*>(cachedRows_.data() + cacheOffset),
+  processInBatches(
+      partitionOffset,
       numRows,
-      inputMapping_[columnIndex],
-      nullsBuffer);
+      [this](vector_size_t start, vector_size_t end) {
+        ensureRowsLoaded(start, end);
+      },
+      [this, rawNulls, &mappedColumn](
+          vector_size_t batchStart,
+          vector_size_t batchSize,
+          vector_size_t processedRows) {
+        VELOX_DCHECK_GE(batchStart, cacheStartRow_);
+        VELOX_DCHECK_LE(batchStart + batchSize, cacheEndRow_);
+        vector_size_t cacheOffset = batchStart - cacheStartRow_;
+        for (vector_size_t i = 0; i < batchSize; ++i) {
+          auto isNull = spillRowContainer_->isNullAt(
+              cachedRows_[cacheOffset + i], mappedColumn);
+          bits::setBit(rawNulls, processedRows + i, isNull);
+        }
+      });
 }
 
 std::optional<std::pair<vector_size_t, vector_size_t>>
@@ -309,41 +399,47 @@ SpillableWindowPartition::extractNulls(
     return std::nullopt;
   }
 
-  ensureRowsLoaded(minRow, maxRow);
+  auto rangeSize = maxRow - minRow;
 
-  // Check if any nulls exist in the range.
+  // Allocate the null bitmap for the entire range.
+  *nulls = AlignedBuffer::allocate<bool>(
+      rangeSize, spillRowContainer_->pool(), false);
+  auto rawNulls = (*nulls)->asMutable<uint64_t>();
+
   bool hasNulls = false;
   vector_size_t nullCount = 0;
+  // Use spillRowContainer_'s column metadata with proper mapping.
+  auto mappedColumn = spillRowContainer_->columnAt(inputMapping_[col]);
 
-  validRows.applyToSelected([&](auto i) {
-    auto* rawFrameStarts = frameStarts->as<vector_size_t>();
-    auto* rawFrameEnds = frameEnds->as<vector_size_t>();
-    for (auto row = rawFrameStarts[i]; row < rawFrameEnds[i]; ++row) {
-      if (row >= cacheStartRow_ && row < cacheEndRow_) {
-        if (spillRowContainer_->isNullAt(getRowPtr(row), columns_[col])) {
-          hasNulls = true;
-          ++nullCount;
+  processInBatches(
+      minRow,
+      rangeSize,
+      [this](vector_size_t start, vector_size_t end) {
+        ensureRowsLoaded(start, end);
+      },
+      [this, minRow, rawNulls, &mappedColumn, &hasNulls, &nullCount](
+          vector_size_t batchStart,
+          vector_size_t batchSize,
+          vector_size_t /*processedRows*/) {
+        for (vector_size_t row = batchStart; row < batchStart + batchSize;
+             ++row) {
+          if (row >= cacheStartRow_ && row < cacheEndRow_) {
+            auto isNull =
+                spillRowContainer_->isNullAt(getRowPtr(row), mappedColumn);
+            bits::setBit(rawNulls, row - minRow, isNull);
+            if (isNull) {
+              hasNulls = true;
+              ++nullCount;
+            }
+          }
         }
-      }
-    }
-  });
+      });
 
   if (!hasNulls) {
     return std::nullopt;
   }
 
-  // Build null bitmap for cached rows.
-  auto numCachedRows = cacheEndRow_ - cacheStartRow_;
-  *nulls = AlignedBuffer::allocate<bool>(
-      numCachedRows, spillRowContainer_->pool(), false);
-  auto rawNulls = (*nulls)->asMutable<uint64_t>();
-
-  for (vector_size_t i = 0; i < numCachedRows; ++i) {
-    auto isNull = spillRowContainer_->isNullAt(cachedRows_[i], columns_[col]);
-    bits::setBit(rawNulls, i, isNull);
-  }
-
-  return std::make_pair(cacheStartRow_, nullCount);
+  return std::make_pair(minRow, nullCount);
 }
 
 std::pair<vector_size_t, vector_size_t>
