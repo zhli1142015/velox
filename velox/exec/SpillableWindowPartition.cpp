@@ -400,6 +400,8 @@ SpillableWindowPartition::extractNulls(
   }
 
   auto rangeSize = maxRow - minRow;
+  // Capture minRow in a local variable for lambda capture (C++17 limitation).
+  auto frameMinRow = minRow;
 
   // Allocate the null bitmap for the entire range.
   *nulls = AlignedBuffer::allocate<bool>(
@@ -417,7 +419,7 @@ SpillableWindowPartition::extractNulls(
       [this](vector_size_t start, vector_size_t end) {
         ensureRowsLoaded(start, end);
       },
-      [this, minRow, rawNulls, &mappedColumn, &hasNulls, &nullCount](
+      [this, frameMinRow, rawNulls, &mappedColumn, &hasNulls, &nullCount](
           vector_size_t batchStart,
           vector_size_t batchSize,
           vector_size_t /*processedRows*/) {
@@ -426,7 +428,7 @@ SpillableWindowPartition::extractNulls(
           if (row >= cacheStartRow_ && row < cacheEndRow_) {
             auto isNull =
                 spillRowContainer_->isNullAt(getRowPtr(row), mappedColumn);
-            bits::setBit(rawNulls, row - minRow, isNull);
+            bits::setBit(rawNulls, row - frameMinRow, isNull);
             if (isNull) {
               hasNulls = true;
               ++nullCount;
