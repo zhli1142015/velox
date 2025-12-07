@@ -59,11 +59,11 @@ class WindowPartition {
           sortKeyInfo);
 
   /// Adds remaining input 'rows' for a partial window partition.
-  void addRows(const std::vector<char*>& rows);
+  virtual void addRows(const std::vector<char*>& rows);
 
   /// Removes the first 'numRows' in 'rows_' from a partial window partition
   /// after been processed.
-  void removeProcessedRows(vector_size_t numRows);
+  virtual void removeProcessedRows(vector_size_t numRows);
 
   /// Returns the number of rows in the current WindowPartition.
   virtual vector_size_t numRows() const {
@@ -194,6 +194,15 @@ class WindowPartition {
           sortKeyInfo,
       bool partial,
       bool complete);
+
+  /// Protected constructor for VectorBasedWindowPartition that doesn't use
+  /// RowContainer. This allows derived classes to implement vector-based
+  /// storage without the overhead of RowContainer.
+  WindowPartition(
+      const std::vector<column_index_t>& inputMapping,
+      const std::vector<std::pair<column_index_t, core::SortOrder>>&
+          sortKeyInfo,
+      bool partial);
 
   bool compareRowsWithSortKeys(const char* lhs, const char* rhs) const;
 

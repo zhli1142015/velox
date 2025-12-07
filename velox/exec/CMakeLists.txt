@@ -105,7 +105,9 @@ velox_add_library(
   TraceUtil.cpp
   Unnest.cpp
   Values.cpp
+  VectorBasedWindowPartition.cpp
   VectorHasher.cpp
+  VectorRowsStreamingWindowBuild.cpp
   Window.cpp
   WindowBuild.cpp
   WindowFunction.cpp

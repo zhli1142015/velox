@@ -19,8 +19,8 @@
 #include "velox/common/file/FileSystems.h"
 #include "velox/exec/OrderBy.h"
 #include "velox/exec/PlanNodeStats.h"
-#include "velox/exec/RowsStreamingWindowBuild.h"
 #include "velox/exec/SortWindowBuild.h"
+#include "velox/exec/VectorRowsStreamingWindowBuild.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
@@ -343,9 +343,9 @@ DEBUG_ONLY_TEST_F(WindowTest, aggWindowResultMismatch) {
 
   std::atomic_bool isStreamCreated{false};
   SCOPED_TESTVALUE_SET(
-      "facebook::velox::exec::RowsStreamingWindowBuild::RowsStreamingWindowBuild",
-      std::function<void(RowsStreamingWindowBuild*)>(
-          [&](RowsStreamingWindowBuild* windowBuild) {
+      "facebook::velox::exec::VectorRowsStreamingWindowBuild::VectorRowsStreamingWindowBuild",
+      std::function<void(VectorRowsStreamingWindowBuild*)>(
+          [&](VectorRowsStreamingWindowBuild* windowBuild) {
             isStreamCreated.store(true);
           }));
 
@@ -376,9 +376,9 @@ DEBUG_ONLY_TEST_F(WindowTest, rankRowStreamingWindowBuild) {
 
   std::atomic_bool isStreamCreated{false};
   SCOPED_TESTVALUE_SET(
-      "facebook::velox::exec::RowsStreamingWindowBuild::RowsStreamingWindowBuild",
-      std::function<void(RowsStreamingWindowBuild*)>(
-          [&](RowsStreamingWindowBuild* windowBuild) {
+      "facebook::velox::exec::VectorRowsStreamingWindowBuild::VectorRowsStreamingWindowBuild",
+      std::function<void(VectorRowsStreamingWindowBuild*)>(
+          [&](VectorRowsStreamingWindowBuild* windowBuild) {
             isStreamCreated.store(true);
           }));
 
@@ -419,9 +419,9 @@ DEBUG_ONLY_TEST_F(WindowTest, valuesRowsStreamingWindowBuild) {
 
   std::atomic_bool isStreamCreated{false};
   SCOPED_TESTVALUE_SET(
-      "facebook::velox::exec::RowsStreamingWindowBuild::RowsStreamingWindowBuild",
-      std::function<void(RowsStreamingWindowBuild*)>(
-          [&](RowsStreamingWindowBuild* windowBuild) {
+      "facebook::velox::exec::VectorRowsStreamingWindowBuild::VectorRowsStreamingWindowBuild",
+      std::function<void(VectorRowsStreamingWindowBuild*)>(
+          [&](VectorRowsStreamingWindowBuild* windowBuild) {
             isStreamCreated.store(true);
           }));
 
@@ -572,9 +572,9 @@ DEBUG_ONLY_TEST_F(WindowTest, aggregationWithNonDefaultFrame) {
 
   std::atomic_bool isStreamCreated{false};
   SCOPED_TESTVALUE_SET(
-      "facebook::velox::exec::RowsStreamingWindowBuild::RowsStreamingWindowBuild",
-      std::function<void(RowsStreamingWindowBuild*)>(
-          [&](RowsStreamingWindowBuild* windowBuild) {
+      "facebook::velox::exec::VectorRowsStreamingWindowBuild::VectorRowsStreamingWindowBuild",
+      std::function<void(VectorRowsStreamingWindowBuild*)>(
+          [&](VectorRowsStreamingWindowBuild* windowBuild) {
             isStreamCreated.store(true);
           }));
 
@@ -605,9 +605,9 @@ DEBUG_ONLY_TEST_F(WindowTest, nonRowsStreamingWindow) {
 
   std::atomic_bool isStreamCreated{false};
   SCOPED_TESTVALUE_SET(
-      "facebook::velox::exec::RowsStreamingWindowBuild::RowsStreamingWindowBuild",
-      std::function<void(RowsStreamingWindowBuild*)>(
-          [&](RowsStreamingWindowBuild* windowBuild) {
+      "facebook::velox::exec::VectorRowsStreamingWindowBuild::VectorRowsStreamingWindowBuild",
+      std::function<void(VectorRowsStreamingWindowBuild*)>(
+          [&](VectorRowsStreamingWindowBuild* windowBuild) {
             isStreamCreated.store(true);
           }));
 

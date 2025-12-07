@@ -16,10 +16,10 @@
 #include "velox/exec/Window.h"
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/PartitionStreamingWindowBuild.h"
-#include "velox/exec/RowsStreamingWindowBuild.h"
 #include "velox/exec/SortWindowBuild.h"
 #include "velox/exec/SubPartitionedSortWindowBuild.h"
 #include "velox/exec/Task.h"
+#include "velox/exec/VectorRowsStreamingWindowBuild.h"
 
 namespace facebook::velox::exec {
 
@@ -60,7 +60,7 @@ Window::Window(
   }
   if (windowNode->inputsSorted()) {
     if (supportRowsStreaming()) {
-      windowBuild_ = std::make_unique<RowsStreamingWindowBuild>(
+      windowBuild_ = std::make_unique<VectorRowsStreamingWindowBuild>(
           windowNode_, pool(), spillConfig, &nonReclaimableSection_);
     } else {
       windowBuild_ = std::make_unique<PartitionStreamingWindowBuild>(
