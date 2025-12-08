@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 #include "velox/exec/Window.h"
+#include <iostream>
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/PartitionStreamingWindowBuild.h"
 #include "velox/exec/SortWindowBuild.h"
 #include "velox/exec/SubPartitionedSortWindowBuild.h"
 #include "velox/exec/Task.h"
+#include "velox/exec/VectorPartitionStreamingWindowBuild.h"
 #include "velox/exec/VectorRowsStreamingWindowBuild.h"
 
 namespace facebook::velox::exec {
@@ -63,7 +65,7 @@ Window::Window(
       windowBuild_ = std::make_unique<VectorRowsStreamingWindowBuild>(
           windowNode_, pool(), spillConfig, &nonReclaimableSection_);
     } else {
-      windowBuild_ = std::make_unique<PartitionStreamingWindowBuild>(
+      windowBuild_ = std::make_unique<VectorPartitionStreamingWindowBuild>(
           windowNode,
           pool(),
           spillConfig,

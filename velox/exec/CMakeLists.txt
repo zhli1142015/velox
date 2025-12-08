@@ -107,7 +107,9 @@ velox_add_library(
   Values.cpp
   VectorBasedWindowPartition.cpp
   VectorHasher.cpp
+  VectorPartitionStreamingWindowBuild.cpp
   VectorRowsStreamingWindowBuild.cpp
+  SpillableVectorBasedWindowPartition.cpp
   Window.cpp
   WindowBuild.cpp
   WindowFunction.cpp

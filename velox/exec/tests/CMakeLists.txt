@@ -39,6 +39,7 @@ target_link_libraries(
 add_executable(
   velox_exec_test
   Main.cpp
+  SpillableVectorBasedWindowPartitionTest.cpp
   VectorBasedStreamingWindowTest.cpp
   WindowFunctionRegistryTest.cpp
   WindowSpillTest.cpp
