@@ -180,6 +180,10 @@ class SpillableVectorBasedWindowPartition : public WindowPartition {
   std::pair<size_t, vector_size_t> findFileForRow(
       vector_size_t targetRow) const;
 
+  /// Pre-calculates file row ranges from spillFiles_.numRows.
+  /// Each entry is [startRow, endRow) for that file.
+  void initFileRowRanges() const;
+
   /// Ensures rows in range [startRow, startRow + numRows) are in cache.
   void ensureRowsCached(vector_size_t startRow, vector_size_t numRows) const;
 
@@ -250,10 +254,15 @@ class SpillableVectorBasedWindowPartition : public WindowPartition {
   SpillFiles spillFiles_;
   vector_size_t totalRows_{0};
 
-  // Spill file reading state.
-  mutable std::vector<std::unique_ptr<SpillMergeStream>> spillStreams_;
+  // Spill file reading state using batch streams (more efficient for
+  // sequential reads than SpillMergeStream which is designed for merge sort).
+  mutable std::vector<std::unique_ptr<BatchStream>> batchStreams_;
   mutable size_t currentFileIndex_{0};
   mutable std::vector<std::pair<vector_size_t, vector_size_t>> fileRowRanges_;
+
+  // Current batch state for sequential reading.
+  mutable RowVectorPtr currentBatch_;
+  mutable vector_size_t currentBatchIndex_{0};
 
   // Configuration and resources.
   RowTypePtr inputType_;

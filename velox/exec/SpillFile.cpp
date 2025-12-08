@@ -100,6 +100,7 @@ SpillFiles SpillWriter::finish() {
             .type = type_,
             .path = fileInfo.path,
             .size = fileInfo.size,
+            .numRows = fileInfo.numRows,
             .sortingKeys = sortingKeys_,
             .compressionKind = serdeOptions_->compressionKind});
   }

@@ -299,21 +299,32 @@ void VectorPartitionStreamingWindowBuild::preservePreviousRef() {
 RowVectorPtr VectorPartitionStreamingWindowBuild::copyBlockToRowVector(
     const RowBlock& block) {
   auto numRows = block.size();
-  auto result = BaseVector::create<RowVector>(inputType_, numRows, pool_);
 
   // inputType_ is in reordered format (partition keys, sort keys, rest).
   // block.input stores original input vectors (user's column order).
   // inputChannels_[reorderedPos] = originalColumnIndex
-  for (auto i = 0; i < inputType_->size(); ++i) {
-    auto originalCol = inputChannels_[i];
-    result->childAt(i)->copy(
-        block.input->childAt(originalCol).get(),
-        0, // targetIndex
-        block.startRow, // sourceIndex
-        numRows); // count
+
+  // Optimization: avoid copying data by reusing existing vectors.
+  // For full vectors, directly reference the child vectors with reordered
+  // indices. For partial vectors, use slice to create a view.
+  std::vector<VectorPtr> children(inputType_->size());
+
+  if (block.startRow == 0 &&
+      block.endRow == static_cast<vector_size_t>(block.input->size())) {
+    // Full vector: directly reference child vectors with reordered indices.
+    for (auto i = 0; i < inputType_->size(); ++i) {
+      children[i] = block.input->childAt(inputChannels_[i]);
+    }
+  } else {
+    // Partial vector: create slices with reordered indices.
+    for (auto i = 0; i < inputType_->size(); ++i) {
+      children[i] = block.input->childAt(inputChannels_[i])
+                        ->slice(block.startRow, numRows);
+    }
   }
 
-  return result;
+  return std::make_shared<RowVector>(
+      pool_, inputType_, nullptr, numRows, std::move(children));
 }
 
 RowVectorPtr VectorPartitionStreamingWindowBuild::extractSingleRow(
@@ -336,6 +347,9 @@ void VectorPartitionStreamingWindowBuild::ensureSpiller() {
         HashBitRange{},
         spillConfig_,
         spillStats_);
+    // Pre-set partition 0 as spilled to avoid race conditions in some
+    // implementations that check partition state before appending.
+    spiller_->setPartitionsSpilled({SpillPartitionId(0)});
   }
 }
 

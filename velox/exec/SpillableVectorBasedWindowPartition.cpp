@@ -80,9 +80,9 @@ SpillableVectorBasedWindowPartition::SpillableVectorBasedWindowPartition(
     originalToReordered_[inputMapping[i]] = i;
   }
 
-  // Initialize spill reading state.
+  // Initialize spill reading state with pre-calculated file row ranges.
   if (!spillFiles_.empty()) {
-    fileRowRanges_.resize(spillFiles_.size(), {0, 0});
+    initFileRowRanges();
     createSpillStreams();
   }
 }
@@ -356,6 +356,10 @@ void SpillableVectorBasedWindowPartition::spillRowsToFiles() {
       spillConfig_,
       spillStats_);
 
+  // Pre-set partition 0 as spilled to avoid race conditions in some
+  // implementations that check partition state before appending.
+  spiller->setPartitionsSpilled({SpillPartitionId(0)});
+
   // Spill all blocks (must deep copy to break shared references).
   for (const auto& block : originalBlocks_) {
     auto spillVector = copyBlockToRowVector(block);
@@ -380,9 +384,9 @@ void SpillableVectorBasedWindowPartition::transitionToSpillMode() {
   // Switch to spill mode.
   spilled_ = true;
 
-  // Initialize spill reading state.
+  // Initialize spill reading state with pre-calculated file row ranges.
   if (!spillFiles_.empty()) {
-    fileRowRanges_.resize(spillFiles_.size(), {0, 0});
+    initFileRowRanges();
     createSpillStreams();
     cacheStartRow_ = 0;
     cacheEndRow_ = 0;
@@ -415,40 +419,36 @@ void SpillableVectorBasedWindowPartition::createSpillStreams(
     size_t startFileIndex) const {
   VELOX_CHECK(!spillFiles_.empty(), "No spill files available");
 
-  spillStreams_.clear();
-  spillStreams_.reserve(spillFiles_.size() - startFileIndex);
+  batchStreams_.clear();
+  batchStreams_.reserve(spillFiles_.size() - startFileIndex);
 
   for (size_t i = startFileIndex; i < spillFiles_.size(); ++i) {
     auto readFile = SpillReadFile::create(
         spillFiles_[i], readBufferSize_, pool_, spillStats_);
-    spillStreams_.push_back(FileSpillMergeStream::create(std::move(readFile)));
+    batchStreams_.push_back(FileSpillBatchStream::create(std::move(readFile)));
   }
 
   currentFileIndex_ = 0;
+  currentBatch_.reset();
+  currentBatchIndex_ = 0;
 }
 
 void SpillableVectorBasedWindowPartition::clearCache() const {
   cache_.clear();
   cacheRowCount_ = 0;
+  currentBatch_.reset();
+  currentBatchIndex_ = 0;
 }
 
 void SpillableVectorBasedWindowPartition::seekToRow(
     vector_size_t targetRow) const {
   clearCache();
 
-  // Find the file containing the target row.
+  // Find the file containing the target row using pre-calculated ranges.
   auto [fileIndex, fileStartRow] = findFileForRow(targetRow);
 
   // Recreate streams starting from that file.
   createSpillStreams(fileIndex);
-
-  // Reset file row ranges.
-  for (size_t i = fileIndex; i < fileRowRanges_.size(); ++i) {
-    fileRowRanges_[i] = {0, 0};
-  }
-  if (fileIndex < fileRowRanges_.size()) {
-    fileRowRanges_[fileIndex].first = fileStartRow;
-  }
 
   cacheStartRow_ = cacheEndRow_ = fileStartRow;
 
@@ -461,21 +461,57 @@ void SpillableVectorBasedWindowPartition::seekToRow(
 void SpillableVectorBasedWindowPartition::skipRowsInFile(
     size_t startFileIndex,
     vector_size_t targetRow) const {
-  while (cacheEndRow_ < targetRow && currentFileIndex_ < spillStreams_.size()) {
-    auto& stream = spillStreams_[currentFileIndex_];
-    if (!stream->hasData()) {
-      auto fileIdx = startFileIndex + currentFileIndex_;
-      if (fileRowRanges_[fileIdx].second == 0) {
-        fileRowRanges_[fileIdx].second = cacheEndRow_;
-      }
+  while (cacheEndRow_ < targetRow && currentFileIndex_ < batchStreams_.size()) {
+    auto fileIdx = startFileIndex + currentFileIndex_;
+    auto [fileStart, fileEnd] = fileRowRanges_[fileIdx];
+
+    // If targetRow is at or beyond this file's end, skip the entire file
+    // without reading any data - just move to the next file.
+    if (targetRow >= fileEnd) {
+      cacheEndRow_ = fileEnd;
       ++currentFileIndex_;
-      if (currentFileIndex_ < spillStreams_.size()) {
-        fileRowRanges_[startFileIndex + currentFileIndex_].first = cacheEndRow_;
-      }
+      currentBatch_.reset();
+      currentBatchIndex_ = 0;
       continue;
     }
-    stream->pop(); // Move one row at a time.
-    ++cacheEndRow_;
+
+    // Target is within this file. Use batch operations to skip efficiently.
+    auto& stream = batchStreams_[currentFileIndex_];
+
+    // Load batch if needed.
+    if (!currentBatch_) {
+      if (!stream->nextBatch(currentBatch_)) {
+        // No more data in this file.
+        ++currentFileIndex_;
+        currentBatch_.reset();
+        currentBatchIndex_ = 0;
+        continue;
+      }
+      currentBatchIndex_ = 0;
+    }
+
+    // Calculate how many rows to skip in this batch.
+    auto remainingInBatch = currentBatch_->size() - currentBatchIndex_;
+    auto rowsToSkip = std::min(
+        static_cast<vector_size_t>(remainingInBatch), targetRow - cacheEndRow_);
+
+    currentBatchIndex_ += rowsToSkip;
+    cacheEndRow_ += rowsToSkip;
+
+    // If batch exhausted, clear it to load next one.
+    if (currentBatchIndex_ >= currentBatch_->size()) {
+      currentBatch_.reset();
+      currentBatchIndex_ = 0;
+    }
+  }
+}
+
+void SpillableVectorBasedWindowPartition::initFileRowRanges() const {
+  fileRowRanges_.resize(spillFiles_.size());
+  vector_size_t currentRow = 0;
+  for (size_t i = 0; i < spillFiles_.size(); ++i) {
+    fileRowRanges_[i] = {currentRow, currentRow + spillFiles_[i].numRows};
+    currentRow += spillFiles_[i].numRows;
   }
 }
 
@@ -486,27 +522,27 @@ SpillableVectorBasedWindowPartition::findFileForRow(
     return {0, 0};
   }
 
-  for (size_t i = 0; i < fileRowRanges_.size(); ++i) {
-    auto [fileStart, fileEnd] = fileRowRanges_[i];
+  // Since fileRowRanges_ is pre-calculated from spillFiles_.numRows,
+  // use binary search for O(log n) lookup.
+  size_t low = 0;
+  size_t high = fileRowRanges_.size();
 
-    // File has been read and contains target row.
-    if (fileEnd > 0 && fileStart <= targetRow && targetRow < fileEnd) {
-      return {i, fileStart};
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    auto [fileStart, fileEnd] = fileRowRanges_[mid];
+
+    if (targetRow < fileStart) {
+      high = mid;
+    } else if (targetRow >= fileEnd) {
+      low = mid + 1;
+    } else {
+      // targetRow is in [fileStart, fileEnd)
+      return {mid, fileStart};
     }
-
-    // Target is after this file, continue searching.
-    if (fileEnd > 0 && targetRow >= fileEnd) {
-      continue;
-    }
-
-    // File not yet read or target is before known range.
-    vector_size_t startRow = (i > 0 && fileRowRanges_[i - 1].second > 0)
-        ? fileRowRanges_[i - 1].second
-        : 0;
-    return {i, startRow};
   }
 
-  return {0, 0};
+  // Should not reach here if targetRow < totalRows_.
+  VELOX_FAIL("Target row {} not found in any spill file", targetRow);
 }
 
 void SpillableVectorBasedWindowPartition::ensureRowsCached(
@@ -540,54 +576,53 @@ void SpillableVectorBasedWindowPartition::loadRowsIntoCache(
   // Try to evict old rows before loading new ones.
   tryEvictOldRows(minRequiredRow, rowsToLoad);
 
-  // Load rows from spill files.
+  // Load rows from spill files using batch operations (no pop() needed).
   while (cacheEndRow_ < targetEndRow &&
-         currentFileIndex_ < spillStreams_.size()) {
-    auto& stream = spillStreams_[currentFileIndex_];
+         currentFileIndex_ < batchStreams_.size()) {
+    auto& stream = batchStreams_[currentFileIndex_];
 
-    if (!stream->hasData()) {
-      // Current file exhausted, move to next.
-      if (currentFileIndex_ < fileRowRanges_.size()) {
-        fileRowRanges_[currentFileIndex_].second = cacheEndRow_;
+    // Load batch if needed.
+    if (!currentBatch_) {
+      if (!stream->nextBatch(currentBatch_)) {
+        // Current file exhausted, move to next.
+        ++currentFileIndex_;
+        currentBatch_.reset();
+        currentBatchIndex_ = 0;
+        continue;
       }
-      ++currentFileIndex_;
-      if (currentFileIndex_ < spillStreams_.size()) {
-        fileRowRanges_[currentFileIndex_].first = cacheEndRow_;
-      }
-      continue;
+      currentBatchIndex_ = 0;
     }
 
-    // Get current batch and index.
-    const auto& rowVector = stream->current();
-    auto currentIndex = stream->currentIndex();
-    auto batchSize = rowVector.size();
-
     // Calculate remaining rows in this batch.
-    auto remainingInBatch = batchSize - currentIndex;
+    auto remainingInBatch = currentBatch_->size() - currentBatchIndex_;
 
     // Calculate how many rows to load from this batch.
     auto rowsNeeded = targetEndRow - cacheEndRow_;
     auto rowsToLoadFromBatch =
         std::min(static_cast<vector_size_t>(remainingInBatch), rowsNeeded);
 
-    // Copy needed rows to cache.
-    auto vectorCopy = std::dynamic_pointer_cast<RowVector>(
-        BaseVector::create(rowVector.type(), rowsToLoadFromBatch, pool_));
-    vectorCopy->copy(&rowVector, 0, currentIndex, rowsToLoadFromBatch);
+    // Add batch (or slice of it) to cache - no copy needed!
+    if (currentBatchIndex_ == 0 &&
+        rowsToLoadFromBatch == currentBatch_->size()) {
+      // Use entire batch directly.
+      cache_.push_back({currentBatch_, 0, rowsToLoadFromBatch});
+    } else {
+      // Use partial batch - store reference with offset.
+      cache_.push_back(
+          {currentBatch_,
+           currentBatchIndex_,
+           currentBatchIndex_ + rowsToLoadFromBatch});
+    }
 
-    cache_.push_back({vectorCopy, 0, rowsToLoadFromBatch});
     cacheEndRow_ += rowsToLoadFromBatch;
     cacheRowCount_ += rowsToLoadFromBatch;
+    currentBatchIndex_ += rowsToLoadFromBatch;
 
-    // Move stream position (pop() moves one row at a time).
-    for (vector_size_t i = 0; i < rowsToLoadFromBatch; ++i) {
-      stream->pop();
+    // If batch exhausted, clear it to load next one.
+    if (currentBatchIndex_ >= currentBatch_->size()) {
+      currentBatch_.reset();
+      currentBatchIndex_ = 0;
     }
-  }
-
-  // Update current file's end row.
-  if (currentFileIndex_ < fileRowRanges_.size()) {
-    fileRowRanges_[currentFileIndex_].second = cacheEndRow_;
   }
 }
 

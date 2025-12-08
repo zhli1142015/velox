@@ -120,6 +120,7 @@ class HashJoinBridgeTest : public testing::Test,
            rowType_,
            tempDir_->getPath() + "/Spill_" + std::to_string(fileId),
            1024,
+           0, // numRows
            SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
            common::CompressionKind_NONE});
     }

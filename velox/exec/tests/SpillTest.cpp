@@ -1444,6 +1444,7 @@ SpillFiles makeFakeSpillFiles(int32_t numFiles) {
          ROW({"k1", "k2"}, {BIGINT(), BIGINT()}),
          tempDir->getPath() + "/Spill_" + std::to_string(fileId),
          1024,
+         0, // numRows
          SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
          common::CompressionKind_NONE});
   }
@@ -1524,6 +1525,98 @@ TEST(SpillTest, scopedSpillInjectionRegex) {
     ASSERT_TRUE(testingTriggerSpill("op.1.0.0.Aggregation"));
     ASSERT_TRUE(testingTriggerSpill());
   }
+}
+
+// Test that SpillFileInfo correctly tracks numRows for each spill file.
+// This verifies the row count tracking feature that enables efficient
+// random access to spilled data without deserializing all files.
+TEST_P(SpillTest, spillFileNumRows) {
+  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  const std::string spillPath = tempDirectory->getPath() + "/test";
+
+  // Create test data with known row counts.
+  const int kNumBatches = 5;
+  const std::vector<int> rowsPerBatch = {100, 250, 50, 300, 150};
+
+  const std::optional<common::PrefixSortConfig> prefixSortConfig =
+      enablePrefixSort_
+      ? std::optional<common::PrefixSortConfig>(common::PrefixSortConfig())
+      : std::nullopt;
+
+  // Create spill state with small target file size to force multiple files.
+  folly::Synchronized<common::SpillStats> spillStats;
+  const auto sortingKeys = SpillState::makeSortingKeys({CompareFlags{}});
+  SpillState state(
+      [&]() -> const std::string& { return tempDirectory->getPath(); },
+      [&](uint64_t) {},
+      "numrows_test",
+      sortingKeys,
+      1, // targetFileSize = 1 to force new file per batch
+      0, // writeBufferSize
+      compressionKind_,
+      prefixSortConfig,
+      pool(),
+      &spillStats);
+
+  SpillPartitionId partitionId(0);
+  state.setPartitionSpilled(partitionId);
+
+  // Write batches with different row counts.
+  int64_t expectedTotalRows = 0;
+  for (int i = 0; i < kNumBatches; ++i) {
+    auto batch = makeRowVector({makeFlatVector<int64_t>(
+        rowsPerBatch[i], [&](auto row) { return i * 1000 + row; })});
+    state.appendToPartition(partitionId, batch);
+    expectedTotalRows += rowsPerBatch[i];
+    // Force new file after each batch.
+    state.finishFile(partitionId);
+  }
+
+  // Finish and get spill files.
+  auto spillFiles = state.finish(partitionId);
+
+  // Verify we got multiple files.
+  ASSERT_EQ(spillFiles.size(), kNumBatches);
+
+  // Verify numRows for each file matches what we wrote.
+  int64_t actualTotalRows = 0;
+  for (int i = 0; i < spillFiles.size(); ++i) {
+    ASSERT_EQ(spillFiles[i].numRows, rowsPerBatch[i])
+        << "File " << i << " has incorrect numRows";
+    actualTotalRows += spillFiles[i].numRows;
+  }
+
+  // Verify total row count.
+  ASSERT_EQ(actualTotalRows, expectedTotalRows);
+
+  // Verify we can use numRows to calculate cumulative row ranges
+  // (this is the pattern used in SpillableVectorBasedWindowPartition).
+  std::vector<vector_size_t> fileRowRanges;
+  fileRowRanges.reserve(spillFiles.size() + 1);
+  fileRowRanges.push_back(0);
+  for (const auto& file : spillFiles) {
+    fileRowRanges.push_back(fileRowRanges.back() + file.numRows);
+  }
+
+  ASSERT_EQ(fileRowRanges.size(), kNumBatches + 1);
+  ASSERT_EQ(fileRowRanges[0], 0);
+  ASSERT_EQ(fileRowRanges[1], rowsPerBatch[0]); // 100
+  ASSERT_EQ(fileRowRanges[2], rowsPerBatch[0] + rowsPerBatch[1]); // 350
+  ASSERT_EQ(fileRowRanges.back(), expectedTotalRows);
+
+  // Verify binary search works correctly for finding file by row.
+  auto findFileForRow = [&](vector_size_t row) -> size_t {
+    auto it = std::upper_bound(fileRowRanges.begin(), fileRowRanges.end(), row);
+    return std::distance(fileRowRanges.begin(), it) - 1;
+  };
+
+  // Test boundary conditions.
+  ASSERT_EQ(findFileForRow(0), 0); // First row -> file 0
+  ASSERT_EQ(findFileForRow(99), 0); // Last row of file 0
+  ASSERT_EQ(findFileForRow(100), 1); // First row of file 1
+  ASSERT_EQ(findFileForRow(349), 1); // Last row of file 1
+  ASSERT_EQ(findFileForRow(350), 2); // First row of file 2
+  ASSERT_EQ(findFileForRow(expectedTotalRows - 1), kNumBatches - 1); // Last row
 }
 
 VELOX_INSTANTIATE_TEST_SUITE_P(

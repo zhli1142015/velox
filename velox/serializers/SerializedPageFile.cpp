@@ -97,10 +97,12 @@ void SerializedPageFileWriter::closeFile() {
     return;
   }
   currentFile_->finish();
-  const auto& fileInfo = currentFile_->fileInfo();
+  auto fileInfo = currentFile_->fileInfo();
+  fileInfo.numRows = currentFileNumRows_;
   updateFileStats(fileInfo);
-  finishedFiles_.push_back(fileInfo);
+  finishedFiles_.push_back(std::move(fileInfo));
   currentFile_.reset();
+  currentFileNumRows_ = 0;
 }
 
 size_t SerializedPageFileWriter::numFinishedFiles() const {
@@ -114,6 +116,11 @@ uint64_t SerializedPageFileWriter::flush() {
 
   auto* file = ensureFile();
   VELOX_CHECK_NOT_NULL(file);
+
+  // Transfer pending rows to current file count.
+  // This must happen after ensureFile() since it may close the old file.
+  currentFileNumRows_ += pendingBatchRows_;
+  pendingBatchRows_ = 0;
 
   IOBufOutputStream out(
       *pool_, nullptr, std::max<int64_t>(64 * 1024, batch_->size()));
@@ -144,6 +151,12 @@ uint64_t SerializedPageFileWriter::write(
 
   checkNotFinished();
 
+  // Calculate total rows being appended from indices.
+  uint64_t rowsInBatch = 0;
+  for (const auto& range : indices) {
+    rowsInBatch += range.size;
+  }
+
   uint64_t timeNs{0};
   {
     NanosecondTimer timer(&timeNs);
@@ -156,6 +169,7 @@ uint64_t SerializedPageFileWriter::write(
     }
     batch_->append(rows, indices);
   }
+  pendingBatchRows_ += rowsInBatch;
   updateAppendStats(rows->size(), timeNs);
   if (batch_->size() < writeBufferSize_) {
     return 0;

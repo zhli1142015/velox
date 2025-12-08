@@ -41,6 +41,8 @@ struct SpillFileInfo {
   std::string path;
   /// The file size in bytes.
   uint64_t size;
+  /// The number of rows in this file.
+  uint64_t numRows{0};
   std::vector<SpillSortKey> sortingKeys;
   common::CompressionKind compressionKind;
 };

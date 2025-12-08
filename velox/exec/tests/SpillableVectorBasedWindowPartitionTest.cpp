@@ -1053,3 +1053,141 @@ TEST_F(SpillableVectorBasedWindowPartitionTest, streamingExtract) {
     }
   }
 }
+
+// Test that spill files correctly track numRows, enabling efficient file
+// lookup via pre-calculated file row ranges.
+TEST_F(SpillableVectorBasedWindowPartitionTest, spillFileNumRowsTracking) {
+  // Create data that will be written to spill files.
+  constexpr vector_size_t kTotalRows = 1000;
+  auto data = makeTestData(kTotalRows);
+
+  // Create blocks with specific batch sizes to control file boundaries.
+  // Small batches to ensure multiple writes per file.
+  auto blocks = createBlocks(data, 50);
+
+  // Spill the partition.
+  auto [partition, tempDir] = createSpilledPartition(blocks);
+  ASSERT_TRUE(partition->isSpilled());
+
+  // The partition should correctly handle random access patterns using
+  // pre-calculated file row ranges.
+
+  // Test 1: Sequential access - should work efficiently.
+  for (vector_size_t start = 0; start < kTotalRows; start += 100) {
+    auto count = std::min<vector_size_t>(100, kTotalRows - start);
+    auto result = BaseVector::create(BIGINT(), count, pool());
+    partition->extractColumn(0, start, count, 0, result);
+
+    auto flatResult = result->as<FlatVector<int64_t>>();
+    auto flatExpected = data->childAt(0)->as<FlatVector<int64_t>>();
+    for (vector_size_t i = 0; i < count; ++i) {
+      EXPECT_EQ(flatResult->valueAt(i), flatExpected->valueAt(start + i))
+          << "Mismatch at row " << (start + i);
+    }
+  }
+
+  // Test 2: Random access - should use binary search via findFileForRow.
+  std::vector<vector_size_t> randomOffsets = {
+      0, 999, 500, 250, 750, 100, 900, 50, 950, 1};
+  for (auto offset : randomOffsets) {
+    if (offset >= kTotalRows) {
+      continue;
+    }
+    auto result = BaseVector::create(BIGINT(), 1, pool());
+    partition->extractColumn(0, offset, 1, 0, result);
+
+    auto flatResult = result->as<FlatVector<int64_t>>();
+    auto flatExpected = data->childAt(0)->as<FlatVector<int64_t>>();
+    EXPECT_EQ(flatResult->valueAt(0), flatExpected->valueAt(offset))
+        << "Random access mismatch at offset " << offset;
+  }
+
+  // Test 3: Backward access - should efficiently seek using file ranges.
+  auto result1 = BaseVector::create(BIGINT(), 10, pool());
+  partition->extractColumn(0, 900, 10, 0, result1);
+
+  auto result2 = BaseVector::create(BIGINT(), 10, pool());
+  partition->extractColumn(0, 100, 10, 0, result2); // Backward seek
+
+  auto flatExpected = data->childAt(0)->as<FlatVector<int64_t>>();
+  auto flatResult2 = result2->as<FlatVector<int64_t>>();
+  for (vector_size_t i = 0; i < 10; ++i) {
+    EXPECT_EQ(flatResult2->valueAt(i), flatExpected->valueAt(100 + i));
+  }
+}
+
+// Test that multiple spill files are created and each tracks its row count
+// correctly, enabling efficient cross-file access.
+TEST_F(SpillableVectorBasedWindowPartitionTest, multipleSpillFilesRowCounts) {
+  // Create larger data to ensure multiple spill files.
+  // With default file size limits, this should create multiple files.
+  constexpr vector_size_t kTotalRows = 5000;
+  auto data = makeTestData(kTotalRows);
+
+  // Use small batches to encourage multiple files.
+  auto blocks = createBlocks(data, 100);
+
+  auto [partition, tempDir] = createSpilledPartition(blocks);
+  ASSERT_TRUE(partition->isSpilled());
+
+  // Verify we can access data from any part of the dataset.
+  // This tests that file row ranges are correctly computed.
+
+  // Access first row.
+  auto result = BaseVector::create(BIGINT(), 1, pool());
+  partition->extractColumn(0, 0, 1, 0, result);
+  EXPECT_EQ(result->as<FlatVector<int64_t>>()->valueAt(0), 0);
+
+  // Access last row.
+  partition->extractColumn(0, kTotalRows - 1, 1, 0, result);
+  EXPECT_EQ(result->as<FlatVector<int64_t>>()->valueAt(0), kTotalRows - 1);
+
+  // Access middle row.
+  partition->extractColumn(0, kTotalRows / 2, 1, 0, result);
+  EXPECT_EQ(result->as<FlatVector<int64_t>>()->valueAt(0), kTotalRows / 2);
+
+  // Test large range extraction across potential file boundaries.
+  auto largeResult = BaseVector::create(BIGINT(), kTotalRows, pool());
+  partition->extractColumn(0, 0, kTotalRows, 0, largeResult);
+
+  auto flatResult = largeResult->as<FlatVector<int64_t>>();
+  auto flatExpected = data->childAt(0)->as<FlatVector<int64_t>>();
+  for (vector_size_t i = 0; i < kTotalRows; ++i) {
+    EXPECT_EQ(flatResult->valueAt(i), flatExpected->valueAt(i))
+        << "Mismatch at row " << i;
+  }
+}
+
+// Test that backward seeks correctly use pre-calculated file ranges
+// to skip entire files without reading.
+TEST_F(SpillableVectorBasedWindowPartitionTest, efficientBackwardSeek) {
+  constexpr vector_size_t kTotalRows = 2000;
+  auto data = makeTestData(kTotalRows);
+  auto blocks = createBlocks(data, 50);
+
+  auto [partition, tempDir] = createSpilledPartition(blocks);
+  ASSERT_TRUE(partition->isSpilled());
+
+  // First, read from the end.
+  auto result1 = BaseVector::create(BIGINT(), 100, pool());
+  partition->extractColumn(0, 1900, 100, 0, result1);
+
+  // Now seek backward to the beginning - should use file ranges to skip.
+  auto result2 = BaseVector::create(BIGINT(), 100, pool());
+  partition->extractColumn(0, 0, 100, 0, result2);
+
+  auto flatExpected = data->childAt(0)->as<FlatVector<int64_t>>();
+  auto flatResult = result2->as<FlatVector<int64_t>>();
+  for (vector_size_t i = 0; i < 100; ++i) {
+    EXPECT_EQ(flatResult->valueAt(i), flatExpected->valueAt(i));
+  }
+
+  // Now read from middle.
+  auto result3 = BaseVector::create(BIGINT(), 100, pool());
+  partition->extractColumn(0, 1000, 100, 0, result3);
+
+  auto flatResult3 = result3->as<FlatVector<int64_t>>();
+  for (vector_size_t i = 0; i < 100; ++i) {
+    EXPECT_EQ(flatResult3->valueAt(i), flatExpected->valueAt(1000 + i));
+  }
+}
