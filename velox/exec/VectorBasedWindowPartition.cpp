@@ -56,6 +56,10 @@ void VectorBasedWindowPartition::extractColumn(
     return;
   }
 
+  // Resize result vector to accommodate the data, matching RowContainer
+  // behavior.
+  result->resize(numRows + resultOffset);
+
   vector_size_t globalRow = partitionOffset - startRow_;
   auto [blockIdx, localRow] = findBlock(globalRow);
 
@@ -95,6 +99,10 @@ void VectorBasedWindowPartition::extractColumn(
   if (rowNumbers.empty()) {
     return;
   }
+
+  // Resize result vector to accommodate the data, matching RowContainer
+  // behavior.
+  result->resize(rowNumbers.size() + resultOffset);
 
   // Track current block to avoid repeated findBlock calls for adjacent rows
   size_t currentBlockIdx = 0;
@@ -150,6 +158,7 @@ void VectorBasedWindowPartition::extractNulls(
   }
 
   auto* rawNulls = nullsBuffer->asMutable<uint64_t>();
+  bits::fillBits(rawNulls, 0, numRows, false);
   vector_size_t globalRow = partitionOffset - startRow_;
   auto [blockIdx, localRow] = findBlock(globalRow);
 
@@ -161,14 +170,10 @@ void VectorBasedWindowPartition::extractNulls(
     auto toProcess = std::min(available, numRows - processed);
 
     // Process rows in the current block.
-    // Use bits::setNull/clearNull for correct null semantics:
-    // - setNull(bits, idx) = clearBit = 0 = null
-    // - clearNull(bits, idx) = setBit = 1 = not null
+    // Mark null positions with bit=1 (matching RowContainer semantics).
     for (vector_size_t j = 0; j < toProcess; ++j) {
       if (child->isNullAt(localRow + j)) {
-        bits::setNull(rawNulls, processed + j);
-      } else {
-        bits::clearNull(rawNulls, processed + j);
+        bits::setBit(rawNulls, processed + j, true);
       }
     }
 

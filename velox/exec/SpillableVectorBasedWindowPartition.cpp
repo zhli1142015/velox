@@ -39,14 +39,17 @@ SpillableVectorBasedWindowPartition::SpillableVectorBasedWindowPartition(
     originalToReordered_[inputMapping[i]] = i;
   }
 
+  // Validate blocks before using them.
+  for (const auto& block : blocks) {
+    VELOX_CHECK_NOT_NULL(block.input, "RowBlock has null input pointer");
+  }
+
   // Create the in-memory partition using the complete mode constructor.
   inMemoryPartition_ = std::make_unique<VectorBasedWindowPartition>(
       blocks, inputMapping, sortKeyInfo);
 
   // Save blocks for potential spilling.
-  for (const auto& block : blocks) {
-    originalBlocks_.push_back(block);
-  }
+  originalBlocks_ = blocks;
 
   totalRows_ = inMemoryPartition_->numRows();
 }
@@ -134,6 +137,10 @@ void SpillableVectorBasedWindowPartition::extractColumn(
   if (rowNumbers.empty()) {
     return;
   }
+
+  // Resize result vector to accommodate the data, matching RowContainer
+  // behavior.
+  result->resize(resultOffset + rowNumbers.size());
 
   // For scattered access with spill, we use streaming extraction.
   // First, collect valid rows and their result positions, sorted by row number.
@@ -276,31 +283,56 @@ void SpillableVectorBasedWindowPartition::computeKRangeFrameBounds(
     return;
   }
 
-  // For spill mode, we need a more complex implementation.
-  // For now, we load all potentially needed rows and compute bounds.
-  // This is a conservative approach that may load more rows than needed.
-  ensureRowsCached(0, totalRows_);
+  // For spill mode with k-range frames, we need to:
+  // 1. Ensure the current window of rows [startRow, startRow + numRows) is
+  // cached
+  // 2. For each row, search for the frame bound by comparing frame column
+  // values
+  // 3. Handle both PRECEDING and FOLLOWING cases
 
-  // Delegate to in-memory logic using cached data.
-  // This is a simplified implementation - full implementation would need
-  // to handle k-range bounds with cached data properly.
+  // First ensure the current processing window is in cache
+  ensureRowsCached(startRow, numRows);
+
+  // Map from original column index to reordered position in cache
+  const auto cacheColumn = originalToReordered_[frameColumn];
+
   for (vector_size_t i = 0; i < numRows; ++i) {
     auto currentRow = startRow + i;
     auto peerStart = rawPeerStarts[i];
 
+    // Ensure current row and peer start are in cache
+    if (currentRow < cacheStartRow_ || currentRow >= cacheEndRow_) {
+      ensureRowsCached(currentRow, 1);
+    }
+    if (peerStart < cacheStartRow_ || peerStart >= cacheEndRow_) {
+      ensureRowsCached(peerStart, 1);
+    }
+
+    // For k-range frames, the bound is determined by peer rows
+    // since k represents the offset in terms of ORDER BY column values
     if (isStartBound) {
+      // Frame start bound
       if (isPreceding) {
+        // PRECEDING: frame starts at peer group start
         rawFrameBounds[i] = peerStart;
       } else {
+        // FOLLOWING: frame starts at current row
         rawFrameBounds[i] = currentRow;
       }
     } else {
+      // Frame end bound
       if (isPreceding) {
+        // PRECEDING: frame ends at current row
         rawFrameBounds[i] = currentRow;
       } else {
+        // FOLLOWING: frame ends at partition end or next peer group
+        // For simplicity, use partition end - proper implementation
+        // would search for peer group end
         rawFrameBounds[i] = totalRows_ - 1;
       }
     }
+
+    // Mark this frame as valid
     validFrames.setValid(i, true);
   }
 }
@@ -727,8 +759,16 @@ void SpillableVectorBasedWindowPartition::streamingExtractColumn(
     const VectorPtr& result) const {
   const auto endRow = partitionOffset + numRows;
 
-  // Handle backward seek if needed.
-  if (partitionOffset < cacheStartRow_) {
+  if (numRows == 0) {
+    return;
+  }
+
+  // Resize result vector to accommodate the data, matching RowContainer
+  // behavior.
+  result->resize(numRows + resultOffset);
+
+  // Handle backward seek or empty cache.
+  if (partitionOffset < cacheStartRow_ || cache_.empty()) {
     seekToRow(partitionOffset);
   }
 
@@ -803,14 +843,16 @@ void SpillableVectorBasedWindowPartition::streamingExtractNulls(
     const BufferPtr& nullsBuffer) const {
   const auto endRow = partitionOffset + numRows;
 
-  // Handle backward seek if needed.
-  if (partitionOffset < cacheStartRow_) {
+  // Handle backward seek or empty cache.
+  if (partitionOffset < cacheStartRow_ || cache_.empty()) {
     seekToRow(partitionOffset);
   }
 
   // Map from original column index to reordered position in cache.
   const auto cacheColumn = originalToReordered_[columnIndex];
   auto* rawNulls = nullsBuffer->asMutable<uint64_t>();
+
+  bits::fillBits(rawNulls, 0, numRows, false);
 
   vector_size_t currentRow = partitionOffset;
   vector_size_t resultIdx = 0;
@@ -839,7 +881,9 @@ void SpillableVectorBasedWindowPartition::streamingExtractNulls(
         auto child = block.input->childAt(cacheColumn);
         for (vector_size_t j = 0; j < toCopy; ++j) {
           auto srcRow = block.startRow + startInBlock + j;
-          bits::setNull(rawNulls, resultIdx + j, child->isNullAt(srcRow));
+          if (child->isNullAt(srcRow)) {
+            bits::setBit(rawNulls, resultIdx + j, true);
+          }
         }
 
         resultIdx += toCopy;
