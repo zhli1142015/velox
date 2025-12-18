@@ -24,6 +24,7 @@ endif()
 
 velox_add_library(
   velox_dwio_common
+  AsyncChunkedReader.cpp
   BitConcatenation.cpp
   BitPackDecoder.cpp
   BufferedInput.cpp
@@ -48,6 +49,7 @@ velox_add_library(
   OutputStream.cpp
   ParallelUnitLoader.cpp
   ParallelFor.cpp
+  PrefetchBufferedInput.cpp
   Range.cpp
   Reader.cpp
   ReaderFactory.cpp

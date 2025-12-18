@@ -75,6 +75,22 @@ target_link_libraries(
   velox_link_libs
 )
 
+add_executable(velox_dwio_parquet_prefetch_test ParquetReaderPrefetchTest.cpp)
+add_test(
+  NAME velox_dwio_parquet_prefetch_test
+  COMMAND velox_dwio_parquet_prefetch_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(
+  velox_dwio_parquet_prefetch_test
+  velox_dwio_common
+  velox_dwio_parquet_reader
+  velox_dwio_parquet_writer
+  velox_exec_test_lib
+  velox_link_libs
+  ${TEST_LINK_LIBS}
+)
+
 add_executable(velox_dwio_parquet_structure_decoder_test NestedStructureDecoderTest.cpp)
 add_test(
   NAME velox_dwio_parquet_structure_decoder_test

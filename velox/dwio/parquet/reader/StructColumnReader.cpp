@@ -17,6 +17,7 @@
 #include "velox/dwio/parquet/reader/StructColumnReader.h"
 
 #include "velox/dwio/common/BufferedInput.h"
+#include "velox/dwio/common/PrefetchBufferedInput.h"
 #include "velox/dwio/parquet/reader/ParquetColumnReader.h"
 #include "velox/dwio/parquet/reader/RepeatedColumnReader.h"
 
@@ -32,7 +33,8 @@ StructColumnReader::StructColumnReader(
     const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
     ParquetParams& params,
     common::ScanSpec& scanSpec)
-    : SelectiveStructColumnReader(requestedType, fileType, params, scanSpec) {
+    : SelectiveStructColumnReader(requestedType, fileType, params, scanSpec),
+      prefetchConfig_(params.prefetchConfig()) {
   auto& childSpecs = scanSpec_->stableChildren();
   for (auto i = 0; i < childSpecs.size(); ++i) {
     auto childSpec = childSpecs[i];
@@ -122,7 +124,25 @@ std::shared_ptr<dwio::common::BufferedInput> StructColumnReader::loadRowGroup(
     enqueueRowGroup(index, *input, rowRanges);
     return input;
   }
-  auto newInput = input->clone();
+
+  std::shared_ptr<dwio::common::BufferedInput> newInput;
+  if (prefetchConfig_.enabled && prefetchConfig_.executor) {
+    // Create PrefetchBufferedInput for async chunk prefetch.
+    dwio::common::AsyncChunkedReader::Config chunkConfig{
+        prefetchConfig_.chunkSize,
+        prefetchConfig_.prefetchCount,
+        prefetchConfig_.maxCachedChunks,
+        0.75 // prefetchThreshold
+    };
+    newInput = std::make_shared<dwio::common::PrefetchBufferedInput>(
+        input->getReadFile(),
+        *memoryPool(),
+        prefetchConfig_.executor,
+        chunkConfig);
+  } else {
+    newInput = input->clone();
+  }
+
   enqueueRowGroup(index, *newInput, rowRanges);
   newInput->load(dwio::common::LogType::STRIPE);
   return newInput;

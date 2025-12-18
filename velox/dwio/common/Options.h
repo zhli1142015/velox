@@ -684,6 +684,50 @@ class ReaderOptions : public io::ReaderOptions {
     return parquetFilterColumnIndexEnabled_;
   }
 
+  /// Gets whether async chunk prefetch is enabled.
+  bool asyncChunkPrefetchEnabled() const {
+    return asyncChunkPrefetchEnabled_;
+  }
+
+  /// Enables or disables async chunk prefetch for Parquet reading.
+  ReaderOptions& setAsyncChunkPrefetchEnabled(bool enabled) {
+    asyncChunkPrefetchEnabled_ = enabled;
+    return *this;
+  }
+
+  /// Gets the IO chunk size for async prefetch.
+  uint64_t chunkPrefetchSize() const {
+    return chunkPrefetchSize_;
+  }
+
+  /// Sets the IO chunk size for async prefetch (default 4MB).
+  ReaderOptions& setChunkPrefetchSize(uint64_t size) {
+    chunkPrefetchSize_ = size;
+    return *this;
+  }
+
+  /// Gets the number of chunks to prefetch ahead.
+  int32_t chunkPrefetchCount() const {
+    return chunkPrefetchCount_;
+  }
+
+  /// Sets the number of chunks to prefetch ahead (default 2).
+  ReaderOptions& setChunkPrefetchCount(int32_t count) {
+    chunkPrefetchCount_ = count;
+    return *this;
+  }
+
+  /// Gets the max number of cached chunks.
+  int32_t maxCachedChunks() const {
+    return maxCachedChunks_;
+  }
+
+  /// Sets the max number of cached chunks (default 8).
+  ReaderOptions& setMaxCachedChunks(int32_t count) {
+    maxCachedChunks_ = count;
+    return *this;
+  }
+
   const std::shared_ptr<random::RandomSkipTracker>& randomSkip() const {
     return randomSkip_;
   }
@@ -743,6 +787,10 @@ class ReaderOptions : public io::ReaderOptions {
   bool selectiveNimbleReaderEnabled_{false};
   bool allowEmptyFile_{false};
   bool parquetFilterColumnIndexEnabled_{false};
+  bool asyncChunkPrefetchEnabled_{true};
+  uint64_t chunkPrefetchSize_{4 * 1024 * 1024}; // 4MB default.
+  int32_t chunkPrefetchCount_{2};
+  int32_t maxCachedChunks_{8};
 };
 
 struct WriterOptions {

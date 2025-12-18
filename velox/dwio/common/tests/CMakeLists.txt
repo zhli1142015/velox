@@ -30,6 +30,7 @@ endif()
 
 add_executable(
   velox_dwio_common_test
+  AsyncChunkedReaderTest.cpp
   BitConcatenationTest.cpp
   BitPackDecoderTest.cpp
   ChainedBufferTests.cpp
@@ -44,6 +45,7 @@ add_executable(
   LoggedExceptionTest.cpp
   MeasureTimeTests.cpp
   ParallelForTest.cpp
+  PrefetchBufferedInputTest.cpp
   RangeTests.cpp
   ReadFileInputStreamTests.cpp
   ReaderTest.cpp

@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <folly/Executor.h>
 #include "velox/dwio/common/BufferUtil.h"
 #include "velox/dwio/common/RowRanges.h"
 #include "velox/dwio/parquet/reader/ColumnPageIndex.h"
@@ -32,6 +33,14 @@ class BufferedInput;
 
 namespace facebook::velox::parquet {
 
+struct PrefetchConfig {
+  bool enabled{false};
+  folly::Executor* executor{nullptr};
+  uint64_t chunkSize{4 * 1024 * 1024};
+  int32_t prefetchCount{2};
+  int32_t maxCachedChunks{8};
+};
+
 class ParquetParams : public dwio::common::FormatParams {
  public:
   ParquetParams(
@@ -39,11 +48,13 @@ class ParquetParams : public dwio::common::FormatParams {
       dwio::common::ColumnReaderStatistics& stats,
       const FileMetaDataPtr metaData,
       const tz::TimeZone* sessionTimezone,
-      TimestampPrecision timestampPrecision)
+      TimestampPrecision timestampPrecision,
+      const PrefetchConfig& prefetchConfig = {})
       : FormatParams(pool, stats),
         metaData_(metaData),
         sessionTimezone_(sessionTimezone),
-        timestampPrecision_(timestampPrecision) {}
+        timestampPrecision_(timestampPrecision),
+        prefetchConfig_(prefetchConfig) {}
   std::unique_ptr<dwio::common::FormatData> toFormatData(
       const std::shared_ptr<const dwio::common::TypeWithId>& type,
       const common::ScanSpec& scanSpec) override;
@@ -52,10 +63,15 @@ class ParquetParams : public dwio::common::FormatParams {
     return timestampPrecision_;
   }
 
+  const PrefetchConfig& prefetchConfig() const {
+    return prefetchConfig_;
+  }
+
  private:
   const FileMetaDataPtr metaData_;
   const tz::TimeZone* sessionTimezone_;
   const TimestampPrecision timestampPrecision_;
+  const PrefetchConfig prefetchConfig_;
 };
 
 /// Format-specific data created for each leaf column of a Parquet rowgroup.

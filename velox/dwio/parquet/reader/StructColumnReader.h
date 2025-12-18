@@ -21,6 +21,7 @@
 #include "velox/dwio/common/SelectiveStructColumnReader.h"
 #include "velox/dwio/parquet/common/LevelConversion.h"
 #include "velox/dwio/parquet/reader/ColumnPageIndex.h"
+#include "velox/dwio/parquet/reader/ParquetData.h"
 
 namespace facebook::velox::dwio::common {
 class BufferedInput;
@@ -112,6 +113,9 @@ class StructColumnReader : public dwio::common::SelectiveStructColumnReader {
   // The level information for extracting nulls for 'this' from the
   // repdefs in a leaf PageReader.
   LevelInfo levelInfo_;
+
+  // Configuration for async chunk prefetch.
+  PrefetchConfig prefetchConfig_;
 };
 
 } // namespace facebook::velox::parquet

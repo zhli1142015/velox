@@ -1325,12 +1325,23 @@ class ParquetRowReader::Impl {
       return; // TODO
     }
     parquetStatsContext_ = ParquetStatsContext(readerBase_->version());
+
+    // Build prefetch configuration from ReaderOptions.
+    const auto& readerOptions = readerBase_->options();
+    PrefetchConfig prefetchConfig;
+    prefetchConfig.enabled = readerOptions.asyncChunkPrefetchEnabled();
+    prefetchConfig.executor = readerOptions.ioExecutor().get();
+    prefetchConfig.chunkSize = readerOptions.chunkPrefetchSize();
+    prefetchConfig.prefetchCount = readerOptions.chunkPrefetchCount();
+    prefetchConfig.maxCachedChunks = readerOptions.maxCachedChunks();
+
     ParquetParams params(
         pool_,
         columnReaderStats_,
         readerBase_->fileMetaData(),
         readerBase->sessionTimezone(),
-        options_.timestampPrecision());
+        options_.timestampPrecision(),
+        prefetchConfig);
     requestedType_ = options_.requestedType() ? options_.requestedType()
                                               : readerBase_->schema();
     columnReader_ = ParquetColumnReader::build(

@@ -27,14 +27,25 @@ constexpr uint32_t MAX_UINT32 = std::numeric_limits<uint32_t>::max();
 
 class StreamIdentifier {
  public:
-  StreamIdentifier() : id_(MAX_UINT32) {}
+  StreamIdentifier() : id_(MAX_UINT32), columnId_(MAX_UINT32) {}
 
-  explicit StreamIdentifier(int32_t id) : id_(id) {}
+  explicit StreamIdentifier(int32_t id) : id_(id), columnId_(id) {}
+
+  /// Constructor with separate column id for grouping (used by page skipping).
+  StreamIdentifier(int32_t id, int32_t columnId)
+      : id_(id), columnId_(columnId) {}
 
   virtual ~StreamIdentifier() = default;
 
   virtual int32_t getId() const {
     return id_;
+  }
+
+  /// Returns the column id for grouping purposes.
+  /// For normal streams this equals id_, for page skipping streams this is
+  /// the actual column id while id_ is an encoded unique identifier.
+  virtual int32_t getColumnId() const {
+    return columnId_;
   }
 
   virtual bool operator==(const StreamIdentifier& other) const {
@@ -57,6 +68,7 @@ class StreamIdentifier {
   }
 
   int32_t id_;
+  int32_t columnId_; // For column grouping in PrefetchBufferedInput
 };
 
 struct StreamIdentifierHash {

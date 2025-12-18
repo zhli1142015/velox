@@ -243,8 +243,11 @@ int64_t ParquetData::handlePageSkipping(
         if (runStart < 0) {
           return;
         }
+        // Use two-argument constructor: unique id for the stream, actual column
+        // id for grouping.
         auto id = dwio::common::StreamIdentifier(
-            type_->column() * (numPages + 1) + pagesStreams_[index].size());
+            type_->column() * (numPages + 1) + pagesStreams_[index].size(),
+            type_->column());
         auto streamPtr = input.enqueue({runOffset, runLength}, &id);
         pagesStreams_[index].push_back(std::move(streamPtr));
         int32_t streamIdx = pagesStreams_[index].size() - 1;
