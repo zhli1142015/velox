@@ -16,7 +16,13 @@ add_library(velox_file_test_utils TestUtils.cpp FaultyFile.cpp FaultyFileSystem.
 
 target_link_libraries(velox_file_test_utils PUBLIC velox_file)
 
-add_executable(velox_file_test FileTest.cpp FileInputStreamTest.cpp UtilsTest.cpp)
+set(VELOX_FILE_TEST_SOURCES FileTest.cpp FileInputStreamTest.cpp UtilsTest.cpp)
+
+if(VELOX_ENABLE_IO_URING)
+  list(APPEND VELOX_FILE_TEST_SOURCES AsyncLocalFileTest.cpp)
+endif()
+
+add_executable(velox_file_test ${VELOX_FILE_TEST_SOURCES})
 add_test(velox_file_test velox_file_test)
 target_link_libraries(
   velox_file_test

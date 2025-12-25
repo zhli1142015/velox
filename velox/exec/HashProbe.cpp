@@ -289,7 +289,10 @@ void HashProbe::maybeSetupSpillInputReader(
   VELOX_CHECK_EQ(partition->id(), restoredPartitionId.value());
   restoringPartitionId_ = restoredPartitionId;
   spillInputReader_ = partition->createUnorderedReader(
-      spillConfig_->readBufferSize, pool(), spillStats_.get());
+      spillConfig_->readBufferSize,
+      pool(),
+      spillStats_.get(),
+      spillConfig_->spillUringEnabled);
   inputSpillPartitionSet_.erase(iter);
 }
 
@@ -2029,7 +2032,10 @@ void HashProbe::maybeSetupSpillOutputReader() {
 
   spillOutputReader_ =
       spillOutputPartitionSet_.begin()->second->createUnorderedReader(
-          spillConfig_->readBufferSize, pool(), spillStats_.get());
+          spillConfig_->readBufferSize,
+          pool(),
+          spillStats_.get(),
+          spillConfig_->spillUringEnabled);
   spillOutputPartitionSet_.clear();
 }
 

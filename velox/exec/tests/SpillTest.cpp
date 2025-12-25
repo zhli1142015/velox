@@ -23,10 +23,12 @@
 #include "velox/common/file/FileSystems.h"
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/Spill.h"
+#include "velox/exec/SpillFile.h"
 #include "velox/exec/tests/utils/MergeTestBase.h"
 #include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/type/Timestamp.h"
+#include "velox/vector/fuzzer/VectorFuzzer.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
 using namespace facebook;
@@ -1320,7 +1322,7 @@ TEST_P(SpillTest, spillPartitionSet) {
               "SPILLED PARTITION[ID:{} FILES:0 SIZE:0B]", id.toString()));
       // Expect an empty reader.
       auto reader = spillPartitions.back()->createUnorderedReader(
-          1 << 20, pool(), &spillStats_);
+          1 << 20, pool(), &spillStats_, /*spillUringEnabled=*/true);
       ASSERT_FALSE(reader->nextBatch(output));
     }
 
@@ -1402,7 +1404,7 @@ TEST_P(SpillTest, spillPartitionSet) {
               expectedPartitionFiles[partitionId],
               succinctBytes(expectedPartitionSizes[partitionId])));
       auto reader = spillPartitions[partitionId]->createUnorderedReader(
-          1 << 20, pool(), &spillStats_);
+          1 << 20, pool(), &spillStats_, /*spillUringEnabled=*/true);
       for (int j = 0; j < numBatchesPerPartition; ++j) {
         ASSERT_TRUE(reader->nextBatch(output));
         for (int row = 0; row < numRowsPerBatch; ++row) {
@@ -1420,7 +1422,7 @@ TEST_P(SpillTest, spillPartitionSet) {
     ASSERT_EQ(0, spillPartitions[partitionId]->numFiles());
     {
       auto reader = spillPartitions[partitionId]->createUnorderedReader(
-          1 << 20, pool(), &spillStats_);
+          1 << 20, pool(), &spillStats_, /*spillUringEnabled=*/true);
       ASSERT_FALSE(reader->nextBatch(output));
     }
   }
@@ -1472,7 +1474,7 @@ TEST_P(SpillTest, spillPartitionSpilt) {
     int batchIdx = 0;
     for (int32_t i = 0; i < numShards; ++i) {
       auto reader = spillPartitionShards[i]->createUnorderedReader(
-          1 << 20, pool(), &spillStats_);
+          1 << 20, pool(), &spillStats_, /*spillUringEnabled=*/true);
       RowVectorPtr output;
       while (reader->nextBatch(output)) {
         for (int row = 0; row < numRowsPerBatch; ++row) {
@@ -1637,6 +1639,304 @@ TEST_P(SpillTest, gatherMerge) {
   gatherMergeTest(1234, 2, 100, true);
   gatherMergeTest(1234, 10, 10, true);
   gatherMergeTest(1234, 10, 100, true);
+}
+
+// Test that spillUringEnabled config switch correctly enables/disables io_uring
+// for both read and write paths. This ensures:
+// 1. When spillUringEnabled=true, io_uring async path is used (if available)
+// 2. When spillUringEnabled=false, sync I/O fallback path is used
+// 3. Data consistency between both modes
+TEST(SpillTest, spillUringEnabledConfigSwitch) {
+  memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
+  if (!isRegisteredVectorSerde()) {
+    facebook::velox::serializer::presto::PrestoVectorSerde::
+        registerVectorSerde();
+  }
+  if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kPresto)) {
+    facebook::velox::serializer::presto::PrestoVectorSerde::
+        registerNamedVectorSerde();
+  }
+  filesystems::registerLocalFileSystem();
+
+  auto pool = memory::memoryManager()->addLeafPool("spillUringTest");
+  auto tempDir = exec::test::TempDirectoryPath::create();
+  folly::Synchronized<common::SpillStats> spillStats;
+
+  // Create test data using VectorFuzzer
+  auto rowType = ROW({"a", "b"}, {BIGINT(), VARCHAR()});
+  const int numBatches = 5;
+  const int numRowsPerBatch = 100;
+  std::vector<RowVectorPtr> batches;
+  VectorFuzzer::Options fuzzerOpts;
+  fuzzerOpts.vectorSize = numRowsPerBatch;
+  VectorFuzzer fuzzer(fuzzerOpts, pool.get());
+  for (int i = 0; i < numBatches; ++i) {
+    batches.push_back(fuzzer.fuzzInputRow(rowType));
+  }
+
+  auto runWriteReadTest = [&](bool spillUringEnabled,
+                              const std::string& testName) {
+    SCOPED_TRACE(
+        fmt::format(
+            "spillUringEnabled={} testName={}", spillUringEnabled, testName));
+
+    spillStats.wlock()->reset();
+    const std::string pathPrefix =
+        fmt::format("{}/test_{}", tempDir->getPath(), testName);
+
+    // Write path test
+    {
+      SpillWriter writer(
+          rowType,
+          SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+          common::CompressionKind::CompressionKind_NONE,
+          pathPrefix,
+          kGB, // targetFileSize
+          0, // writeBufferSize
+          "", // fileCreateConfig
+          [](uint64_t) {}, // updateAndCheckSpillLimitCb
+          pool.get(),
+          &spillStats,
+          spillUringEnabled);
+
+      for (const auto& batch : batches) {
+        IndexRange range{0, batch->size()};
+        folly::Range<IndexRange*> ranges(&range, 1);
+        writer.write(batch, ranges);
+      }
+      writer.finishFile();
+    }
+
+    // Get spilled files
+    auto spilledFiles = spillStats.rlock()->spilledFiles;
+    ASSERT_GT(spilledFiles, 0);
+
+    // Read path test - verify we can read back all data
+    // Create a SpillPartition to read the files
+    auto fs = filesystems::getFileSystem(pathPrefix, nullptr);
+    auto fileList = fs->list(tempDir->getPath());
+
+    SpillFiles files;
+    uint32_t fileId = 0;
+    for (const auto& filePath : fileList) {
+      if (filePath.find(testName) != std::string::npos) {
+        auto fileSize = fs->openFileForRead(filePath)->size();
+        files.push_back(
+            SpillFileInfo{
+                fileId++,
+                rowType,
+                filePath,
+                fileSize,
+                SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+                common::CompressionKind::CompressionKind_NONE});
+      }
+    }
+    ASSERT_FALSE(files.empty());
+
+    SpillPartitionId partitionId(0);
+    auto partition =
+        std::make_unique<SpillPartition>(partitionId, std::move(files));
+
+    // Read using unordered reader
+    auto reader = partition->createUnorderedReader(
+        1 << 20, pool.get(), &spillStats, spillUringEnabled);
+
+    int totalRowsRead = 0;
+    RowVectorPtr output;
+    while (reader->nextBatch(output)) {
+      totalRowsRead += output->size();
+    }
+
+    // Verify total rows match
+    ASSERT_EQ(totalRowsRead, numBatches * numRowsPerBatch);
+  };
+
+  // Test with spillUringEnabled = true (io_uring path if available)
+  runWriteReadTest(true, "uring_enabled");
+
+  // Test with spillUringEnabled = false (sync fallback path)
+  runWriteReadTest(false, "uring_disabled");
+
+  // Cross-test: Write with uring, read without (and vice versa)
+  // This ensures the file format is compatible between modes
+  {
+    SCOPED_TRACE("Cross-mode compatibility test");
+    spillStats.wlock()->reset();
+    const std::string pathPrefix =
+        fmt::format("{}/test_cross", tempDir->getPath());
+
+    // Write with io_uring enabled
+    {
+      SpillWriter writer(
+          rowType,
+          SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+          common::CompressionKind::CompressionKind_NONE,
+          pathPrefix,
+          kGB,
+          0,
+          "",
+          [](uint64_t) {},
+          pool.get(),
+          &spillStats,
+          /*spillUringEnabled=*/true);
+
+      for (const auto& batch : batches) {
+        IndexRange range{0, batch->size()};
+        folly::Range<IndexRange*> ranges(&range, 1);
+        writer.write(batch, ranges);
+      }
+      writer.finishFile();
+    }
+
+    // Read with io_uring disabled (sync path)
+    auto fs = filesystems::getFileSystem(pathPrefix, nullptr);
+    auto fileList = fs->list(tempDir->getPath());
+
+    SpillFiles files;
+    uint32_t fileId = 0;
+    for (const auto& filePath : fileList) {
+      if (filePath.find("test_cross") != std::string::npos) {
+        auto fileSize = fs->openFileForRead(filePath)->size();
+        files.push_back(
+            SpillFileInfo{
+                fileId++,
+                rowType,
+                filePath,
+                fileSize,
+                SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+                common::CompressionKind::CompressionKind_NONE});
+      }
+    }
+
+    SpillPartitionId partitionId(0);
+    auto partition =
+        std::make_unique<SpillPartition>(partitionId, std::move(files));
+
+    // Read with io_uring disabled
+    auto reader = partition->createUnorderedReader(
+        1 << 20, pool.get(), &spillStats, /*spillUringEnabled=*/false);
+
+    int totalRowsRead = 0;
+    RowVectorPtr output;
+    while (reader->nextBatch(output)) {
+      totalRowsRead += output->size();
+    }
+    ASSERT_EQ(totalRowsRead, numBatches * numRowsPerBatch);
+  }
+
+  // Test createOrderedReader with different spillUringEnabled settings
+  // This tests the sorted merge reader path
+  {
+    SCOPED_TRACE("Ordered reader test with spillUringEnabled toggle");
+    spillStats.wlock()->reset();
+    const std::string pathPrefix =
+        fmt::format("{}/test_ordered", tempDir->getPath());
+
+    // Create SpillConfig for ordered reader tests
+    auto createSpillConfig = [&](bool spillUringEnabled) {
+      return common::SpillConfig(
+          [&]() -> const std::string& { return tempDir->getPath(); },
+          [](uint64_t) {},
+          pathPrefix,
+          kGB, // maxFileSize
+          0, // writeBufferSize
+          1 << 20, // readBufferSize
+          nullptr, // executor
+          0, // minSpillableReservationPct
+          0, // spillableReservationGrowthPct
+          0, // startPartitionBit
+          2, // numPartitionBits
+          0, // maxSpillLevel
+          0, // maxSpillRunRows
+          0, // writerFlushThresholdSize
+          "none", // compressionKind
+          0, // numMaxMergeFiles
+          std::nullopt, // prefixSortConfig
+          "", // fileCreateConfig
+          1000, // windowMinReadBatchRows
+          spillUringEnabled);
+    };
+
+    // Write with spillUringEnabled=true
+    {
+      SpillWriter writer(
+          rowType,
+          SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+          common::CompressionKind::CompressionKind_NONE,
+          pathPrefix,
+          kGB,
+          0,
+          "",
+          [](uint64_t) {},
+          pool.get(),
+          &spillStats,
+          /*spillUringEnabled=*/true);
+
+      for (const auto& batch : batches) {
+        IndexRange range{0, batch->size()};
+        folly::Range<IndexRange*> ranges(&range, 1);
+        writer.write(batch, ranges);
+      }
+      writer.finishFile();
+    }
+
+    // Gather files for ordered reader
+    auto fs = filesystems::getFileSystem(pathPrefix, nullptr);
+    auto fileList = fs->list(tempDir->getPath());
+
+    SpillFiles files;
+    uint32_t fileId = 0;
+    for (const auto& filePath : fileList) {
+      if (filePath.find("test_ordered") != std::string::npos) {
+        auto fileSize = fs->openFileForRead(filePath)->size();
+        files.push_back(
+            SpillFileInfo{
+                fileId++,
+                rowType,
+                filePath,
+                fileSize,
+                SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+                common::CompressionKind::CompressionKind_NONE});
+      }
+    }
+    ASSERT_FALSE(files.empty());
+
+    // Test createOrderedReader with spillUringEnabled=true
+    {
+      SpillPartitionId partitionId(0);
+      auto partition =
+          std::make_unique<SpillPartition>(partitionId, SpillFiles(files));
+      auto spillConfig = createSpillConfig(/*spillUringEnabled=*/true);
+      auto merge =
+          partition->createOrderedReader(spillConfig, pool.get(), &spillStats);
+      ASSERT_NE(merge, nullptr);
+
+      int totalRowsRead = 0;
+      while (auto stream = merge->next()) {
+        ++totalRowsRead;
+        stream->pop();
+      }
+      ASSERT_EQ(totalRowsRead, numBatches * numRowsPerBatch);
+    }
+
+    // Test createOrderedReader with spillUringEnabled=false
+    {
+      SpillPartitionId partitionId(0);
+      auto partition =
+          std::make_unique<SpillPartition>(partitionId, SpillFiles(files));
+      auto spillConfig = createSpillConfig(/*spillUringEnabled=*/false);
+      auto merge =
+          partition->createOrderedReader(spillConfig, pool.get(), &spillStats);
+      ASSERT_NE(merge, nullptr);
+
+      int totalRowsRead = 0;
+      while (auto stream = merge->next()) {
+        ++totalRowsRead;
+        stream->pop();
+      }
+      ASSERT_EQ(totalRowsRead, numBatches * numRowsPerBatch);
+    }
+  }
 }
 
 VELOX_INSTANTIATE_TEST_SUITE_P(

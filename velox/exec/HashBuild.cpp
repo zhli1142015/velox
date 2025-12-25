@@ -216,7 +216,10 @@ void HashBuild::setupSpiller(SpillPartition* spillPartition) {
   uint8_t startPartitionBit = config->startPartitionBit;
   if (spillPartition != nullptr) {
     spillInputReader_ = spillPartition->createUnorderedReader(
-        config->readBufferSize, pool(), spillStats_.get());
+        config->readBufferSize,
+        pool(),
+        spillStats_.get(),
+        config->spillUringEnabled);
     VELOX_CHECK(!restoringPartitionId_.has_value());
     restoringPartitionId_ = spillPartition->id();
     const auto numPartitionBits = config->numPartitionBits;

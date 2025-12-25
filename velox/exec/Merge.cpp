@@ -164,7 +164,8 @@ void Merge::setupSpillMerger() {
               spillFile,
               spillConfig_->readBufferSize,
               pool(),
-              spillStats_.get()));
+              spillStats_.get(),
+              spillConfig_->spillUringEnabled));
     }
     spillReadFilesGroups.push_back(std::move(spillReadFiles));
   }

@@ -499,11 +499,13 @@ class SpillPartition {
   /// 'bufferSize' specifies the read size from the storage. If the file
   /// system supports async read mode, then reader allocates two buffers with
   /// one buffer prefetch ahead. 'spillStats' is provided to collect the spill
-  /// stats when reading data from spilled files.
+  /// stats when reading data from spilled files. 'spillUringEnabled' enables
+  /// io_uring based async I/O for improved performance.
   std::unique_ptr<UnorderedStreamReader<BatchStream>> createUnorderedReader(
       uint64_t bufferSize,
       memory::MemoryPool* pool,
-      folly::Synchronized<common::SpillStats>* spillStats);
+      folly::Synchronized<common::SpillStats>* spillStats,
+      bool spillUringEnabled = true);
 
   /// Create an ordered stream reader from this spill partition. If the
   /// partition has more than spillConfig.numMaxMergeFiles files, the files will
@@ -524,11 +526,13 @@ class SpillPartition {
   /// 'bufferSize' specifies the read size from the storage. If the file
   /// system supports async read mode, then reader allocates two buffers with
   /// one buffer prefetch ahead. 'spillStats' is provided to collect the spill
-  /// stats when reading data from spilled files.
+  /// stats when reading data from spilled files. 'spillUringEnabled' enables
+  /// io_uring based async I/O for improved performance.
   std::unique_ptr<TreeOfLosers<SpillMergeStream>> createOrderedReaderInternal(
       uint64_t bufferSize,
       memory::MemoryPool* pool,
-      folly::Synchronized<common::SpillStats>* spillStats);
+      folly::Synchronized<common::SpillStats>* spillStats,
+      bool spillUringEnabled = true);
 
   SpillPartitionId id_;
   SpillFiles files_;
@@ -586,7 +590,7 @@ class SpillState {
   /// 'numSortKeys' is the number of leading columns on which the data is
   /// sorted, 0 if only hash partitioning is used. 'targetFileSize' is the
   /// target size of a single file.  'pool' owns the memory for state and
-  /// results.
+  /// results. 'spillUringEnabled' enables io_uring for async writes.
   SpillState(
       const common::GetSpillDirectoryPathCB& getSpillDirectoryPath,
       const common::UpdateAndCheckSpillLimitCB& updateAndCheckSpillLimitCb,
@@ -598,7 +602,8 @@ class SpillState {
       const std::optional<common::PrefixSortConfig>& prefixSortConfig,
       memory::MemoryPool* pool,
       folly::Synchronized<common::SpillStats>* stats,
-      const std::string& fileCreateConfig = {});
+      const std::string& fileCreateConfig = {},
+      bool spillUringEnabled = true);
 
   static std::vector<SpillSortKey> makeSortingKeys(
       const std::vector<CompareFlags>& compareFlags = {});
@@ -701,6 +706,7 @@ class SpillState {
   const common::CompressionKind compressionKind_;
   const std::optional<common::PrefixSortConfig> prefixSortConfig_;
   const std::string fileCreateConfig_;
+  const bool spillUringEnabled_{false};
   memory::MemoryPool* const pool_;
   folly::Synchronized<common::SpillStats>* const stats_;
 

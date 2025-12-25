@@ -17,34 +17,57 @@
 #include "velox/serializers/SerializedPageFile.h"
 #include <cstdint>
 #include <memory>
+#include "velox/common/file/AsyncLocalFile.h"
 #include "velox/common/file/FileSystems.h"
 
 namespace facebook::velox::serializer {
 std::unique_ptr<SerializedPageFile> SerializedPageFile::create(
     uint32_t id,
     const std::string& pathPrefix,
-    const std::string& fileCreateConfig) {
+    const std::string& fileCreateConfig,
+    bool useIoUring) {
   return std::unique_ptr<SerializedPageFile>(
-      new SerializedPageFile(id, pathPrefix, fileCreateConfig));
+      new SerializedPageFile(id, pathPrefix, fileCreateConfig, useIoUring));
 }
 
 SerializedPageFile::SerializedPageFile(
     uint32_t id,
     const std::string& pathPrefix,
-    const std::string& fileCreateConfig)
-    : id_(id), path_(fmt::format("{}-{}", pathPrefix, ordinalCounter_++)) {
+    const std::string& fileCreateConfig,
+    bool useIoUring)
+    : id_(id),
+      path_(fmt::format("{}-{}", pathPrefix, ordinalCounter_++)),
+      useIoUring_(useIoUring) {
   auto fs = filesystems::getFileSystem(path_, nullptr);
-  file_ = fs->openFileForWrite(
-      path_,
-      filesystems::FileOptions{
-          {{filesystems::FileOptions::kFileCreateConfig.toString(),
-            fileCreateConfig}},
-          nullptr,
-          std::nullopt});
+  filesystems::FileOptions fileOptions;
+  fileOptions.useIoUring = useIoUring_;
+  fileOptions.values.emplace(
+      filesystems::FileOptions::kFileCreateConfig.toString(), fileCreateConfig);
+  file_ = fs->openFileForWrite(path_, fileOptions);
+
+#ifdef VELOX_ENABLE_IO_URING
+  // Create WriteBuffers if io_uring is enabled.
+  // Following Bolt's design - WriteBuffers managed externally from file.
+  if (useIoUring_ && file_->uringEnabled()) {
+    writeBuffers_ = std::make_unique<WriteBuffers>();
+  }
+#endif
+}
+
+SerializedPageFile::~SerializedPageFile() {
+  // Must be defined in cpp file where WriteBuffers is complete type.
 }
 
 void SerializedPageFile::finish() {
   VELOX_CHECK_NOT_NULL(file_);
+
+#ifdef VELOX_ENABLE_IO_URING
+  // Wait for all pending async writes and clear buffers.
+  if (writeBuffers_) {
+    writeBuffers_->clear(file_);
+  }
+#endif
+
   size_ = file_->size();
   file_->close();
   file_ = nullptr;
@@ -59,7 +82,31 @@ uint64_t SerializedPageFile::size() {
 
 uint64_t SerializedPageFile::write(std::unique_ptr<folly::IOBuf> iobuf) {
   auto writtenBytes = iobuf->computeChainDataLength();
-  file_->append(std::move(iobuf));
+
+#ifdef VELOX_ENABLE_IO_URING
+  // Bolt-style async write path using io_uring.
+  if (writeBuffers_ && file_->uringEnabled()) {
+    // Process IOBuf chain - each buffer submitted as separate async write.
+    // Following Bolt's design: WriteBuffers manages IOBuf lifetime.
+    while (iobuf) {
+      auto current = std::move(iobuf);
+      iobuf = current->pop(); // Get next in chain
+
+      auto taskId = taskId_++; // Assign unique task ID
+
+      // Add IOBuf to WriteBuffers (may wait if slot is occupied).
+      // IOBuf lifetime managed by WriteBuffers until write completes.
+      folly::IOBuf* buf = writeBuffers_->add(current, taskId, file_);
+
+      // Submit async write (non-blocking).
+      file_->submitWrite(buf, taskId);
+    }
+  } else
+#endif
+  {
+    // Sync write path.
+    file_->append(std::move(iobuf));
+  }
   return writtenBytes;
 }
 
@@ -70,11 +117,13 @@ SerializedPageFileWriter::SerializedPageFileWriter(
     const std::string& fileCreateConfig,
     std::unique_ptr<VectorSerde::Options> serdeOptions,
     VectorSerde* serde,
-    memory::MemoryPool* pool)
+    memory::MemoryPool* pool,
+    bool useIoUring)
     : pathPrefix_(pathPrefix),
       targetFileSize_(targetFileSize),
       writeBufferSize_(writeBufferSize),
       fileCreateConfig_(fileCreateConfig),
+      useIoUring_(useIoUring),
       serdeOptions_(std::move(serdeOptions)),
       pool_(pool),
       serde_(serde) {}
@@ -87,7 +136,8 @@ SerializedPageFile* SerializedPageFileWriter::ensureFile() {
     currentFile_ = SerializedPageFile::create(
         nextFileId_++,
         fmt::format("{}-{}", pathPrefix_, finishedFiles_.size()),
-        fileCreateConfig_);
+        fileCreateConfig_,
+        useIoUring_);
   }
   return currentFile_.get();
 }
@@ -184,13 +234,16 @@ SerializedPageFileReader::SerializedPageFileReader(
     const RowTypePtr& type,
     VectorSerde* serde,
     std::unique_ptr<VectorSerde::Options> readOptions,
-    memory::MemoryPool* pool)
+    memory::MemoryPool* pool,
+    bool useIoUring)
     : readOptions_(std::move(readOptions)),
       pool_(pool),
       serde_(serde),
       type_(type) {
   auto fs = filesystems::getFileSystem(path, nullptr);
-  auto file = fs->openFileForRead(path);
+  filesystems::FileOptions fileOptions;
+  fileOptions.useIoUring = useIoUring;
+  auto file = fs->openFileForRead(path, fileOptions);
   input_ = std::make_unique<common::FileInputStream>(
       std::move(file), bufferSize, pool_);
 }

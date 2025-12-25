@@ -25,6 +25,7 @@
 namespace facebook::velox::common {
 
 /// Readonly byte input stream backed by file.
+/// Supports Bolt-style io_uring dual-buffer prefetch when available.
 class FileInputStream : public ByteInputStream {
  public:
   FileInputStream(
@@ -83,6 +84,13 @@ class FileInputStream : public ByteInputStream {
   // filesystem which doesn't support async mode read.
   void maybeIssueReadahead();
 
+  // Bolt-style io_uring initialization: sync read buffer[0], async prefetch
+  // buffer[1].
+  void initUring();
+
+  // Bolt-style io_uring prefetch: submit async read for next buffer.
+  void prefetchUring();
+
   inline uint64_t readSize() const;
 
   inline uint32_t bufferIndex() const {
@@ -113,12 +121,18 @@ class FileInputStream : public ByteInputStream {
   const uint64_t bufferSize_;
   memory::MemoryPool* const pool_;
   const bool readAheadEnabled_;
+  // True if using io_uring submitRead/waitForComplete API (Bolt-style).
+  const bool uringEnabled_;
 
   // Offset of the next byte to read from file.
   uint64_t fileOffset_ = 0;
+  // Offset of completed reads (used for io_uring mode).
+  uint64_t completedOffset_ = 0;
 
   std::vector<BufferPtr> buffers_;
   uint32_t bufferIndex_{0};
+  // Size of data in each buffer (used for io_uring mode).
+  std::vector<uint64_t> bufferSizes_;
   // Sets to read-ahead future if valid.
   folly::SemiFuture<uint64_t> readAheadWait_{
       folly::SemiFuture<uint64_t>::makeEmpty()};

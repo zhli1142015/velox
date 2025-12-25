@@ -81,7 +81,8 @@ struct SpillConfig {
       uint32_t numMaxMergeFiles,
       std::optional<PrefixSortConfig> _prefixSortConfig = std::nullopt,
       const std::string& _fileCreateConfig = {},
-      uint32_t _windowMinReadBatchRows = 1'000);
+      uint32_t _windowMinReadBatchRows = 1'000,
+      bool _spillUringEnabled = true);
 
   /// Returns the spilling level with given 'startBitOffset' and
   /// 'numPartitionBits'.
@@ -177,5 +178,11 @@ struct SpillConfig {
 
   /// The minimum number of rows to read when processing spilled window data.
   uint32_t windowMinReadBatchRows;
+
+  /// If true, use io_uring for async spill I/O operations.
+  /// This enables non-blocking writes and dual-buffer prefetch for reads.
+  /// Requires Linux kernel 5.1+ with io_uring support.
+  /// Following Bolt's design: ring depth=64, 128KB read chunks.
+  bool spillUringEnabled{true};
 };
 } // namespace facebook::velox::common

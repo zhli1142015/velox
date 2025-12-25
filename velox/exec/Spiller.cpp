@@ -64,7 +64,8 @@ SpillerBase::SpillerBase(
           spillConfig->prefixSortConfig,
           memory::spillMemoryPool(),
           spillStats,
-          spillConfig->fileCreateConfig) {
+          spillConfig->fileCreateConfig,
+          spillConfig->spillUringEnabled) {
   TestValue::adjust("facebook::velox::exec::SpillerBase", this);
 }
 

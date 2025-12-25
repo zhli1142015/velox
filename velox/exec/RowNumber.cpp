@@ -120,13 +120,19 @@ void RowNumber::restoreNextSpillPartition() {
   auto it = spillInputPartitionSet_.begin();
   restoringPartitionId_ = it->first;
   spillInputReader_ = it->second->createUnorderedReader(
-      spillConfig_->readBufferSize, pool(), spillStats_.get());
+      spillConfig_->readBufferSize,
+      pool(),
+      spillStats_.get(),
+      spillConfig_->spillUringEnabled);
 
   // Find matching partition for the hash table.
   auto hashTableIt = spillHashTablePartitionSet_.find(it->first);
   if (hashTableIt != spillHashTablePartitionSet_.end()) {
     spillHashTableReader_ = hashTableIt->second->createUnorderedReader(
-        spillConfig_->readBufferSize, pool(), spillStats_.get());
+        spillConfig_->readBufferSize,
+        pool(),
+        spillStats_.get(),
+        spillConfig_->spillUringEnabled);
 
     setSpillPartitionBits(&(it->first));
 

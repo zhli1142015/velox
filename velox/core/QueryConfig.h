@@ -379,6 +379,11 @@ class QueryConfig {
   /// buffering, which doubles the buffer used to read from each spill file.
   static constexpr const char* kSpillReadBufferSize = "spill_read_buffer_size";
 
+  /// If true, use io_uring for async spill I/O operations.
+  /// This enables non-blocking writes and dual-buffer prefetch for reads.
+  /// Requires Linux kernel 5.1+ with io_uring support.
+  static constexpr const char* kSpillUringEnabled = "spill_uring_enabled";
+
   /// Config used to create spill files. This config is provided to underlying
   /// file system and the config is free form. The form should be defined by the
   /// underlying file system.
@@ -1106,6 +1111,11 @@ class QueryConfig {
   uint64_t spillReadBufferSize() const {
     // The default read buffer size set to 1MB.
     return get<uint64_t>(kSpillReadBufferSize, 1L << 20);
+  }
+
+  bool spillUringEnabled() const {
+    // By default, io_uring is enabled for spill operations.
+    return get<bool>(kSpillUringEnabled, true);
   }
 
   std::string spillFileCreateConfig() const {

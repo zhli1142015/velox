@@ -1049,7 +1049,10 @@ class SpillerTest : public exec::test::RowContainerTestBase {
               spillConfig_.startPartitionBit,
               spillConfig_.numPartitionBits));
       auto reader = spillPartitionEntry.second->createUnorderedReader(
-          spillConfig_.readBufferSize, pool(), &spillStats_);
+          spillConfig_.readBufferSize,
+          pool(),
+          &spillStats_,
+          spillConfig_.spillUringEnabled);
       if (type_ == SpillerType::NO_ROW_CONTAINER) {
         // For hash probe type, we append each input vector as one batch in
         // spill file so that we can do one-to-one comparison.
@@ -1131,7 +1134,10 @@ class SpillerTest : public exec::test::RowContainerTestBase {
               spillConfig_.startPartitionBit,
               spillConfig_.numPartitionBits));
       auto reader = spillPartitionEntry.second->createUnorderedReader(
-          spillConfig_.readBufferSize, pool(), &spillStats_);
+          spillConfig_.readBufferSize,
+          pool(),
+          &spillStats_,
+          spillConfig_.spillUringEnabled);
       if (type_ == SpillerType::NO_ROW_CONTAINER) {
         // For hash probe type, we append each input vector as one batch in
         // spill file so that we can do one-to-one comparison.

@@ -104,7 +104,8 @@ class ConcatFilesSpillMergeStreamTest : public OperatorTestBase {
                 spillFile,
                 spillConfig_.readBufferSize,
                 pool_.get(),
-                &spillStats_));
+                &spillStats_,
+                spillConfig_.spillUringEnabled));
       }
       auto stream =
           ConcatFilesSpillMergeStream::create(i - 1, std::move(spillReadFiles));

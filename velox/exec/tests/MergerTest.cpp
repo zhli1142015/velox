@@ -106,7 +106,8 @@ class MergerTest : public OperatorTestBase {
                 spillFile,
                 spillConfig_.readBufferSize,
                 pool_.get(),
-                spillStats_.get()));
+                spillStats_.get(),
+                spillConfig_.spillUringEnabled));
       }
       spillReadFilesGroups.emplace_back(std::move(spillReadFiles));
     }
