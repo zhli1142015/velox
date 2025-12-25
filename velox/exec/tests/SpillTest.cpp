@@ -1547,7 +1547,8 @@ SpillFiles makeFakeSpillFiles(int32_t numFiles) {
          tempDir->getPath() + "/Spill_" + std::to_string(fileId),
          1024,
          SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
-         common::CompressionKind_NONE});
+         common::CompressionKind_NONE,
+         std::nullopt});
   }
   return files;
 }

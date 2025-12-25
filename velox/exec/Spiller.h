@@ -144,6 +144,12 @@ class SpillerBase {
 
   const RowTypePtr rowType_;
 
+  // Callback to get spill directory path.
+  const common::GetSpillDirectoryPathCB getSpillDirPathCb_;
+
+  // Prefix for spill file names.
+  const std::string fileNamePrefix_;
+
   const uint64_t maxSpillRunRows_;
 
   const std::optional<SpillPartitionId> parentId_;
@@ -151,6 +157,9 @@ class SpillerBase {
   folly::Synchronized<common::SpillStats>* const spillStats_;
 
   const std::vector<CompareFlags> compareFlags_;
+
+  /// If true, use RowContainer native row format for spilling.
+  const bool useRowContainerFormat_;
 
   // True if all rows of spilling partitions are in 'spillRuns_', so
   // that one can start reading these back.
@@ -167,6 +176,12 @@ class SpillerBase {
   // or spill file size limit is exceeded. Returns the number of rows
   // written.
   std::unique_ptr<SpillStatus> writeSpill(const SpillPartitionId& id);
+
+  // Writes spill data using RowContainer native row format.
+  // This bypasses Vector conversion for better performance.
+  std::unique_ptr<SpillStatus> writeSpillRowFormat(
+      const SpillPartitionId& id,
+      SpillRun& run);
 
   // Prepares spill runs for the spillable data from all the hash partitions.
   // If 'startRowIter' is not null, we prepare runs starting from the offset

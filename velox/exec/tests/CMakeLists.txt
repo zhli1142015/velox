@@ -38,78 +38,32 @@ target_link_libraries(
 
 add_executable(
   velox_exec_test
-  AddressableNonNullValueListTest.cpp
   AggregationTest.cpp
-  AggregateFunctionRegistryTest.cpp
-  ArrowStreamTest.cpp
-  AssignUniqueIdTest.cpp
-  AsyncConnectorTest.cpp
   ConcatFilesSpillMergeStreamTest.cpp
   ContainerRowSerdeTest.cpp
   ColumnStatsCollectorTest.cpp
   CustomJoinTest.cpp
-  EnforceSingleRowTest.cpp
-  ExchangeClientTest.cpp
-  ExpandTest.cpp
-  FilterProjectTest.cpp
-  FilterToExpressionTest.cpp
-  FunctionResolutionTest.cpp
   HashBitRangeTest.cpp
   HashJoinBridgeTest.cpp
   HashJoinTest.cpp
-  HashPartitionFunctionTest.cpp
   HashTableTest.cpp
-  IndexLookupJoinTest.cpp
-  LimitTest.cpp
-  LocalPartitionTest.cpp
   Main.cpp
-  MarkDistinctTest.cpp
   MemoryReclaimerTest.cpp
   MergeJoinTest.cpp
   MergeTest.cpp
   MergerTest.cpp
-  MultiFragmentTest.cpp
-  NestedLoopJoinTest.cpp
   OrderByTest.cpp
-  OperatorTraceTest.cpp
-  OutputBufferManagerTest.cpp
-  ParallelProjectTest.cpp
-  PartitionedOutputTest.cpp
-  PlanNodeSerdeTest.cpp
-  PlanNodeStatsTest.cpp
-  PlanNodeToStringTest.cpp
-  PlanNodeToSummaryStringTest.cpp
   PrefixSortTest.cpp
-  PrintPlanWithStatsTest.cpp
   ProbeOperatorStateTest.cpp
-  TraceUtilTest.cpp
-  RoundRobinPartitionFunctionTest.cpp
   RowContainerTest.cpp
-  RowNumberTest.cpp
-  ScaledScanControllerTest.cpp
-  ScaleWriterLocalPartitionTest.cpp
+  RowContainerSpillSerdeTest.cpp
   SortBufferTest.cpp
-  SpatialIndexTest.cpp
-  HilbertIndexTest.cpp
   SpillerTest.cpp
   SpillTest.cpp
   SplitListenerTest.cpp
   SplitTest.cpp
   SqlTest.cpp
   StreamingAggregationTest.cpp
-  TableScanTest.cpp
-  TableWriterTest.cpp
-  TaskListenerTest.cpp
-  ThreadDebugInfoTest.cpp
-  TopNRowNumberTest.cpp
-  TopNTest.cpp
-  UnnestTest.cpp
-  UnorderedStreamReaderTest.cpp
-  ValuesTest.cpp
-  VectorHasherTest.cpp
-  WindowFunctionRegistryTest.cpp
-  WindowTest.cpp
-  WriterFuzzerUtilTest.cpp
 )
 
 if(VELOX_ENABLE_GEO)

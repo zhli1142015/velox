@@ -267,6 +267,26 @@ class ConcatFilesSpillMergeStream final : public SpillMergeStream {
   size_t fileIndex_{0};
 };
 
+/// A reader for incremental batch restoration from row format spill files.
+/// This is used when restoring spilled data with potential re-spilling support.
+/// Each call to nextBatch() deserializes a batch of rows directly into the
+/// target RowContainer, avoiding intermediate Vector conversion.
+///
+/// NOTE: this object is not thread-safe.
+class SpillRowStreamReader {
+ public:
+  virtual ~SpillRowStreamReader() = default;
+
+  /// Reads the next batch of rows and deserializes them into 'rows'.
+  /// The deserialized rows are stored directly in the RowContainer.
+  /// @param rows Output vector to store the newly created row pointers.
+  /// @return Number of rows read, or 0 if end of file.
+  virtual uint32_t nextBatch(std::vector<char*>& rows) = 0;
+
+  /// Returns true if all data has been read.
+  virtual bool atEnd() const = 0;
+};
+
 /// Identifies a spill partition generated from a given spilling operator. It
 /// provides with informattion on spill level and the partition number of each
 /// spill level. When recursive spilling happens, there will be more than one
@@ -488,6 +508,28 @@ class SpillPartition {
     return size_;
   }
 
+  /// Returns true if all files in this partition use row format.
+  /// This enables direct restoration to RowContainer without Vector conversion.
+  bool isRowFormat() const;
+
+  /// Restores all spilled rows directly into the target RowContainer.
+  /// This is the most efficient way to restore spilled data as it bypasses
+  /// Vector conversion entirely. Only works if isRowFormat() returns true.
+  /// @param container Target RowContainer to restore rows into.
+  /// @param pool Memory pool for allocations.
+  /// @return Total number of rows restored.
+  int64_t restoreRowsTo(RowContainer* container, memory::MemoryPool* pool);
+
+  /// Creates a row stream reader for incremental batch restoration.
+  /// This is used when we need to restore rows incrementally with potential
+  /// re-spilling support. Only works if isRowFormat() returns true.
+  /// @param container The target RowContainer to deserialize rows into.
+  /// @param pool Memory pool for allocations.
+  /// @return A reader that provides batches of deserialized rows.
+  std::unique_ptr<SpillRowStreamReader> createRowStreamReader(
+      RowContainer* container,
+      memory::MemoryPool* pool);
+
   /// Invoked to split this spill partition into 'numShards' to process in
   /// parallel.
   ///
@@ -643,6 +685,13 @@ class SpillState {
       const SpillPartitionId& id,
       const RowVectorPtr& rows);
 
+  /// Appends row format spill files to partition with 'id'.
+  /// The files are written using RowContainer direct format and
+  /// identified by SpillFileInfo.rowFormatInfo being set.
+  /// @param id The partition id.
+  /// @param files The spill files to add (stored directly in partition).
+  void appendRowFormatFiles(const SpillPartitionId& id, SpillFiles files);
+
   /// Finishes a sorted run for partition with 'id'. If write is called for
   /// 'partition' again, the data does not have to be sorted relative to the
   /// data written so far.
@@ -711,6 +760,11 @@ class SpillState {
   // started spilling have an entry here. It is made thread safe because
   // concurrent writes may involve concurrent creations of writers.
   folly::Synchronized<SpillPartitionWriterSet> partitionWriters_;
+
+  // Row format spill files for each partition. These use RowContainer direct
+  // serialization format, identified by SpillFileInfo.rowFormatInfo.
+  folly::Synchronized<folly::F14FastMap<SpillPartitionId, SpillFiles>>
+      rowFormatFiles_;
 };
 
 /// Returns the partition bit offset of the current spill level of 'id'.

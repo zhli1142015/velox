@@ -138,6 +138,11 @@ class HashBuild final : public Operator {
   // in memory, then we will recursively spill part(s) of its data on disk.
   void setupSpiller(SpillPartition* spillPartition = nullptr);
 
+  // Invoked to setup spiller during row format restore. This is called when
+  // restoringPartitionId_ is already set. It only creates the spiller without
+  // setting up spillInputReader_ or modifying restoringPartitionId_.
+  void setupSpillerForRestore(uint8_t startPartitionBit);
+
   // Invoked when either there is no more input from the build source or from
   // the spill input reader during the restoring.
   void noMoreInputInternal();
@@ -185,6 +190,11 @@ class HashBuild final : public Operator {
 
   // Invoked to process data from spill input reader on restoring.
   void processSpillInput();
+
+  // Invoked to process row format spill input incrementally. This method
+  // reads batches of rows from spill files into the RowContainer.
+  // It supports re-spilling if memory pressure triggers during restore.
+  void processSpillInputRowFormat();
 
   // Set up for null-aware and regular anti-join with filter processing.
   void setupFilterForAntiJoins(
@@ -313,6 +323,8 @@ class HashBuild final : public Operator {
 
   // Used to read input from previously spilled data for restoring.
   std::unique_ptr<UnorderedStreamReader<BatchStream>> spillInputReader_;
+  // Used to read row format spill input for incremental row-by-row restoration.
+  std::unique_ptr<SpillRowStreamReader> spillRowStreamReader_;
   // The spill partition id for the currently restoring partition. Not set if
   // build hasn't spilled yet.
   std::optional<SpillPartitionId> restoringPartitionId_;

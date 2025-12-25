@@ -385,6 +385,14 @@ class QueryConfig {
   static constexpr const char* kSpillFileCreateConfig =
       "spill_file_create_config";
 
+  /// If true, use RowContainer native row format for spilling instead of
+  /// converting to Vector format. This can significantly reduce spill
+  /// serialization overhead by avoiding row-to-column conversion.
+  /// Only applies to HashBuild and Sort spilling (not Aggregation which
+  /// requires Accumulator extraction).
+  static constexpr const char* kSpillUseRowContainerFormat =
+      "spill_use_row_container_format";
+
   /// Default offset spill start partition bit. It is used with
   /// 'kSpillNumPartitionBits' together to
   /// calculate the spilling partition number for join spill or aggregation
@@ -1110,6 +1118,10 @@ class QueryConfig {
 
   std::string spillFileCreateConfig() const {
     return get<std::string>(kSpillFileCreateConfig, "");
+  }
+
+  bool spillUseRowContainerFormat() const {
+    return get<bool>(kSpillUseRowContainerFormat, true);
   }
 
   int32_t minSpillableReservationPct() const {

@@ -77,6 +77,7 @@ velox_add_library(
   ProbeOperatorState.cpp
   SubPartitionedSortWindowBuild.cpp
   RowContainer.cpp
+  RowContainerSpillSerde.cpp
   RowNumber.cpp
   RowsStreamingWindowBuild.cpp
   ScaleWriterLocalPartition.cpp

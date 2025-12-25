@@ -1573,6 +1573,8 @@ class RowContainer {
   int alignment_ = 1;
 
   friend class test::RowContainerTestHelper;
+  friend class RowContainerSpillSerializer;
+  friend class RowContainerSpillDeserializer;
 };
 
 template <>

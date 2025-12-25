@@ -20,11 +20,102 @@
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/testutil/TestValue.h"
 #include "velox/exec/OperatorUtils.h"
+#include "velox/exec/RowContainerSpillSerde.h"
 #include "velox/serializers/PrestoSerializer.h"
 
 using facebook::velox::common::testutil::TestValue;
 
 namespace facebook::velox::exec {
+
+/// A source of spilled RowVectors coming from a RowContainer format file.
+/// The spill data is read using RowContainerSpillReader.
+///
+/// NOTE: this object is not thread-safe.
+class RowContainerSpillBatchStream : public BatchStream {
+ public:
+  static std::unique_ptr<BatchStream> create(
+      const SpillFileInfo& fileInfo,
+      memory::MemoryPool* pool) {
+    return std::unique_ptr<BatchStream>(
+        new RowContainerSpillBatchStream(fileInfo, pool));
+  }
+
+  bool nextBatch(RowVectorPtr& batch) override {
+    return reader_->nextBatch(batch);
+  }
+
+ private:
+  RowContainerSpillBatchStream(
+      const SpillFileInfo& fileInfo,
+      memory::MemoryPool* pool)
+      : reader_(
+            std::make_unique<RowContainerSpillReader>(
+                fileInfo.path,
+                fileInfo.type,
+                pool)) {}
+
+  std::unique_ptr<RowContainerSpillReader> reader_;
+};
+
+/// A stream that reads rows directly from a RowContainer format spill file
+/// and deserializes them into a target RowContainer. This is used for
+/// incremental row restoration with potential re-spilling support.
+/// Each call to nextBatch() deserializes a batch of rows into the container.
+///
+/// NOTE: this object is not thread-safe.
+class RowContainerSpillRowStream : public SpillRowStreamReader {
+ public:
+  static std::unique_ptr<SpillRowStreamReader> create(
+      const SpillFileInfo& fileInfo,
+      RowContainer* container,
+      memory::MemoryPool* pool) {
+    VELOX_CHECK(
+        fileInfo.rowFormatInfo.has_value(),
+        "RowContainerSpillRowStream requires row format file");
+    return std::unique_ptr<SpillRowStreamReader>(
+        new RowContainerSpillRowStream(fileInfo, container, pool));
+  }
+
+  /// Reads the next batch of rows and deserializes them into the container.
+  /// Returns the number of rows read, or 0 if end of file.
+  uint32_t nextBatch(std::vector<char*>& rows) override {
+    rows.clear();
+    if (input_->atEnd()) {
+      return 0;
+    }
+
+    // Use RowContainerSpillDeserializer to read and deserialize directly
+    auto numRows =
+        deserializer_->deserialize(input_.get(), kMaxBatchRows, rows);
+    return numRows;
+  }
+
+  bool atEnd() const override {
+    return input_->atEnd();
+  }
+
+ private:
+  static constexpr size_t kMinBufferSize = 1 << 20; // 1MB
+  static constexpr int32_t kMaxBatchRows = 10000;
+
+  RowContainerSpillRowStream(
+      const SpillFileInfo& fileInfo,
+      RowContainer* container,
+      memory::MemoryPool* pool)
+      : pool_(pool) {
+    VELOX_CHECK_NOT_NULL(container);
+    auto fs = filesystems::getFileSystem(fileInfo.path, nullptr);
+    auto readFile = fs->openFileForRead(fileInfo.path);
+    input_ = std::make_unique<common::FileInputStream>(
+        std::move(readFile), kMinBufferSize, pool_);
+    deserializer_ =
+        std::make_unique<RowContainerSpillDeserializer>(container, pool_);
+  }
+
+  memory::MemoryPool* pool_;
+  std::unique_ptr<common::FileInputStream> input_;
+  std::unique_ptr<RowContainerSpillDeserializer> deserializer_;
+};
 
 namespace {
 /// gatherMerge merges & sorts with the mergeTree and gatherCopy the
@@ -243,6 +334,24 @@ uint64_t SpillState::appendToPartition(
   return partitionWriter(id)->write(rows, folly::Range<IndexRange*>(&range, 1));
 }
 
+void SpillState::appendRowFormatFiles(
+    const SpillPartitionId& id,
+    SpillFiles files) {
+  VELOX_CHECK(
+      isPartitionSpilled(id), "Partition {} is not spilled", id.toString());
+  if (files.empty()) {
+    return;
+  }
+
+  rowFormatFiles_.withWLock([&](auto& lockedFiles) {
+    auto& partitionFiles = lockedFiles[id];
+    partitionFiles.insert(
+        partitionFiles.end(),
+        std::make_move_iterator(files.begin()),
+        std::make_move_iterator(files.end()));
+  });
+}
+
 SpillWriter* SpillState::partitionWriter(const SpillPartitionId& id) const {
   VELOX_DCHECK(isPartitionSpilled(id));
   auto partitionWriters = partitionWriters_.rlock();
@@ -270,11 +379,27 @@ size_t SpillState::numFinishedFiles(const SpillPartitionId& id) const {
 }
 
 SpillFiles SpillState::finish(const SpillPartitionId& id) {
+  SpillFiles result;
+
+  // Get files from vector format writer
   auto* writer = partitionWriter(id);
-  if (writer == nullptr) {
-    return {};
+  if (writer != nullptr) {
+    result = writer->finish();
   }
-  return writer->finish();
+
+  // Append row format files
+  rowFormatFiles_.withWLock([&](auto& lockedFiles) {
+    auto it = lockedFiles.find(id);
+    if (it != lockedFiles.end()) {
+      result.insert(
+          result.end(),
+          std::make_move_iterator(it->second.begin()),
+          std::make_move_iterator(it->second.end()));
+      lockedFiles.erase(it);
+    }
+  });
+
+  return result;
 }
 
 const SpillPartitionIdSet& SpillState::spilledPartitionIdSet() const {
@@ -343,6 +468,87 @@ std::string SpillPartition::toString() const {
       succinctBytes(size_));
 }
 
+bool SpillPartition::isRowFormat() const {
+  if (files_.empty()) {
+    return false;
+  }
+  for (const auto& file : files_) {
+    if (!file.rowFormatInfo.has_value()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int64_t SpillPartition::restoreRowsTo(
+    RowContainer* container,
+    memory::MemoryPool* pool) {
+  VELOX_CHECK(isRowFormat(), "restoreRowsTo only works with row format files");
+  VELOX_CHECK_NOT_NULL(container);
+  VELOX_CHECK_NOT_NULL(pool);
+
+  int64_t totalRows = 0;
+  for (const auto& fileInfo : files_) {
+    totalRows += RowContainerSpillDeserializer::restoreRows(
+        fileInfo.path, container, pool);
+  }
+  files_.clear();
+  return totalRows;
+}
+
+/// A reader that reads from multiple row format spill files sequentially.
+/// This is used for incremental row restoration with potential re-spilling
+/// support.
+class UnorderedRowStreamReader : public SpillRowStreamReader {
+ public:
+  UnorderedRowStreamReader(
+      std::vector<std::unique_ptr<SpillRowStreamReader>> streams)
+      : streams_(std::move(streams)) {}
+
+  uint32_t nextBatch(std::vector<char*>& rows) override {
+    while (currentStream_ < streams_.size()) {
+      auto numRows = streams_[currentStream_]->nextBatch(rows);
+      if (numRows > 0) {
+        return numRows;
+      }
+      ++currentStream_;
+    }
+    return 0;
+  }
+
+  bool atEnd() const override {
+    return currentStream_ >= streams_.size() ||
+        (currentStream_ == streams_.size() - 1 &&
+         streams_[currentStream_]->atEnd());
+  }
+
+ private:
+  std::vector<std::unique_ptr<SpillRowStreamReader>> streams_;
+  size_t currentStream_{0};
+};
+
+std::unique_ptr<SpillRowStreamReader> SpillPartition::createRowStreamReader(
+    RowContainer* container,
+    memory::MemoryPool* pool) {
+  VELOX_CHECK(
+      isRowFormat(), "createRowStreamReader only works with row format files");
+  VELOX_CHECK_NOT_NULL(container);
+  VELOX_CHECK_NOT_NULL(pool);
+
+  std::vector<std::unique_ptr<SpillRowStreamReader>> streams;
+  streams.reserve(files_.size());
+  for (auto& fileInfo : files_) {
+    streams.push_back(
+        RowContainerSpillRowStream::create(fileInfo, container, pool));
+  }
+  files_.clear();
+
+  if (streams.size() == 1) {
+    return std::move(streams[0]);
+  }
+  return std::make_unique<UnorderedRowStreamReader>(std::move(streams));
+}
+
 std::unique_ptr<UnorderedStreamReader<BatchStream>>
 SpillPartition::createUnorderedReader(
     uint64_t bufferSize,
@@ -352,9 +558,13 @@ SpillPartition::createUnorderedReader(
   std::vector<std::unique_ptr<BatchStream>> streams;
   streams.reserve(files_.size());
   for (auto& fileInfo : files_) {
-    streams.push_back(
-        FileSpillBatchStream::create(
-            SpillReadFile::create(fileInfo, bufferSize, pool, spillStats)));
+    if (fileInfo.rowFormatInfo.has_value()) {
+      streams.push_back(RowContainerSpillBatchStream::create(fileInfo, pool));
+    } else {
+      streams.push_back(
+          FileSpillBatchStream::create(
+              SpillReadFile::create(fileInfo, bufferSize, pool, spillStats)));
+    }
   }
   files_.clear();
   return std::make_unique<UnorderedStreamReader<BatchStream>>(
@@ -369,6 +579,13 @@ SpillPartition::createOrderedReaderInternal(
   std::vector<std::unique_ptr<SpillMergeStream>> streams;
   streams.reserve(files_.size());
   for (auto& fileInfo : files_) {
+    // NOTE: Row format is not used for sorted spilling (Sort operator) because
+    // Sort outputs RowVectors via merge streams, requiring Row->Vector
+    // conversion which negates the write speedup. Row format is only beneficial
+    // for HashBuild which restores directly to RowContainer.
+    VELOX_CHECK(
+        !fileInfo.rowFormatInfo.has_value(),
+        "Row format is not supported for ordered reading");
     streams.push_back(
         FileSpillMergeStream::create(
             SpillReadFile::create(fileInfo, bufferSize, pool, spillStats)));

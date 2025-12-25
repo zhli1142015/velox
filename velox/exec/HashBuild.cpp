@@ -19,6 +19,7 @@
 #include "velox/common/base/StatsReporter.h"
 #include "velox/common/testutil/TestValue.h"
 #include "velox/exec/OperatorUtils.h"
+#include "velox/exec/RowContainerSpillSerde.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/VectorHasher.h"
 #include "velox/expression/FieldReference.h"
@@ -255,8 +256,43 @@ void HashBuild::setupSpiller(SpillPartition* spillPartition) {
   spillChildVectors_.resize(spillType_->size());
 }
 
+void HashBuild::setupSpillerForRestore(uint8_t startPartitionBit) {
+  VELOX_CHECK_NULL(spiller_);
+  VELOX_CHECK(restoringPartitionId_.has_value());
+
+  if (!canSpill()) {
+    return;
+  }
+  if (spillType_ == nullptr) {
+    spillType_ = hashJoinTableSpillType(tableType_, joinType_);
+    if (needProbedFlagSpill_) {
+      spillProbedFlagChannel_ = spillType_->size() - 1;
+      VELOX_CHECK_NULL(spillProbedFlagVector_);
+      spillProbedFlagVector_ = std::make_shared<ConstantVector<bool>>(
+          pool(), 0, /*isNull=*/false, BOOLEAN(), false);
+    }
+  }
+
+  const auto* config = spillConfig();
+  spiller_ = std::make_unique<HashBuildSpiller>(
+      joinType_,
+      restoringPartitionId_,
+      table_->rows(),
+      spillType_,
+      HashBitRange(
+          startPartitionBit, startPartitionBit + config->numPartitionBits),
+      config,
+      spillStats_.get());
+
+  const int32_t numPartitions = spiller_->hashBits().numPartitions();
+  spillInputIndicesBuffers_.resize(numPartitions);
+  rawSpillInputIndicesBuffers_.resize(numPartitions);
+  numSpillInputs_.resize(numPartitions, 0);
+  spillChildVectors_.resize(spillType_->size());
+}
+
 bool HashBuild::isInputFromSpill() const {
-  return spillInputReader_ != nullptr;
+  return spillInputReader_ != nullptr || spillRowStreamReader_ != nullptr;
 }
 
 RowTypePtr HashBuild::inputType() const {
@@ -898,6 +934,7 @@ void HashBuild::setupSpillInput(HashJoinBridge::SpillInput spillInput) {
   table_.reset();
   spiller_.reset();
   spillInputReader_.reset();
+  spillRowStreamReader_.reset();
   restoringPartitionId_.reset();
 
   // Reset the key and dependent channels as the spilled data columns have
@@ -909,12 +946,92 @@ void HashBuild::setupSpillInput(HashJoinBridge::SpillInput spillInput) {
       keyChannels_.size());
 
   setupTable();
-  setupSpiller(spillInput.spillPartition.get());
+
+  const auto* config = spillConfig();
+  const auto numPartitionBits = config->numPartitionBits;
+  const auto startPartitionBit = partitionBitOffset(
+                                     spillInput.spillPartition->id(),
+                                     config->startPartitionBit,
+                                     numPartitionBits) +
+      numPartitionBits;
+
   stateCleared_ = false;
   numHashInputRows_ = 0;
 
+  // Check if we should use row format processing
+  if (spillInput.spillPartition->isRowFormat() && !needProbedFlagSpill_) {
+    // Check if we've exceeded max spill level - if so, no need to setup
+    // spiller for re-spilling
+    if (config->exceedSpillLevelLimit(startPartitionBit)) {
+      RECORD_METRIC_VALUE(kMetricMaxSpillLevelExceededCount);
+      LOG(WARNING) << "Exceeded spill level limit: " << config->maxSpillLevel
+                   << ", using direct row restore for memory pool: "
+                   << pool()->name();
+      ++spillStats_->wlock()->spillMaxLevelExceededCount;
+      exceededMaxSpillLevelLimit_ = true;
+      restoringPartitionId_ = spillInput.spillPartition->id();
+
+      // Direct restore to RowContainer - no re-spilling possible
+      auto numRows =
+          spillInput.spillPartition->restoreRowsTo(table_->rows(), pool());
+      LOG(INFO) << "Directly restored " << numRows
+                << " rows from spill partition "
+                << spillInput.spillPartition->id().toString();
+
+      noMoreInputInternal();
+      return;
+    }
+
+    // Use incremental row format processing with re-spilling support
+    exceededMaxSpillLevelLimit_ = false;
+    restoringPartitionId_ = spillInput.spillPartition->id();
+
+    spillRowStreamReader_ = spillInput.spillPartition->createRowStreamReader(
+        table_->rows(), pool());
+
+    // Setup spiller for potential re-spilling (without spillPartition to
+    // avoid duplicate restoringPartitionId_ setup)
+    setupSpillerForRestore(startPartitionBit);
+
+    // Process row format spill input incrementally
+    processSpillInputRowFormat();
+    return;
+  }
+
+  // Fall back to traditional Vector-based processing
+  setupSpiller(spillInput.spillPartition.get());
+
   // Start to process spill input.
   processSpillInput();
+}
+
+void HashBuild::processSpillInputRowFormat() {
+  checkRunning();
+
+  std::vector<char*> rows;
+  while (spillRowStreamReader_->nextBatch(rows) > 0) {
+    // Rows are already deserialized into table_->rows() by nextBatch()
+    numHashInputRows_ += rows.size();
+
+    // Check if we need to spill due to memory pressure
+    // The spiller will calculate hash from RowContainer using
+    // container_->hash()
+    if (spiller_ != nullptr && spiller_->spillTriggered()) {
+      spiller_->spill();
+      table_->clear(true);
+      pool()->release();
+    }
+
+    if (!isRunning()) {
+      return;
+    }
+    if (shouldYield()) {
+      state_ = State::kYield;
+      future_ = ContinueFuture{folly::Unit{}};
+      return;
+    }
+  }
+  noMoreInputInternal();
 }
 
 void HashBuild::processSpillInput() {

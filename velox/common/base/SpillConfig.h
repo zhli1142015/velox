@@ -81,7 +81,8 @@ struct SpillConfig {
       uint32_t numMaxMergeFiles,
       std::optional<PrefixSortConfig> _prefixSortConfig = std::nullopt,
       const std::string& _fileCreateConfig = {},
-      uint32_t _windowMinReadBatchRows = 1'000);
+      uint32_t _windowMinReadBatchRows = 1'000,
+      bool _useRowContainerFormat = false);
 
   /// Returns the spilling level with given 'startBitOffset' and
   /// 'numPartitionBits'.
@@ -177,5 +178,28 @@ struct SpillConfig {
 
   /// The minimum number of rows to read when processing spilled window data.
   uint32_t windowMinReadBatchRows;
+
+  /// If true, use RowContainer native row format for spilling instead of
+  /// converting to Vector format. This can significantly reduce spill
+  /// serialization overhead by avoiding row-to-column conversion.
+  ///
+  /// IMPORTANT: This optimization is automatically disabled for Sort spilling
+  /// (operators with needSort() == true) even when this flag is set. Reason:
+  ///
+  /// - Sort outputs RowVectors via merge streams (SpillMergeStream::current())
+  /// - Row format requires Row->Vector conversion during restore
+  /// - Write speedup (~30%) is offset by read slowdown (~20%)
+  /// - Since Sort has 1:1 read/write ratio, net effect is negligible or
+  /// negative
+  ///
+  /// Row format is effective for HashBuild because:
+  /// - HashBuild restores data directly to RowContainer (no Vector conversion)
+  /// - Both write and read are faster
+  ///
+  /// Summary of row format applicability:
+  /// - HashBuild: ENABLED (write faster, read faster)
+  /// - Sort: DISABLED (write faster, read slower, net ~0 or negative)
+  /// - Aggregation: N/A (requires Accumulator extraction, not applicable)
+  bool useRowContainerFormat{false};
 };
 } // namespace facebook::velox::common

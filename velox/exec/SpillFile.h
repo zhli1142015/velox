@@ -34,6 +34,35 @@
 namespace facebook::velox::exec {
 using SpillSortKey = std::pair<column_index_t, CompareFlags>;
 
+class RowContainer;
+
+/// Metadata for RowContainer format spill files.
+/// This enables direct row serialization without Vector conversion.
+/// Similar to Bolt's RowFormatInfo but simplified.
+struct RowFormatInfo {
+  /// The RowContainer that owns the row data.
+  /// Used during serialization to access row layout information.
+  const RowContainer* container{nullptr};
+
+  /// Fixed row size from the container (excluding variable-width data).
+  int32_t fixedRowSize{0};
+
+  /// Offset to the 'next' pointer in the row (excluded from serialization).
+  int32_t nextOffset{0};
+
+  /// Indices of variable-width columns.
+  std::vector<column_index_t> variableWidthColumns;
+
+  /// Type kinds for each column.
+  std::vector<TypeKind> typeKinds;
+
+  /// Constructs RowFormatInfo from a RowContainer.
+  static RowFormatInfo fromContainer(const RowContainer* container);
+
+  /// Returns the serialized size for a single row.
+  int32_t rowSize(const char* row) const;
+};
+
 /// Records info of a finished spill file which is used for read.
 struct SpillFileInfo {
   uint32_t id;
@@ -43,9 +72,14 @@ struct SpillFileInfo {
   uint64_t size;
   std::vector<SpillSortKey> sortingKeys;
   common::CompressionKind compressionKind;
+  /// If set, the file uses RowContainer direct format.
+  /// Otherwise, it uses Presto serialization format.
+  std::optional<RowFormatInfo> rowFormatInfo;
 };
 
 using SpillFiles = std::vector<SpillFileInfo>;
+
+class RowContainer;
 
 /// Used to write the spilled data to a sequence of files for one partition. If
 /// data is sorted, each file is sorted. The globally sorted order is produced
