@@ -160,6 +160,7 @@ option(VELOX_ENABLE_GEO "Enable Geospatial support" OFF)
 option(VELOX_ENABLE_REMOTE_FUNCTIONS "Enable remote function support" OFF)
 option(VELOX_ENABLE_CCACHE "Use ccache if installed." ON)
 option(VELOX_ENABLE_COMPRESSION_LZ4 "Enable Lz4 compression support." OFF)
+option(VELOX_ENABLE_IO_URING "Enable io_uring support for spill operations (Linux only)" ON)
 
 option(VELOX_BUILD_TEST_UTILS "Builds Velox test utilities" OFF)
 option(VELOX_BUILD_VECTOR_TEST_UTILS "Builds Velox vector test utilities" OFF)
@@ -275,6 +276,22 @@ endif()
 # We look for OpenSSL here to cache the result enforce the version across our
 # dependencies.
 find_package(OpenSSL REQUIRED)
+
+# Look for liburing for io_uring support (Linux only).
+# io_uring enables async spill I/O operations for improved performance.
+if(VELOX_ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_package(liburing)
+  if(liburing_FOUND)
+    add_definitions(-DVELOX_ENABLE_IO_URING)
+    message(STATUS "io_uring support: ENABLED")
+  else()
+    message(STATUS "io_uring support: DISABLED (liburing not found)")
+    set(VELOX_ENABLE_IO_URING OFF)
+  endif()
+elseif(VELOX_ENABLE_IO_URING)
+  message(STATUS "io_uring support: DISABLED (Linux only)")
+  set(VELOX_ENABLE_IO_URING OFF)
+endif()
 
 if(
   VELOX_ENABLE_CCACHE

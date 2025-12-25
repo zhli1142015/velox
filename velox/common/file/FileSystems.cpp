@@ -20,6 +20,10 @@
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/file/File.h"
 
+#ifdef VELOX_ENABLE_IO_URING
+#include "velox/common/file/AsyncLocalFile.h"
+#endif
+
 #include <cstdio>
 #include <filesystem>
 
@@ -116,6 +120,11 @@ class LocalFileSystem : public FileSystem {
   std::unique_ptr<ReadFile> openFileForRead(
       std::string_view path,
       const FileOptions& options) override {
+#ifdef VELOX_ENABLE_IO_URING
+    if (options.useIoUring && isIoUringAvailable()) {
+      return std::make_unique<AsyncLocalReadFile>(extractPath(path));
+    }
+#endif
     return std::make_unique<LocalReadFile>(
         extractPath(path), executor_.get(), options.bufferIo);
   }
@@ -123,6 +132,14 @@ class LocalFileSystem : public FileSystem {
   std::unique_ptr<WriteFile> openFileForWrite(
       std::string_view path,
       const FileOptions& options) override {
+#ifdef VELOX_ENABLE_IO_URING
+    if (options.useIoUring && isIoUringAvailable()) {
+      return std::make_unique<AsyncLocalWriteFile>(
+          extractPath(path),
+          options.shouldCreateParentDirectories,
+          options.shouldThrowOnFileAlreadyExists);
+    }
+#endif
     return std::make_unique<LocalWriteFile>(
         extractPath(path),
         options.shouldCreateParentDirectories,

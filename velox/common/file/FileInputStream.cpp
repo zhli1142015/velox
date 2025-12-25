@@ -26,15 +26,27 @@ FileInputStream::FileInputStream(
       fileSize_(file_->size()),
       bufferSize_(std::min(fileSize_, bufferSize)),
       pool_(pool),
-      readAheadEnabled_((bufferSize_ < fileSize_) && file_->hasPreadvAsync()) {
+      readAheadEnabled_(
+          (bufferSize_ < fileSize_) && file_->hasPreadvAsync() &&
+          !file_->uringEnabled()),
+      uringEnabled_((bufferSize_ < fileSize_) && file_->uringEnabled()) {
   VELOX_CHECK_NOT_NULL(pool_);
   VELOX_CHECK_GT(fileSize_, 0, "Empty FileInputStream");
 
   buffers_.push_back(AlignedBuffer::allocate<char>(bufferSize_, pool_));
-  if (readAheadEnabled_) {
+  if (readAheadEnabled_ || uringEnabled_) {
+    // Dual buffer for both async preadvAsync and io_uring modes.
     buffers_.push_back(AlignedBuffer::allocate<char>(bufferSize_, pool_));
   }
-  readNextRange();
+
+  if (uringEnabled_) {
+    // Initialize buffer sizes tracking for io_uring mode.
+    bufferSizes_.resize(buffers_.size(), 0);
+    // Bolt-style init: sync read buffer[0], async prefetch buffer[1].
+    initUring();
+  } else {
+    readNextRange();
+  }
 }
 
 FileInputStream::~FileInputStream() {
@@ -58,6 +70,34 @@ void FileInputStream::readNextRange() {
   uint64_t readTimeNs{0};
   {
     NanosecondTimer timer{&readTimeNs};
+
+    if (uringEnabled_) {
+      // Bolt-style io_uring path: wait for prefetch, then issue next prefetch.
+      const auto curIdx = bufferIndex();
+      readBytes = bufferSizes_[curIdx];
+      if (readBytes == 0) {
+        return;
+      }
+
+      // Wait for current prefetch to complete.
+      auto ret = file_->waitForComplete();
+      VELOX_CHECK(ret, "Error when waiting for io_uring read");
+
+      // Set the readable range.
+      range_ = {buffer()->asMutable<uint8_t>(), readBytes, 0};
+      current_ = &range_;
+      completedOffset_ += readBytes;
+
+      // Advance to next buffer index.
+      advanceBuffer();
+
+      updateStats(readBytes, readTimeNs);
+
+      // Issue next prefetch.
+      prefetchUring();
+      return;
+    }
+
     if (readAheadWait_.valid()) {
       readBytes = std::move(readAheadWait_)
                       .via(&folly::QueuedImmediateExecutor::instance())
@@ -90,10 +130,23 @@ size_t FileInputStream::size() const {
 }
 
 bool FileInputStream::atEnd() const {
+  if (uringEnabled_) {
+    // In io_uring mode, check completed offset instead of prefetch offset.
+    return completedOffset_ >= fileSize_ &&
+        (current_ == nullptr || current_->availableBytes() == 0);
+  }
   return tellp() >= fileSize_;
 }
 
 std::streampos FileInputStream::tellp() const {
+  if (uringEnabled_) {
+    // In io_uring mode, use completedOffset_ minus current buffer's remaining.
+    if (current_ == nullptr) {
+      return completedOffset_;
+    }
+    return completedOffset_ - current_->availableBytes();
+  }
+
   if (current_ == nullptr) {
     VELOX_CHECK_EQ(fileOffset_, fileSize_);
     return fileOffset_;
@@ -252,4 +305,59 @@ std::string FileInputStream::Stats::toString() const {
       succinctBytes(readBytes),
       succinctMicros(readTimeNs));
 }
+
+void FileInputStream::initUring() {
+  // Bolt-style init: sync read buffer[0], async prefetch buffer[1].
+  VELOX_CHECK(uringEnabled_);
+
+  uint64_t readTimeNs{0};
+  {
+    NanosecondTimer timer{&readTimeNs};
+
+    // 1. Sync read first buffer.
+    const auto readBytes = readSize();
+    VELOX_CHECK_LT(0, readBytes, "Empty FileInputStream {}", fileSize_);
+
+    file_->pread(fileOffset_, readBytes, buffer()->asMutable<char>());
+
+    // 2. Set readable range.
+    range_ = {
+        buffer()->asMutable<uint8_t>(), static_cast<int32_t>(readBytes), 0};
+    current_ = &range_;
+
+    // 3. Update offsets and buffer tracking.
+    bufferSizes_[bufferIndex()] = readBytes;
+    fileOffset_ += readBytes;
+    completedOffset_ += readBytes;
+    advanceBuffer(); // Move to next buffer index for prefetch.
+
+    updateStats(readBytes, readTimeNs);
+  }
+
+  // 4. Issue async prefetch for second buffer.
+  prefetchUring();
+}
+
+void FileInputStream::prefetchUring() {
+  VELOX_CHECK(uringEnabled_);
+
+  const auto curIdx = bufferIndex();
+  bufferSizes_[curIdx] = 0; // Reset size for this buffer.
+
+  if (fileOffset_ >= fileSize_) {
+    return; // No more data to prefetch.
+  }
+
+  const auto prefetchBytes = std::min(fileSize_ - fileOffset_, bufferSize_);
+  if (prefetchBytes == 0) {
+    return;
+  }
+
+  // Submit async read to io_uring.
+  file_->submitRead(fileOffset_, prefetchBytes, buffer()->asMutable<char>());
+
+  bufferSizes_[curIdx] = prefetchBytes;
+  fileOffset_ += prefetchBytes;
+}
+
 } // namespace facebook::velox::common

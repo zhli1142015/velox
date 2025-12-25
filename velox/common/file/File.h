@@ -158,6 +158,40 @@ class ReadFile {
   /// be read at once.
   virtual uint64_t getNaturalReadSize() const = 0;
 
+  // =========================================================================
+  // Bolt-style direct async API for io_uring based implementations.
+  // These methods enable explicit control over async I/O submission and
+  // completion, allowing for patterns like dual-buffer prefetching.
+  // =========================================================================
+
+  /// Returns true if this ReadFile supports io_uring-based async operations.
+  /// When true, submitRead() and waitForComplete() can be used directly.
+  virtual bool uringEnabled() const {
+    return false;
+  }
+
+  /// Submit an asynchronous read request to io_uring. Non-blocking.
+  /// Following Bolt's design: large reads are split into 128KB chunks.
+  /// @param offset File offset to read from
+  /// @param length Number of bytes to read
+  /// @param buf Buffer to read into (must remain valid until waitForComplete)
+  /// @return true if submission succeeded, false otherwise
+  virtual bool
+  submitRead(uint64_t /*offset*/, uint64_t /*length*/, void* /*buf*/) {
+    return false;
+  }
+
+  /// Wait for all pending io_uring read requests to complete. Blocking.
+  /// @return Total bytes actually read across all completed operations
+  virtual uint64_t waitForComplete() {
+    return 0;
+  }
+
+  /// Returns the number of pending io_uring read requests.
+  virtual int32_t pendingReads() const {
+    return 0;
+  }
+
  protected:
   mutable std::atomic<uint64_t> bytesRead_ = 0;
 };
@@ -221,6 +255,46 @@ class WriteFile {
 
   virtual const std::string getName() const {
     VELOX_NYI("{} is not implemented", __FUNCTION__);
+  }
+
+  // =========================================================================
+  // Bolt-style direct async API for io_uring based implementations.
+  // =========================================================================
+
+  /// Returns true if this WriteFile supports io_uring-based async operations.
+  virtual bool uringEnabled() const {
+    return false;
+  }
+
+  /// Submit an asynchronous write request to io_uring. Non-blocking.
+  /// Following Bolt's design - receives IOBuf* (pointer), caller manages
+  /// lifetime.
+  /// @param data The IOBuf to write (must remain valid until completion)
+  /// @param taskId Unique ID for this write task (for completion tracking)
+  virtual void submitWrite(folly::IOBuf* /*data*/, int /*taskId*/) {
+    // Default: no-op for non-io_uring implementations
+  }
+
+  /// Wait for a specific write task to complete.
+  /// Following Bolt's design - receives buffers to release completed ones.
+  /// @param taskId The task ID to wait for
+  /// @param buffers The WriteBuffers storage for releasing completed buffers
+  /// @return true if completed successfully, false on error
+  virtual bool waitForComplete(
+      int /*taskId*/,
+      std::vector<std::unique_ptr<folly::IOBuf>>& /*buffers*/) {
+    return false;
+  }
+
+  /// Wait for all pending write operations to complete.
+  /// @return true if all completed successfully, false on error
+  virtual bool waitForCompleteAll() {
+    return false;
+  }
+
+  /// Returns the number of pending io_uring write requests.
+  virtual int32_t pendingWrites() const {
+    return 0;
   }
 };
 

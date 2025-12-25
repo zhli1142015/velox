@@ -201,5 +201,11 @@ struct SpillConfig {
   /// - Sort: DISABLED (write faster, read slower, net ~0 or negative)
   /// - Aggregation: N/A (requires Accumulator extraction, not applicable)
   bool useRowContainerFormat{false};
+
+  /// If true, use io_uring for async spill I/O operations.
+  /// This enables non-blocking writes and dual-buffer prefetch for reads.
+  /// Requires Linux kernel 5.1+ with io_uring support.
+  /// Following Bolt's design: ring depth=64, 128KB read chunks.
+  bool spillUringEnabled{true};
 };
 } // namespace facebook::velox::common

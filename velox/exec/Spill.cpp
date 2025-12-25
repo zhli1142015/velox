@@ -230,7 +230,8 @@ SpillState::SpillState(
     const std::optional<common::PrefixSortConfig>& prefixSortConfig,
     memory::MemoryPool* pool,
     folly::Synchronized<common::SpillStats>* stats,
-    const std::string& fileCreateConfig)
+    const std::string& fileCreateConfig,
+    bool spillUringEnabled)
     : getSpillDirPathCb_(getSpillDirPathCb),
       updateAndCheckSpillLimitCb_(updateAndCheckSpillLimitCb),
       fileNamePrefix_(fileNamePrefix),
@@ -240,6 +241,7 @@ SpillState::SpillState(
       compressionKind_(compressionKind),
       prefixSortConfig_(prefixSortConfig),
       fileCreateConfig_(fileCreateConfig),
+      spillUringEnabled_(spillUringEnabled),
       pool_(pool),
       stats_(stats) {}
 
@@ -322,7 +324,8 @@ uint64_t SpillState::appendToPartition(
               fileCreateConfig_,
               updateAndCheckSpillLimitCb_,
               pool_,
-              stats_));
+              stats_,
+              spillUringEnabled_));
     }
   });
 
@@ -553,7 +556,8 @@ std::unique_ptr<UnorderedStreamReader<BatchStream>>
 SpillPartition::createUnorderedReader(
     uint64_t bufferSize,
     memory::MemoryPool* pool,
-    folly::Synchronized<common::SpillStats>* spillStats) {
+    folly::Synchronized<common::SpillStats>* spillStats,
+    bool spillUringEnabled) {
   VELOX_CHECK_NOT_NULL(pool);
   std::vector<std::unique_ptr<BatchStream>> streams;
   streams.reserve(files_.size());
@@ -563,7 +567,8 @@ SpillPartition::createUnorderedReader(
     } else {
       streams.push_back(
           FileSpillBatchStream::create(
-              SpillReadFile::create(fileInfo, bufferSize, pool, spillStats)));
+              SpillReadFile::create(
+                  fileInfo, bufferSize, pool, spillStats, spillUringEnabled)));
     }
   }
   files_.clear();

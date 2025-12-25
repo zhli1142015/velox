@@ -23,6 +23,12 @@
 #include "velox/common/file/FileInputStream.h"
 #include "velox/serializers/VectorStream.h"
 
+namespace facebook::velox {
+#ifdef VELOX_ENABLE_IO_URING
+class WriteBuffers;
+#endif
+} // namespace facebook::velox
+
 namespace facebook::velox::serializer {
 
 /// Represents a file for writing the serialized pages into a disk file.
@@ -35,10 +41,17 @@ class SerializedPageFile {
     uint64_t size;
   };
 
+  /// Creates a serialized page file.
+  /// @param id The file id
+  /// @param pathPrefix Path prefix for the file
+  /// @param fileCreateConfig File creation configuration
+  /// @param useIoUring Whether to use io_uring for async writes (default:
+  /// false)
   static std::unique_ptr<SerializedPageFile> create(
       uint32_t id,
       const std::string& pathPrefix,
-      const std::string& fileCreateConfig);
+      const std::string& fileCreateConfig,
+      bool useIoUring = false);
 
   uint32_t id() const {
     return id_;
@@ -63,13 +76,16 @@ class SerializedPageFile {
   /// Finishes writing and flushes any unwritten data.
   void finish();
 
+  ~SerializedPageFile();
+
  private:
   static inline std::atomic_int32_t ordinalCounter_{0};
 
   SerializedPageFile(
       uint32_t id,
       const std::string& pathPrefix,
-      const std::string& fileCreateConfig);
+      const std::string& fileCreateConfig,
+      bool useIoUring);
 
   const uint32_t id_;
 
@@ -77,7 +93,19 @@ class SerializedPageFile {
 
   uint64_t size_{0};
 
+  // Counter for async write task IDs.
+  std::atomic<int32_t> taskId_{0};
+
+  // Whether to use io_uring for async writes.
+  bool useIoUring_{false};
+
   std::unique_ptr<WriteFile> file_;
+
+#ifdef VELOX_ENABLE_IO_URING
+  // WriteBuffers for managing IOBuf lifetime during async writes.
+  // Following Bolt's design - WriteBuffers owned externally from file.
+  std::unique_ptr<WriteBuffers> writeBuffers_;
+#endif
 };
 
 /// Used to write 'RowVector' as serialized page data to a sequence of files.
@@ -89,7 +117,8 @@ class SerializedPageFileWriter {
   /// before write to file. 'fileCreateConfig' specifies the file layout on
   /// remote storage which is storage system specific. 'serdeOptions' specifies
   /// the serialization options to use. 'serde' specifies the VectorSerde
-  /// instance to use. 'pool' is used for buffering.
+  /// instance to use. 'pool' is used for buffering. 'useIoUring' enables
+  /// io_uring for async writes.
   SerializedPageFileWriter(
       const std::string& pathPrefix,
       uint64_t targetFileSize,
@@ -97,7 +126,8 @@ class SerializedPageFileWriter {
       const std::string& fileCreateConfig,
       std::unique_ptr<VectorSerde::Options> serdeOptions,
       VectorSerde* serde,
-      memory::MemoryPool* pool);
+      memory::MemoryPool* pool,
+      bool useIoUring = false);
 
   virtual ~SerializedPageFileWriter() = default;
 
@@ -155,6 +185,7 @@ class SerializedPageFileWriter {
   const uint64_t targetFileSize_;
   const uint64_t writeBufferSize_;
   const std::string fileCreateConfig_;
+  const bool useIoUring_;
 
   const std::unique_ptr<VectorSerde::Options> serdeOptions_;
   memory::MemoryPool* const pool_;
@@ -177,7 +208,8 @@ class SerializedPageFileReader {
       const RowTypePtr& type,
       VectorSerde* serde,
       std::unique_ptr<VectorSerde::Options> readOptions,
-      memory::MemoryPool* pool);
+      memory::MemoryPool* pool,
+      bool useIoUring = false);
 
   virtual ~SerializedPageFileReader() = default;
 
