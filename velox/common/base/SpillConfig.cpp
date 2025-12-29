@@ -18,6 +18,20 @@
 #include "velox/common/base/Exceptions.h"
 
 namespace facebook::velox::common {
+
+RowBasedSpillMode strToRowBasedSpillMode(const std::string& str) {
+  if (str == "disabled") {
+    return RowBasedSpillMode::DISABLE;
+  } else if (str == "raw") {
+    return RowBasedSpillMode::RAW;
+  } else if (str == "compression") {
+    return RowBasedSpillMode::COMPRESSION;
+  }
+  VELOX_USER_FAIL(
+      "Invalid row-based spill mode: {}. Valid options are 'disabled', 'raw', 'compression'.",
+      str);
+}
+
 SpillConfig::SpillConfig(
     GetSpillDirectoryPathCB _getSpillDirPathCb,
     UpdateAndCheckSpillLimitCB _updateAndCheckSpillLimitCb,
@@ -38,7 +52,8 @@ SpillConfig::SpillConfig(
     std::optional<PrefixSortConfig> _prefixSortConfig,
     const std::string& _fileCreateConfig,
     uint32_t _windowMinReadBatchRows,
-    bool _spillUringEnabled)
+    bool _spillUringEnabled,
+    const std::string& _rowBasedSpillMode)
     : getSpillDirPathCb(std::move(_getSpillDirPathCb)),
       updateAndCheckSpillLimitCb(std::move(_updateAndCheckSpillLimitCb)),
       fileNamePrefix(std::move(_fileNamePrefix)),
@@ -60,7 +75,8 @@ SpillConfig::SpillConfig(
       prefixSortConfig(_prefixSortConfig),
       fileCreateConfig(_fileCreateConfig),
       windowMinReadBatchRows(_windowMinReadBatchRows),
-      spillUringEnabled(_spillUringEnabled) {
+      spillUringEnabled(_spillUringEnabled),
+      rowBasedSpillMode(strToRowBasedSpillMode(_rowBasedSpillMode)) {
   VELOX_USER_CHECK_GE(
       spillableReservationGrowthPct,
       minSpillableReservationPct,

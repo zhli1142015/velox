@@ -50,6 +50,8 @@ inline void setBit(char* bits, uint32_t idx) {
 
 Accumulator::Accumulator(Aggregate* aggregate, TypePtr spillType)
     : isFixedSize_{aggregate->isFixedSize()},
+      serializable_{
+          !aggregate->isFixedSize() && aggregate->supportAccumulatorSerde()},
       fixedSize_{aggregate->accumulatorFixedWidthSize()},
       usesExternalMemory_{aggregate->accumulatorUsesExternalMemory()},
       alignment_{aggregate->accumulatorAlignmentSize()},
@@ -61,7 +63,8 @@ Accumulator::Accumulator(Aggregate* aggregate, TypePtr spillType)
           }},
       destroyFunction_{[aggregate](folly::Range<char**> groups) {
         aggregate->destroy(groups);
-      }} {
+      }},
+      aggregate_(aggregate) {
   VELOX_CHECK_NOT_NULL(aggregate);
 }
 
@@ -75,15 +78,21 @@ Accumulator::Accumulator(
         spillExtractFunction,
     std::function<void(folly::Range<char**> groups)> destroyFunction)
     : isFixedSize_{isFixedSize},
+      serializable_{false},
       fixedSize_{fixedSize},
       usesExternalMemory_{usesExternalMemory},
       alignment_{alignment},
       spillType_{std::move(spillType)},
       spillExtractFunction_{std::move(spillExtractFunction)},
-      destroyFunction_{std::move(destroyFunction)} {}
+      destroyFunction_{std::move(destroyFunction)},
+      aggregate_(nullptr) {}
 
 bool Accumulator::isFixedSize() const {
   return isFixedSize_;
+}
+
+bool Accumulator::serializable() const {
+  return serializable_;
 }
 
 int32_t Accumulator::fixedWidthSize() const {
@@ -110,6 +119,114 @@ void Accumulator::extractForSpill(
     folly::Range<char**> groups,
     VectorPtr& result) const {
   spillExtractFunction_(groups, result);
+}
+
+uint32_t Accumulator::getSerializeSize(char* group) const {
+  VELOX_CHECK_NOT_NULL(aggregate_);
+  return aggregate_->getAccumulatorSerializeSize(group);
+}
+
+char* Accumulator::serializeAccumulator(char* group, char* dst) const {
+  VELOX_CHECK_NOT_NULL(aggregate_);
+  return aggregate_->serializeAccumulator(group, dst);
+}
+
+char* Accumulator::deserializeAccumulator(char* group, char* src) const {
+  VELOX_CHECK_NOT_NULL(aggregate_);
+  return aggregate_->deserializeAccumulator(group, src);
+}
+
+// RowFormatInfo implementation
+RowFormatInfo::RowFormatInfo(RowContainer* container, bool enableCompression)
+    : fixRowSize(container->fixedRowSize()),
+      nextEqualOffset(container->probedFlagOffset()),
+      rowSizeOffset(container->rowSizeOffset()),
+      alignment(container->alignment()),
+      enableCompression(enableCompression) {
+  // Collect variable-width column information
+  const auto& types = container->columnTypes();
+  const auto numColumns = types.size();
+  rowColumns.reserve(numColumns);
+  for (size_t i = 0; i < numColumns; ++i) {
+    const auto& col = container->columnAt(i);
+    rowColumns.emplace_back(
+        col.offset(),
+        col.nullByte() * 8 +
+            (col.nullMask() == 0 ? RowColumn::kNotNullOffset
+                                 : __builtin_ctz(col.nullMask())));
+    const auto& type = types[i];
+    if (!type->isFixedWidth()) {
+      bool isStringType = type->kind() == TypeKind::VARCHAR ||
+          type->kind() == TypeKind::VARBINARY;
+      // Store (isStringView, offset, nullOffset)
+      int32_t nullOffset = col.nullMask() == 0
+          ? RowColumn::kNotNullOffset
+          : (col.nullByte() * 8 + __builtin_ctz(col.nullMask()));
+      variableColumns.emplace_back(isStringType, col.offset(), nullOffset);
+    }
+  }
+
+  // Collect serializable accumulators (non-fixed size accumulators that support
+  // serde)
+  const auto& accumulators = container->accumulators();
+  for (const auto& accumulator : accumulators) {
+    if (accumulator.serializable()) {
+      serializableAccumulators.push_back(&accumulator);
+    }
+  }
+
+  // If rowSizeOffset is set, adjust fixRowSize
+  // RowContainer memory layout:
+  // <keys>, <nulls>, <flag>, <accumulators>, <dependents>, <rowSize>, <next>,
+  // <alignment> We only serialize data before <rowSize> to reduce spill size
+  if (rowSizeOffset) {
+    fixRowSize = rowSizeOffset;
+  }
+}
+
+// static
+bool RowFormatInfo::isNullAt(
+    const char* row,
+    int32_t offset,
+    int32_t nullOffset) {
+  if (nullOffset == RowColumn::kNotNullOffset) {
+    return false;
+  }
+  int32_t nullByte = nullOffset / 8;
+  uint8_t nullMask = 1 << (nullOffset % 8);
+  return (row[nullByte] & nullMask) != 0;
+}
+
+uint32_t RowFormatInfo::getRowSize(const char* row) const {
+  // This const version can only be used when there are no serializable
+  // accumulators
+  VELOX_CHECK(
+      serializableAccumulators.empty(),
+      "Cannot use const getRowSize with serializable accumulators. "
+      "Use non-const version instead.");
+  uint32_t size = fixRowSize +
+      (rowSizeOffset ? *reinterpret_cast<const uint32_t*>(row + rowSizeOffset)
+                     : 0);
+  return bits::roundUp(size, alignment);
+}
+
+uint32_t RowFormatInfo::getRowSize(char* row) const {
+  uint32_t size = fixRowSize +
+      (rowSizeOffset ? *reinterpret_cast<const uint32_t*>(row + rowSizeOffset)
+                     : 0);
+  // Add serializable accumulator sizes
+  for (const auto* accumulator : serializableAccumulators) {
+    size += accumulator->getSerializeSize(row);
+  }
+  return bits::roundUp(size, alignment);
+}
+
+uint32_t RowFormatInfo::getRowSize(folly::Range<char**> rows) const {
+  uint32_t totalSize = 0;
+  for (auto* row : rows) {
+    totalSize += getRowSize(row);
+  }
+  return totalSize;
 }
 
 // static

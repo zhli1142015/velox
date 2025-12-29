@@ -71,6 +71,7 @@ GroupingSet::GroupingSet(
       globalGroupingSets_(globalGroupingSets),
       groupIdChannel_(groupIdChannel),
       spillConfig_(spillConfig),
+      canUseRowBasedSpill_(computeCanUseRowBasedSpill(aggregates_)),
       nonReclaimableSection_(nonReclaimableSection),
       stringAllocator_(pool_),
       rows_(pool_),
@@ -78,6 +79,24 @@ GroupingSet::GroupingSet(
       spillStats_(spillStats) {
   VELOX_CHECK_NOT_NULL(nonReclaimableSection_);
   VELOX_CHECK(pool_->trackUsage());
+
+  // Initialize effective spill config, potentially adjusting row-based spill
+  // mode based on canUseRowBasedSpill_.
+  initEffectiveSpillConfig();
+
+  // Log the row-based spill mode for debugging and transparency.
+  if (spillConfig_ != nullptr) {
+    const auto effectiveMode = effectiveRowBasedSpillMode();
+    if (effectiveMode != common::RowBasedSpillMode::DISABLE) {
+      LOG(INFO) << "GroupingSet: Row-based spill enabled, mode: "
+                << static_cast<int>(effectiveMode);
+    } else if (
+        spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
+      LOG(INFO) << "GroupingSet: Row-based spill disabled because not all "
+                << "aggregates support it (have fixed-size accumulators or "
+                << "support accumulator serde, and no ORDER BY clauses)";
+    }
+  }
 
   for (auto& hasher : hashers_) {
     keyChannels_.push_back(hasher->channel());
@@ -130,6 +149,75 @@ GroupingSet::~GroupingSet() {
   if (isGlobal_) {
     destroyGlobalAggregations();
   }
+}
+
+// static
+bool GroupingSet::computeCanUseRowBasedSpill(
+    const std::vector<AggregateInfo>& aggregates) {
+  // Row-based spill can be used when all aggregates satisfy:
+  // 1. Either have fixed-size accumulators (isFixedSize() == true), OR
+  //    support accumulator serialization (supportAccumulatorSerde() == true)
+  // 2. AND have no sorting keys (no ORDER BY clause in the aggregate)
+  //
+  // This follows Bolt's design where row-based spill is enabled only for
+  // aggregates that can be serialized directly in row format.
+  for (const auto& aggregate : aggregates) {
+    // Check for sorting keys (ORDER BY clause). Aggregates with ORDER BY
+    // cannot use row-based spill because the sorted aggregation maintains
+    // complex internal state.
+    if (!aggregate.sortingKeys.empty()) {
+      return false;
+    }
+
+    // Check if the aggregate has a fixed-size accumulator or supports serde.
+    // Fixed-size accumulators can always be serialized in row format.
+    // Variable-size accumulators need explicit serde support.
+    if (!aggregate.function->isFixedSize() &&
+        !aggregate.function->supportAccumulatorSerde()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+common::RowBasedSpillMode GroupingSet::effectiveRowBasedSpillMode() const {
+  // If spillConfig is not set, row-based spill is not applicable.
+  if (spillConfig_ == nullptr) {
+    return common::RowBasedSpillMode::DISABLE;
+  }
+
+  // If not all aggregates can use row-based spill, disable it regardless
+  // of the spillConfig setting.
+  if (!canUseRowBasedSpill_) {
+    return common::RowBasedSpillMode::DISABLE;
+  }
+
+  // Return the configured mode.
+  return spillConfig_->rowBasedSpillMode;
+}
+
+void GroupingSet::initEffectiveSpillConfig() {
+  if (spillConfig_ == nullptr) {
+    return;
+  }
+
+  // If canUseRowBasedSpill_ is false and the original config has row-based
+  // spill enabled, we need to create a copy with row-based spill disabled.
+  if (!canUseRowBasedSpill_ &&
+      spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
+    effectiveSpillConfig_ =
+        std::make_unique<common::SpillConfig>(*spillConfig_);
+    effectiveSpillConfig_->rowBasedSpillMode =
+        common::RowBasedSpillMode::DISABLE;
+  }
+}
+
+const common::SpillConfig* GroupingSet::effectiveSpillConfig() const {
+  // If we have an adjusted config, use it; otherwise use the original.
+  if (effectiveSpillConfig_ != nullptr) {
+    return effectiveSpillConfig_.get();
+  }
+  return spillConfig_;
 }
 
 std::unique_ptr<GroupingSet> GroupingSet::createForMarkDistinct(
@@ -1020,16 +1108,16 @@ void GroupingSet::spill() {
     VELOX_CHECK(numDistinctSpillFilesPerPartition_.empty());
     const auto sortingKeys = SpillState::makeSortingKeys(
         std::vector<CompareFlags>(rows->keyTypes().size()));
+    const auto* config = effectiveSpillConfig();
     inputSpiller_ = std::make_unique<AggregationInputSpiller>(
         rows,
         makeSpillType(),
         HashBitRange(
-            spillConfig_->startPartitionBit,
+            config->startPartitionBit,
             static_cast<uint8_t>(
-                spillConfig_->startPartitionBit +
-                spillConfig_->numPartitionBits)),
+                config->startPartitionBit + config->numPartitionBits)),
         sortingKeys,
-        spillConfig_,
+        config,
         spillStats_);
   }
   // Spilling may execute on multiple partitions in parallel, and
@@ -1040,7 +1128,8 @@ void GroupingSet::spill() {
   rows->stringAllocator().freezeAndExecute([&]() { inputSpiller_->spill(); });
   if (isDistinct() && numDistinctSpillFilesPerPartition_.empty()) {
     size_t totalNumDistinctSpilledFiles{0};
-    const auto maxPartitions = 1 << spillConfig_->numPartitionBits;
+    const auto* config = effectiveSpillConfig();
+    const auto maxPartitions = 1 << config->numPartitionBits;
     numDistinctSpillFilesPerPartition_.resize(maxPartitions, 0);
     for (int partition = 0; partition < maxPartitions; ++partition) {
       numDistinctSpillFilesPerPartition_[partition] =
@@ -1066,7 +1155,7 @@ void GroupingSet::spill(const RowContainerIterator& rowIterator) {
   auto* rows = table_->rows();
   VELOX_CHECK(pool_->trackUsage());
   outputSpiller_ = std::make_unique<AggregationOutputSpiller>(
-      rows, makeSpillType(), spillConfig_, spillStats_);
+      rows, makeSpillType(), effectiveSpillConfig(), spillStats_);
 
   // Spilling may execute on multiple partitions in parallel, and
   // HashStringAllocator is not thread safe. If any aggregations
@@ -1138,7 +1227,8 @@ bool GroupingSet::prepareNextSpillPartitionOutput() {
   auto it = spillPartitionSet_.begin();
   VELOX_CHECK_NE(outputSpillPartition_, it->first.partitionNumber());
   outputSpillPartition_ = it->first.partitionNumber();
-  merge_ = it->second->createOrderedReader(*spillConfig_, pool_, spillStats_);
+  merge_ = it->second->createOrderedReader(
+      *effectiveSpillConfig(), pool_, spillStats_);
   spillPartitionSet_.erase(it);
   return true;
 }

@@ -384,6 +384,14 @@ class QueryConfig {
   /// Requires Linux kernel 5.1+ with io_uring support.
   static constexpr const char* kSpillUringEnabled = "spill_uring_enabled";
 
+  /// Row-based spill mode. Controls whether to use row format for spilling.
+  /// Valid values: "disabled" (default), "raw", "compression".
+  /// "disabled": Use columnar format (traditional RowVector serialization)
+  /// "raw": Use row format without compression
+  /// "compression": Use row format with LZ4/ZSTD compression
+  /// NOTE: Default is "disabled" for backward compatibility.
+  static constexpr const char* kRowBasedSpillMode = "row_based_spill_mode";
+
   /// Config used to create spill files. This config is provided to underlying
   /// file system and the config is free form. The form should be defined by the
   /// underlying file system.
@@ -1116,6 +1124,16 @@ class QueryConfig {
   bool spillUringEnabled() const {
     // By default, io_uring is enabled for spill operations.
     return get<bool>(kSpillUringEnabled, true);
+  }
+
+  std::string rowBasedSpillMode() const {
+    // Row-based spill mode: "disabled" (default), "raw", or "compression".
+    // "disabled": Use columnar format (traditional RowVector serialization)
+    // "raw": Use row format without compression
+    // "compression": Use row format with LZ4/ZSTD compression
+    // NOTE: Default is "disabled" for backward compatibility until all
+    // operators support row-based spill reading.
+    return get<std::string>(kRowBasedSpillMode, "disabled");
   }
 
   std::string spillFileCreateConfig() const {

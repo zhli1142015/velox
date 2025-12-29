@@ -17,11 +17,13 @@
 #include "velox/exec/Spiller.h"
 #include <folly/ScopeGuard.h>
 #include "velox/common/base/AsyncSource.h"
+#include "velox/common/base/SpillConfig.h"
 #include "velox/common/memory/MemoryArbitrator.h"
 #include "velox/common/testutil/TestValue.h"
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/HashJoinBridge.h"
 #include "velox/exec/PrefixSort.h"
+#include "velox/exec/RowFormatInfo.h"
 #include "velox/external/timsort/TimSort.hpp"
 
 using facebook::velox::common::testutil::TestValue;
@@ -66,6 +68,17 @@ SpillerBase::SpillerBase(
           spillStats,
           spillConfig->fileCreateConfig,
           spillConfig->spillUringEnabled) {
+  // Determine spill mode based on configuration
+  spillMode_ = determineSpillMode(
+      spillConfig->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE);
+
+  // If using row-based spill, initialize RowFormatInfo
+  if (spillMode_ == Mode::kRowContainer && container_ != nullptr) {
+    bool enableCompression = spillConfig->rowBasedSpillMode ==
+        common::RowBasedSpillMode::COMPRESSION;
+    rowInfo_ = RowFormatInfo(container_, enableCompression);
+  }
+
   TestValue::adjust("facebook::velox::exec::SpillerBase", this);
 }
 
@@ -191,7 +204,11 @@ void SpillerBase::runSpill(bool lastRun) {
     run.clear();
     // When a sorted run ends, we start with a new file next time.
     if (needSort()) {
-      state_.finishFile(partitionId);
+      if (spillMode_ == Mode::kRowContainer) {
+        state_.finishRowFile(partitionId);
+      } else {
+        state_.finishFile(partitionId);
+      }
     }
   }
 }
@@ -204,10 +221,19 @@ std::unique_ptr<SpillerBase::SpillStatus> SpillerBase::writeSpill(
   constexpr int32_t kTargetBatchBytes = 1 << 18; // 256K
   constexpr int32_t kTargetBatchRows = 64;
 
-  RowVectorPtr spillVector;
   auto& run = spillRuns_.at(id);
   try {
     ensureSorted(run);
+
+    // Use row-based spill path if enabled.
+    if (spillMode_ == Mode::kRowContainer) {
+      state_.appendRowsToPartition(id, run.rows, rowInfo_.value());
+      const auto numWritten = run.rows.size();
+      return std::make_unique<SpillStatus>(id, numWritten, nullptr);
+    }
+
+    // Columnar spill path (default).
+    RowVectorPtr spillVector;
     size_t written = 0;
     while (written < run.rows.size()) {
       extractSpillVector(
@@ -478,7 +504,11 @@ void SortOutputSpiller::runSpill(bool lastRun) {
   SpillerBase::runSpill(lastRun);
   if (lastRun) {
     for (const auto& [partitionId, spillRun] : spillRuns_) {
-      state_.finishFile(partitionId);
+      if (spillMode_ == Mode::kRowContainer) {
+        state_.finishRowFile(partitionId);
+      } else {
+        state_.finishFile(partitionId);
+      }
     }
   }
 }

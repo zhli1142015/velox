@@ -295,6 +295,43 @@ class Aggregate {
     VELOX_NYI("toIntermediate not supported");
   }
 
+  /// Returns true if the accumulator type supports serialize and deserialize.
+  /// After serialization, the memory layout is:
+  ///   ------<accumulator>---- // fixed part
+  ///           --------------- // extra variable memory
+  /// After serialize, the variable part of accumulator should be serialized
+  /// into extra variable memory. When deserialize, accumulator should build
+  /// from fixed part and extra variable memory.
+  /// Note: deserialized accumulator should not allocate extra memory except
+  /// the variable memory with its serialized data.
+  virtual bool supportAccumulatorSerde() const {
+    return false;
+  }
+
+  /// Returns the extra buffer size needed to serialize the accumulator.
+  /// @param group Pointer to the start of the group row.
+  /// @return Size in bytes needed to serialize the accumulator's variable data.
+  virtual uint32_t getAccumulatorSerializeSize(char* /*group*/) const {
+    VELOX_NYI("getAccumulatorSerializeSize not supported");
+  }
+
+  /// Serializes the accumulator in group into 'dst' with memory size of 'size'.
+  /// @param group Pointer to the start of the group row.
+  /// @param dst Destination buffer to write serialized data.
+  /// @return Pointer to the end of written data (dst + written bytes).
+  virtual char* serializeAccumulator(char* /*group*/, char* /*dst*/) const {
+    VELOX_NYI("serializeAccumulator not supported");
+  }
+
+  /// Deserializes the accumulator with data from src.
+  /// Warning: should not allocate extra memory in deserialize.
+  /// @param group Pointer to the start of the group row.
+  /// @param src Source buffer containing serialized data.
+  /// @return Pointer to the end of read data (src + read bytes).
+  virtual char* deserializeAccumulator(char* /*group*/, char* /*src*/) const {
+    VELOX_NYI("deserializeAccumulator not supported");
+  }
+
   // Frees any out of line storage for the accumulator in
   // 'groups' and marks the aggregate as uninitialized.
   virtual void destroy(folly::Range<char**> groups) {

@@ -25,6 +25,7 @@
 #include "velox/common/compression/Compression.h"
 #include "velox/common/file/File.h"
 #include "velox/common/file/FileInputStream.h"
+#include "velox/exec/RowFormatInfo.h"
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/serializers/SerializedPageFile.h"
 #include "velox/vector/ComplexVector.h"
@@ -175,6 +176,194 @@ class SpillReadFile : public serializer::SerializedPageFileReader {
   const std::vector<SpillSortKey> sortingKeys_;
 
   folly::Synchronized<common::SpillStats>* const stats_;
+};
+
+/// Used to write spilled data in row format directly from RowContainer.
+/// This avoids the overhead of converting rows to columnar format (RowVector).
+class RowBasedSpillWriter {
+ public:
+  /// @param pathPrefix File path prefix
+  /// @param targetFileSize Target byte size of a single file
+  /// @param writeBufferSize Size limit of buffered data before write to file
+  /// @param fileCreateConfig File create options for remote storage
+  /// @param compressionKind Compression kind (LZ4, ZSTD, or NONE)
+  /// @param rowInfo Row format metadata from RowContainer
+  /// @param updateAndCheckSpillLimitCb Callback to check spill limit
+  /// @param pool Memory pool for buffering
+  /// @param stats Spill stats collector
+  /// @param spillUringEnabled Enable io_uring for async writes
+  RowBasedSpillWriter(
+      const std::string& pathPrefix,
+      uint64_t targetFileSize,
+      uint64_t writeBufferSize,
+      const std::string& fileCreateConfig,
+      common::CompressionKind compressionKind,
+      const RowFormatInfo& rowInfo,
+      const common::UpdateAndCheckSpillLimitCB& updateAndCheckSpillLimitCb,
+      memory::MemoryPool* pool,
+      folly::Synchronized<common::SpillStats>* stats,
+      bool spillUringEnabled = true);
+
+  ~RowBasedSpillWriter();
+
+  /// Write rows in row format.
+  /// @param rows Array of row pointers from RowContainer
+  /// @return Total bytes written
+  uint64_t write(const std::vector<char*, memory::StlAllocator<char*>>& rows);
+
+  /// Finishes this file writer and returns the written spill files info.
+  SpillFiles finish();
+
+  std::vector<std::string> testingSpilledFilePaths() const;
+
+  std::vector<uint32_t> testingSpilledFileIds() const;
+
+ private:
+  // Ensures a file is available for writing, creates one if needed.
+  WriteFile* ensureFile();
+
+  // Closes current file and marks it as finished.
+  void closeFile();
+
+  // Updates write stats.
+  void updateWriteStats(
+      uint64_t spilledBytes,
+      uint64_t compressTimeNs,
+      uint64_t writeTimeNs);
+
+  const std::string pathPrefix_;
+  const uint64_t targetFileSize_;
+  const uint64_t writeBufferSize_;
+  const std::string fileCreateConfig_;
+  const common::CompressionKind compressionKind_;
+  const RowFormatInfo rowInfo_;
+  const common::UpdateAndCheckSpillLimitCB updateAndCheckLimitCb_;
+  memory::MemoryPool* const pool_;
+  folly::Synchronized<common::SpillStats>* const stats_;
+  const bool spillUringEnabled_;
+
+  // Current file being written.
+  std::unique_ptr<WriteFile> currentFile_;
+  uint32_t currentFileId_{0};
+  uint64_t currentFileSize_{0};
+  uint32_t rowsInCurrentFile_{0};
+
+  // Finished files info.
+  std::vector<SpillFileInfo> finishedFiles_;
+
+  bool finished_{false};
+};
+
+/// Reads spilled rows in row format.
+class RowBasedSpillReadFile {
+ public:
+  /// Creates a RowBasedSpillReadFile from a SpillFileInfo.
+  static std::unique_ptr<RowBasedSpillReadFile> create(
+      const SpillFileInfo& fileInfo,
+      const RowFormatInfo& rowInfo,
+      uint64_t bufferSize,
+      memory::MemoryPool* pool,
+      folly::Synchronized<common::SpillStats>* stats,
+      bool spillUringEnabled = true);
+
+  ~RowBasedSpillReadFile() = default;
+
+  uint32_t id() const {
+    return id_;
+  }
+
+  /// Read next batch of rows.
+  /// @param rows Output vector to receive row pointers
+  /// @return Number of bytes read (0 if end of file)
+  uint32_t nextBatch(std::vector<char*>& rows);
+
+  /// Read next batch with row lengths.
+  /// @param rows Output vector to receive row pointers
+  /// @param rowLengths Output vector to receive row lengths
+  /// @return true if data was read, false if end of file
+  bool nextBatch(std::vector<char*>& rows, std::vector<size_t>& rowLengths);
+
+  /// Returns true if at end of file.
+  bool atEnd() const;
+
+  const RowFormatInfo& info() const {
+    return rowInfo_;
+  }
+
+  int32_t numSortKeys() const {
+    return sortingKeys_.size();
+  }
+
+  const std::vector<SpillSortKey>& sortingKeys() const {
+    return sortingKeys_;
+  }
+
+  const std::vector<CompareFlags>& sortCompareFlags() const;
+
+  int32_t nextEqualOffset() const {
+    return rowInfo_.nextEqualOffset;
+  }
+
+  const std::vector<std::pair<int32_t, int32_t>>& rowColumns() const {
+    return rowInfo_.rowColumns;
+  }
+
+  const RowTypePtr& type() const {
+    return type_;
+  }
+
+  uint64_t getSpillReadIOTime() const;
+
+  uint64_t getSpillDecompressTime() const {
+    return spillDecompressTimeUs_;
+  }
+
+  /// Returns the file path for testing/cleanup purposes.
+  const std::string& testingFilePath() const {
+    return path_;
+  }
+
+  void prefetch();
+
+ private:
+  RowBasedSpillReadFile(
+      uint32_t id,
+      const std::string& path,
+      uint64_t size,
+      const RowTypePtr& type,
+      const std::vector<SpillSortKey>& sortingKeys,
+      common::CompressionKind compressionKind,
+      const RowFormatInfo& rowInfo,
+      uint64_t bufferSize,
+      memory::MemoryPool* pool,
+      folly::Synchronized<common::SpillStats>* stats,
+      bool spillUringEnabled);
+
+  const uint32_t id_;
+  const std::string path_;
+  const uint64_t size_;
+  const RowTypePtr type_;
+  const std::vector<SpillSortKey> sortingKeys_;
+  const common::CompressionKind compressionKind_;
+  const RowFormatInfo rowInfo_;
+
+  memory::MemoryPool* const pool_;
+  folly::Synchronized<common::SpillStats>* const stats_;
+
+  // Input stream for reading.
+  std::unique_ptr<common::FileInputStream> input_;
+
+  // Buffer for row data.
+  BufferPtr rowBuffer_;
+
+  // Buffer for reading compressed data.
+  BufferPtr compressedBuffer_;
+
+  // Decompression time tracking.
+  uint64_t spillDecompressTimeUs_{0};
+
+  // Compare flags for sorting keys.
+  mutable std::vector<CompareFlags> sortCompareFlags_;
 };
 
 } // namespace facebook::velox::exec

@@ -19,7 +19,10 @@
 #include "velox/common/base/RuntimeMetrics.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/testutil/TestValue.h"
+#include "velox/common/time/Timer.h"
 #include "velox/exec/OperatorUtils.h"
+#include "velox/exec/RowFormatInfo.h"
+#include "velox/exec/SpillRowSerde.h"
 #include "velox/serializers/PrestoSerializer.h"
 
 using facebook::velox::common::testutil::TestValue;
@@ -27,6 +30,84 @@ using facebook::velox::common::testutil::TestValue;
 namespace facebook::velox::exec {
 
 namespace {
+
+/// Compare values at specified row columns for row-based spill merge.
+/// Returns negative if left < right, 0 if equal, positive if left > right.
+/// Uses pair<offset, nullOffset> instead of RowColumn for column metadata.
+template <TypeKind Kind>
+int32_t compareByRow(
+    const char* left,
+    const char* right,
+    int32_t leftOffset,
+    int32_t leftNullOffset,
+    int32_t rightOffset,
+    int32_t rightNullOffset,
+    const CompareFlags& flags,
+    const Type* /*type*/) {
+  using T = typename TypeTraits<Kind>::NativeType;
+
+  bool leftNull = RowFormatInfo::isNullAt(left, leftOffset, leftNullOffset);
+  bool rightNull = RowFormatInfo::isNullAt(right, rightOffset, rightNullOffset);
+
+  if (leftNull && rightNull) {
+    return 0;
+  }
+  if (leftNull) {
+    return flags.nullsFirst ? -1 : 1;
+  }
+  if (rightNull) {
+    return flags.nullsFirst ? 1 : -1;
+  }
+
+  const T& leftVal = *reinterpret_cast<const T*>(left + leftOffset);
+  const T& rightVal = *reinterpret_cast<const T*>(right + rightOffset);
+
+  int result = 0;
+  if constexpr (std::is_same_v<T, StringView>) {
+    result = leftVal.compare(rightVal);
+  } else if constexpr (std::is_floating_point_v<T>) {
+    if (leftVal < rightVal) {
+      result = -1;
+    } else if (leftVal > rightVal) {
+      result = 1;
+    } else {
+      result = 0;
+    }
+  } else {
+    if (leftVal < rightVal) {
+      result = -1;
+    } else if (leftVal > rightVal) {
+      result = 1;
+    } else {
+      result = 0;
+    }
+  }
+
+  return flags.ascending ? result : -result;
+}
+
+int32_t compareRowValues(
+    const Type* type,
+    const char* left,
+    const char* right,
+    int32_t leftOffset,
+    int32_t leftNullOffset,
+    int32_t rightOffset,
+    int32_t rightNullOffset,
+    const CompareFlags& flags) {
+  return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      compareByRow,
+      type->kind(),
+      left,
+      right,
+      leftOffset,
+      leftNullOffset,
+      rightOffset,
+      rightNullOffset,
+      flags,
+      type);
+}
+
 /// gatherMerge merges & sorts with the mergeTree and gatherCopy the
 /// results into target. 'target' is the result RowVector, and the copying
 /// starts from row 0 up to row target.size(). 'mergeTree' is the data source.
@@ -116,6 +197,65 @@ int32_t SpillMergeStream::compare(const MergeStream& other) const {
     }
   }
   return 0;
+}
+
+int32_t RowBasedSpillMergeStream::compare(const MergeStream& other) const {
+  VELOX_UNREACHABLE("Should use derived class compare");
+}
+
+int32_t RowBasedFileSpillMergeStream::compare(const MergeStream& other) const {
+  auto& otherStream = static_cast<const RowBasedFileSpillMergeStream&>(other);
+
+  const std::vector<std::pair<int32_t, int32_t>>& leftRowColumns =
+      spillFile_->rowColumns();
+  const std::vector<std::pair<int32_t, int32_t>>& rightRowColumns =
+      otherStream.spillFile_->rowColumns();
+  RowTypePtr type = spillFile_->type();
+
+  int32_t key = 0;
+  char* left = rowVector_[index_];
+  char* right = otherStream.current()[otherStream.currentIndex()];
+
+  // If we have a precompiled comparison function, use it
+  if (cmp_) {
+    return cmp_(left, right);
+  }
+
+  // Otherwise use dynamic type dispatch for comparison
+  const auto& flags = sortCompareFlags();
+  do {
+    auto result = compareRowValues(
+        type->childAt(key).get(),
+        left,
+        right,
+        leftRowColumns[key].first,
+        leftRowColumns[key].second,
+        rightRowColumns[key].first,
+        rightRowColumns[key].second,
+        flags.empty() ? CompareFlags() : flags[key]);
+    if (result != 0) {
+      return result;
+    }
+  } while (++key < numSortKeys());
+
+  return 0;
+}
+
+RowBasedFileSpillMergeStream::~RowBasedFileSpillMergeStream() {
+  // Automatically delete the spill file when the stream is destroyed.
+  // This ensures early cleanup of disk space when the stream is no longer
+  // needed.
+  if (spillFile_) {
+    std::string filePath = spillFile_->testingFilePath();
+    spillFile_.reset();
+    try {
+      auto fs = filesystems::getFileSystem(filePath, nullptr);
+      fs->remove(filePath);
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Failed to remove spill file '" << filePath
+                   << "': " << e.what();
+    }
+  }
 }
 
 void SpillMergeStream::close() {
@@ -253,6 +393,76 @@ SpillWriter* SpillState::partitionWriter(const SpillPartitionId& id) const {
                                         : nullptr;
 }
 
+RowBasedSpillWriter* SpillState::rowPartitionWriter(
+    const SpillPartitionId& id) const {
+  VELOX_DCHECK(isPartitionSpilled(id));
+  auto partitionWriters = rowBasedPartitionWriters_.rlock();
+  return partitionWriters->contains(id) ? partitionWriters->at(id).get()
+                                        : nullptr;
+}
+
+uint64_t SpillState::appendRowsToPartition(
+    const SpillPartitionId& id,
+    const std::vector<char*, memory::StlAllocator<char*>>& rows,
+    const RowFormatInfo& rowInfo) {
+  VELOX_CHECK(
+      isPartitionSpilled(id), "Partition {} is not spilled", id.toString());
+
+  VELOX_CHECK_NOT_NULL(
+      getSpillDirPathCb_, "Spill directory callback not specified.");
+  auto spillDir = getSpillDirPathCb_();
+  VELOX_CHECK(!spillDir.empty(), "Spill directory does not exist");
+
+  rowBasedPartitionWriters_.withWLock([&](auto& lockedWriters) {
+    if (!lockedWriters.contains(id)) {
+      lockedWriters.emplace(
+          id,
+          std::make_unique<RowBasedSpillWriter>(
+              fmt::format(
+                  "{}/{}-row-spill-{}",
+                  spillDir,
+                  fileNamePrefix_,
+                  id.encodedId()),
+              targetFileSize_,
+              writeBufferSize_,
+              fileCreateConfig_,
+              compressionKind_,
+              rowInfo,
+              updateAndCheckSpillLimitCb_,
+              pool_,
+              stats_,
+              spillUringEnabled_));
+    }
+  });
+
+  // Estimate bytes based on row sizes.
+  uint64_t bytes = 0;
+  for (const auto* row : rows) {
+    bytes += rowInfo.getRowSize(row);
+  }
+  validateSpillBytesSize(bytes);
+  updateSpilledInputBytes(bytes);
+
+  return rowPartitionWriter(id)->write(rows);
+}
+
+void SpillState::finishRowFile(const SpillPartitionId& id) {
+  auto* writer = rowPartitionWriter(id);
+  if (writer == nullptr) {
+    return;
+  }
+  // Row-based writer doesn't have finishFile(), finish() will close current
+  // file.
+}
+
+SpillFiles SpillState::finishRowFiles(const SpillPartitionId& id) {
+  auto* writer = rowPartitionWriter(id);
+  if (writer == nullptr) {
+    return {};
+  }
+  return writer->finish();
+}
+
 void SpillState::finishFile(const SpillPartitionId& id) {
   auto* writer = partitionWriter(id);
   if (writer == nullptr) {
@@ -273,6 +483,12 @@ size_t SpillState::numFinishedFiles(const SpillPartitionId& id) const {
 }
 
 SpillFiles SpillState::finish(const SpillPartitionId& id) {
+  // First check for row-based spill files.
+  auto* rowWriter = rowPartitionWriter(id);
+  if (rowWriter != nullptr) {
+    return rowWriter->finish();
+  }
+  // Fall back to columnar format.
   auto* writer = partitionWriter(id);
   if (writer == nullptr) {
     return {};
@@ -568,6 +784,39 @@ SpillPartition::createOrderedReader(
       pool,
       spillStats,
       spillConfig.spillUringEnabled);
+}
+
+std::unique_ptr<TreeOfLosers<RowBasedSpillMergeStream>>
+SpillPartition::createRowBasedOrderedReader(
+    const RowFormatInfo& rowInfo,
+    const common::SpillConfig& spillConfig,
+    memory::MemoryPool* pool,
+    folly::Synchronized<common::SpillStats>* spillStats) {
+  VELOX_CHECK_NOT_NULL(pool);
+
+  // Check if the partition is empty.
+  if (FOLLY_UNLIKELY(files_.empty())) {
+    return nullptr;
+  }
+
+  std::vector<std::unique_ptr<RowBasedSpillMergeStream>> streams;
+  streams.reserve(files_.size());
+
+  for (auto& fileInfo : files_) {
+    auto spillFile = RowBasedSpillReadFile::create(
+        fileInfo,
+        rowInfo,
+        spillConfig.readBufferSize,
+        pool,
+        spillStats,
+        spillConfig.spillUringEnabled);
+    streams.push_back(
+        RowBasedFileSpillMergeStream::create(std::move(spillFile)));
+  }
+  files_.clear();
+
+  return std::make_unique<TreeOfLosers<RowBasedSpillMergeStream>>(
+      std::move(streams));
 }
 
 IterableSpillPartitionSet::IterableSpillPartitionSet() {

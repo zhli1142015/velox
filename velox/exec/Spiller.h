@@ -29,6 +29,12 @@ class SpillerBase {
  public:
   using SpillRows = std::vector<char*, memory::StlAllocator<char*>>;
 
+  /// Spill mode determines the serialization format
+  enum class Mode : int8_t {
+    kRowVector = 0, // Traditional columnar format (via RowVector)
+    kRowContainer = 1, // Row format direct serialization
+  };
+
   virtual ~SpillerBase() = default;
 
   /// Finishes the current spiller.
@@ -46,6 +52,17 @@ class SpillerBase {
     return finalized_;
   }
 
+  /// Returns current spill mode (kRowVector or kRowContainer).
+  Mode spillMode() const {
+    return spillMode_;
+  }
+
+  /// Returns row format info if row-based spill is enabled.
+  /// Used for creating row-based spill readers in tests.
+  const std::optional<RowFormatInfo>& rowFormatInfo() const {
+    return rowInfo_;
+  }
+
   common::SpillStats stats() const;
 
   std::string toString() const;
@@ -61,6 +78,27 @@ class SpillerBase {
       std::optional<SpillPartitionId> parentId,
       const common::SpillConfig* spillConfig,
       folly::Synchronized<common::SpillStats>* spillStats);
+
+  /// Determine spill mode based on configuration.
+  /// Row-based spill (kRowContainer) can be used when:
+  /// 1. rowBasedSpill is enabled via configuration
+  /// 2. container is not null
+  /// 3. No accumulators are present (aggregations use columnar spill)
+  ///
+  /// Note: Future phases will extend this to support serializable accumulators.
+  /// For now, any RowContainer with accumulators falls back to kRowVector mode
+  /// because the read path (createOrderedReader) is used by aggregation
+  /// operators like GroupingSet, which expect columnar format.
+  Mode determineSpillMode(bool rowBasedSpill) const {
+    // Row-based spill is only enabled when:
+    // - Container exists
+    // - rowBasedSpill is enabled
+    // - No accumulators (aggregation uses columnar spill)
+    return (container_ != nullptr && container_->accumulators().empty() &&
+            rowBasedSpill)
+        ? Mode::kRowContainer
+        : Mode::kRowVector;
+  }
 
   // Invoked to spill. If 'startRowIter' is not null, then we only spill rows
   // from row container starting at the offset pointed by 'startRowIter'.
@@ -160,6 +198,12 @@ class SpillerBase {
 
   // Collects the rows to spill for each partition.
   folly::F14FastMap<SpillPartitionId, SpillRun> spillRuns_;
+
+  /// Row format info for row-based spill (only set when mode is kRowContainer)
+  std::optional<RowFormatInfo> rowInfo_;
+
+  /// Current spill mode
+  Mode spillMode_{Mode::kRowVector};
 
  private:
   // Function for writing a spill partition on an executor. Writes to

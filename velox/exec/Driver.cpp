@@ -148,7 +148,8 @@ std::optional<common::SpillConfig> DriverCtx::makeSpillConfig(
           : std::nullopt,
       queryConfig.spillFileCreateConfig(),
       queryConfig.windowSpillMinReadBatchRows(),
-      queryConfig.spillUringEnabled());
+      queryConfig.spillUringEnabled(),
+      queryConfig.rowBasedSpillMode());
 }
 
 std::atomic_uint64_t BlockingState::numBlockedDrivers_{0};

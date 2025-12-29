@@ -15,10 +15,12 @@
  */
 #pragma once
 
+#include "velox/common/base/BitUtil.h"
 #include "velox/common/memory/HashStringAllocator.h"
 #include "velox/common/memory/MemoryAllocator.h"
 #include "velox/core/PlanNode.h"
 #include "velox/exec/ContainerRowSerde.h"
+#include "velox/exec/RowFormatInfo.h"
 #include "velox/exec/Spill.h"
 #include "velox/vector/FlatVector.h"
 #include "velox/vector/VectorTypeUtils.h"
@@ -46,6 +48,11 @@ class Accumulator {
 
   bool isFixedSize() const;
 
+  /// Returns true if the accumulator supports serialization and
+  /// deserialization. For row-based spill, non-fixed size accumulators that
+  /// support serde can be serialized directly without extracting to vectors.
+  bool serializable() const;
+
   int32_t fixedWidthSize() const;
 
   bool usesExternalMemory() const;
@@ -58,14 +65,41 @@ class Accumulator {
 
   void destroy(folly::Range<char**> groups);
 
+  /// Returns the size in bytes needed to serialize the accumulator for the
+  /// given group row.
+  /// @param group Pointer to the start of the group row.
+  /// @return Size in bytes needed to serialize the accumulator's variable data.
+  uint32_t getSerializeSize(char* group) const;
+
+  /// Serializes the accumulator data from the group row into the destination
+  /// buffer.
+  /// @param group Pointer to the start of the group row.
+  /// @param dst Destination buffer to write serialized data.
+  /// @return Pointer to the end of written data (dst + written bytes).
+  char* serializeAccumulator(char* group, char* dst) const;
+
+  /// Deserializes the accumulator data from the source buffer into the group
+  /// row.
+  /// @param group Pointer to the start of the group row.
+  /// @param src Source buffer containing serialized data.
+  /// @return Pointer to the end of read data (src + read bytes).
+  char* deserializeAccumulator(char* group, char* src) const;
+
  private:
   const bool isFixedSize_;
+  /// True if this accumulator can be serialized directly for row-based spill.
+  /// This is true when the accumulator is not fixed size and the aggregate
+  /// function supports accumulator serde.
+  const bool serializable_;
   const int32_t fixedSize_;
   const bool usesExternalMemory_;
   const int32_t alignment_;
   const TypePtr spillType_;
   std::function<void(folly::Range<char**>, VectorPtr&)> spillExtractFunction_;
   std::function<void(folly::Range<char**> groups)> destroyFunction_;
+  /// Pointer to the aggregate function, used for accumulator serialization.
+  /// nullptr if the Accumulator was constructed without an Aggregate pointer.
+  const Aggregate* aggregate_;
 };
 
 using normalized_key_t = uint64_t;
@@ -352,6 +386,11 @@ class RowContainer {
   /// The row size excluding any out-of-line stored variable length values.
   int32_t fixedRowSize() const {
     return fixedRowSize_;
+  }
+
+  /// Returns the memory alignment requirement for rows.
+  int32_t alignment() const {
+    return alignment_;
   }
 
   /// Adds 'rows' to the free rows list and frees any associated variable length

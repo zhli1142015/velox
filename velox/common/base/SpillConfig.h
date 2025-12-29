@@ -52,6 +52,18 @@ using GetSpillDirectoryPathCB = std::function<std::string_view()>;
 /// bytes exceed the set limit.
 using UpdateAndCheckSpillLimitCB = std::function<void(uint64_t)>;
 
+/// Row based spill mode.
+/// When enabled and spillMode is kRowContainer, write row format data to disk
+/// directly without converting to columnar format.
+enum class RowBasedSpillMode {
+  DISABLE, // Disable Row-Based Spill (use columnar format)
+  RAW, // Enable Row-Based Spill without compression
+  COMPRESSION // Enable Row-Based Spill with LZ4/ZSTD compression
+};
+
+/// Convert string to RowBasedSpillMode enum.
+RowBasedSpillMode strToRowBasedSpillMode(const std::string& str);
+
 /// Specifies the options for spill to disk.
 struct SpillDiskOptions {
   std::string spillDirPath;
@@ -82,7 +94,10 @@ struct SpillConfig {
       std::optional<PrefixSortConfig> _prefixSortConfig = std::nullopt,
       const std::string& _fileCreateConfig = {},
       uint32_t _windowMinReadBatchRows = 1'000,
-      bool _spillUringEnabled = true);
+      bool _spillUringEnabled = true,
+      // Default is "disabled" for backward compatibility until all operators
+      // support row-based spill reading.
+      const std::string& _rowBasedSpillMode = "disabled");
 
   /// Returns the spilling level with given 'startBitOffset' and
   /// 'numPartitionBits'.
@@ -184,5 +199,15 @@ struct SpillConfig {
   /// Requires Linux kernel 5.1+ with io_uring support.
   /// Following Bolt's design: ring depth=64, 128KB read chunks.
   bool spillUringEnabled{true};
+
+  /// The mode for row-based spill. When enabled, spill data is serialized
+  /// directly from RowContainer in row format instead of converting to
+  /// RowVector first (columnar format). This can improve performance for
+  /// spill-heavy workloads by avoiding the conversion overhead.
+  /// Possible values:
+  /// - DISABLE: Use columnar spill format
+  /// - RAW: Use row-based spill without compression
+  /// - COMPRESSION: Use row-based spill with LZ4/ZSTD compression (default)
+  RowBasedSpillMode rowBasedSpillMode{RowBasedSpillMode::COMPRESSION};
 };
 } // namespace facebook::velox::common

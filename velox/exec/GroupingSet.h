@@ -156,6 +156,26 @@ class GroupingSet {
   std::optional<int64_t> estimateOutputRowSize() const;
 
  private:
+  // Computes whether row-based spill can be used for this GroupingSet.
+  // Row-based spill requires that all aggregates either have fixed-size
+  // accumulators or support accumulator serialization, and have no sorting
+  // keys (ORDER BY clause).
+  static bool computeCanUseRowBasedSpill(
+      const std::vector<AggregateInfo>& aggregates);
+
+  // Returns the effective row-based spill mode. If canUseRowBasedSpill_ is
+  // false, returns DISABLE regardless of spillConfig_ setting. Otherwise
+  // returns the mode from spillConfig_.
+  common::RowBasedSpillMode effectiveRowBasedSpillMode() const;
+
+  // Returns the effective SpillConfig to use for spilling. If
+  // canUseRowBasedSpill_ is false and spillConfig_->rowBasedSpillMode is not
+  // DISABLE, returns a copy with rowBasedSpillMode set to DISABLE.
+  const common::SpillConfig* effectiveSpillConfig() const;
+
+  // Creates the effective SpillConfig if needed.
+  void initEffectiveSpillConfig();
+
   bool isDistinct() const {
     return aggregates_.empty();
   }
@@ -320,7 +340,20 @@ class GroupingSet {
   // Column for groupId for a GROUPING SET.
   std::optional<column_index_t> groupIdChannel_;
 
+  // Original spillConfig passed from the operator.
   const common::SpillConfig* const spillConfig_;
+
+  // Whether all aggregates support row-based spill. Row-based spill can only be
+  // used when all aggregates are either fixed-size or support accumulator
+  // serde, and none have sorting keys (ORDER BY clause). When this is false,
+  // row-based spill mode is effectively disabled even if
+  // spillConfig_->rowBasedSpillMode is not DISABLE.
+  const bool canUseRowBasedSpill_;
+
+  // Effective SpillConfig used for spilling. If canUseRowBasedSpill_ is false,
+  // this is a copy of spillConfig_ with rowBasedSpillMode set to DISABLE.
+  // Otherwise, it points to the original spillConfig_.
+  std::unique_ptr<common::SpillConfig> effectiveSpillConfig_;
 
   // Indicates if this grouping set and the associated hash aggregation operator
   // is under non-reclaimable execution section or not.

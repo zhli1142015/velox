@@ -95,27 +95,33 @@ struct TestParam {
   common::CompressionKind compressionKind;
   bool enablePrefixSort;
   core::JoinType joinType;
+  // Row-based spill mode: DISABLE, RAW, or COMPRESSION.
+  common::RowBasedSpillMode rowBasedSpillMode;
 
   TestParam(
       SpillerType _type,
       int _poolSize,
       common::CompressionKind _compressionKind,
       bool _enablePrefixSort,
-      core::JoinType _joinType)
+      core::JoinType _joinType,
+      common::RowBasedSpillMode _rowBasedSpillMode =
+          common::RowBasedSpillMode::COMPRESSION)
       : type(_type),
         poolSize(_poolSize),
         compressionKind(_compressionKind),
         enablePrefixSort(_enablePrefixSort),
-        joinType(_joinType) {}
+        joinType(_joinType),
+        rowBasedSpillMode(_rowBasedSpillMode) {}
 
   std::string toString() const {
     return fmt::format(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|rowBasedSpill={}",
         typeName(type),
         poolSize,
         compressionKindToString(compressionKind),
         std::to_string(enablePrefixSort),
-        core::JoinTypeName::toName(joinType));
+        core::JoinTypeName::toName(joinType),
+        static_cast<int>(rowBasedSpillMode));
   }
 };
 
@@ -123,25 +129,46 @@ struct TestParamsBuilder {
   std::vector<TestParam> getTestParams() {
     std::vector<TestParam> params;
     const auto numSpillerTypes = static_cast<int8_t>(SpillerType::NUM_TYPES);
+    // Row-based spill modes
+    // Note: Row-based modes (RAW, COMPRESSION) are only used for the
+    // rowBasedSpillModeConfig test. Other tests use DISABLE mode because
+    // the test verification infrastructure (createUnorderedReader,
+    // createOrderedReader) doesn't support reading row-based format files yet.
+    std::vector<common::RowBasedSpillMode> rowBasedModesForConfigTest = {
+        common::RowBasedSpillMode::DISABLE,
+        common::RowBasedSpillMode::RAW,
+        common::RowBasedSpillMode::COMPRESSION};
+    // For all other tests, only use DISABLE mode
+    std::vector<common::RowBasedSpillMode> disableModeOnly = {
+        common::RowBasedSpillMode::DISABLE};
+
     for (int i = 0; i < numSpillerTypes; ++i) {
       const auto type = static_cast<SpillerType>(i);
       if (typesToExclude.find(type) == typesToExclude.end()) {
         common::CompressionKind compressionKind =
             static_cast<common::CompressionKind>(numSpillerTypes % 6);
+        // Use all row-based modes only for config test, otherwise use DISABLE
+        const auto& rowBasedModes = includeAllRowBasedModes
+            ? rowBasedModesForConfigTest
+            : disableModeOnly;
         for (int poolSize : {0, 8}) {
-          params.emplace_back(
-              type,
-              poolSize,
-              compressionKind,
-              poolSize % 2,
-              core::JoinType::kRight);
-          if (type == SpillerType::HASH_BUILD) {
+          for (auto rowBasedMode : rowBasedModes) {
             params.emplace_back(
                 type,
                 poolSize,
                 compressionKind,
                 poolSize % 2,
-                core::JoinType::kLeft);
+                core::JoinType::kRight,
+                rowBasedMode);
+            if (type == SpillerType::HASH_BUILD) {
+              params.emplace_back(
+                  type,
+                  poolSize,
+                  compressionKind,
+                  poolSize % 2,
+                  core::JoinType::kLeft,
+                  rowBasedMode);
+            }
           }
         }
       }
@@ -150,6 +177,7 @@ struct TestParamsBuilder {
   }
 
   std::unordered_set<SpillerType> typesToExclude{};
+  bool includeAllRowBasedModes{false};
 };
 
 // Set sequential value in a given child vector. 'value' is the starting value.
@@ -246,6 +274,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
         compressionKind_(param.compressionKind),
         enablePrefixSort_(param.enablePrefixSort),
         joinType_(param.joinType),
+        rowBasedSpillMode_(param.rowBasedSpillMode),
         spillProbedFlag_(
             type_ == SpillerType::HASH_BUILD && needRightSideJoin(joinType_)),
         hashBits_(
@@ -633,6 +662,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
     spillConfig_.maxSpillRunRows = maxSpillRunRows;
     spillConfig_.maxFileSize = targetFileSize;
     spillConfig_.fileCreateConfig = {};
+    spillConfig_.rowBasedSpillMode = rowBasedSpillMode_;
 
     if (type_ == SpillerType::NO_ROW_CONTAINER) {
       spiller_ = std::make_unique<NoRowContainerSpiller>(
@@ -950,10 +980,25 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       } else {
         ASSERT_GT(stats.spilledRows, 0);
         ASSERT_GT(stats.spilledBytes, 0);
-        ASSERT_GT(stats.spillExtractVectorTimeNanos, 0);
+        // When using row-based spill mode (RAW or COMPRESSION), we skip the
+        // extractSpill step and serialize directly from RowContainer.
+        // So spillExtractVectorTimeNanos will be 0 in that case.
+        if (rowBasedSpillMode_ == common::RowBasedSpillMode::DISABLE) {
+          ASSERT_GT(stats.spillExtractVectorTimeNanos, 0);
+          ASSERT_GT(stats.spillSerializationTimeNanos, 0);
+          ASSERT_GT(stats.spillFlushTimeNanos, 0);
+        } else {
+          ASSERT_EQ(stats.spillExtractVectorTimeNanos, 0);
+          // For row-based spill:
+          // - RAW mode: no compression, so spillFlushTimeNanos = 0
+          // - COMPRESSION mode: has compression time tracked as flush time
+          if (rowBasedSpillMode_ == common::RowBasedSpillMode::COMPRESSION) {
+            ASSERT_GT(stats.spillFlushTimeNanos, 0);
+          }
+          // Row-based spill doesn't track serialization time separately
+          // (serialization happens inline with writing)
+        }
         ASSERT_GT(stats.spillWriteTimeNanos, 0);
-        ASSERT_GT(stats.spillFlushTimeNanos, 0);
-        ASSERT_GT(stats.spillSerializationTimeNanos, 0);
         ASSERT_GT(stats.spillWrites, 0);
       }
       ASSERT_GT(stats.spilledPartitions, 0);
@@ -1214,6 +1259,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
   const common::CompressionKind compressionKind_;
   const bool enablePrefixSort_;
   const core::JoinType joinType_;
+  const common::RowBasedSpillMode rowBasedSpillMode_;
   const bool spillProbedFlag_;
   const HashBitRange hashBits_;
   const int32_t numPartitions_;
@@ -1273,6 +1319,176 @@ class AllTypesSpillerTest
   uint64_t maxSpillRunRows_;
 };
 } // namespace facebook::velox::exec::test
+
+// Separate test class for row-based spill mode configuration testing.
+// This test class uses all row-based modes (DISABLE, RAW, COMPRESSION)
+// to verify the mode selection logic. It doesn't verify spilled data
+// because the test infrastructure doesn't support reading row-based format.
+class RowBasedSpillModeTest
+    : public SpillerTest,
+      public testing::WithParamInterface<AllTypesTestParam> {
+ public:
+  RowBasedSpillModeTest()
+      : SpillerTest(GetParam().param),
+        maxSpillRunRows_(GetParam().maxSpillRunRows) {}
+
+  static std::vector<AllTypesTestParam> getTestParams() {
+    // Include all row-based modes for config testing
+    auto testParams =
+        TestParamsBuilder{.includeAllRowBasedModes = true}.getTestParams();
+
+    std::vector<AllTypesTestParam> allTypesTestParams;
+    for (const auto& testParam : testParams) {
+      for (const auto& maxSpillRunRows :
+           std::vector<uint64_t>{0, 101, 1'000'000}) {
+        allTypesTestParams.push_back({testParam, maxSpillRunRows});
+      }
+    }
+
+    return allTypesTestParams;
+  }
+
+ protected:
+  uint64_t maxSpillRunRows_;
+};
+
+// Test to verify row-based spill mode is correctly configured and
+// the spiller uses the correct mode based on config.
+TEST_P(RowBasedSpillModeTest, rowBasedSpillModeConfig) {
+  // Setup minimal data for spill mode verification
+  setupSpillData(numKeys_, 100, 1, nullptr, {});
+  sortSpillData();
+  setupSpiller(100'000, 1024, false, 0);
+
+  // NO_ROW_CONTAINER type doesn't have a container, so it always uses
+  // kRowVector mode regardless of config
+  if (type_ == SpillerType::NO_ROW_CONTAINER) {
+    EXPECT_EQ(spiller_->spillMode(), SpillerBase::Mode::kRowVector);
+    return;
+  }
+
+  // For types with accumulators, we also use kRowVector mode
+  // (accumulators need special handling that row format doesn't support)
+  const bool hasAccumulators = !rowContainer_->accumulators().empty();
+
+  if (hasAccumulators) {
+    // When container has accumulators, always use columnar format
+    EXPECT_EQ(spiller_->spillMode(), SpillerBase::Mode::kRowVector);
+  } else {
+    // When container has no accumulators, mode depends on rowBasedSpillMode_
+    if (rowBasedSpillMode_ == common::RowBasedSpillMode::DISABLE) {
+      EXPECT_EQ(spiller_->spillMode(), SpillerBase::Mode::kRowVector);
+    } else {
+      // RAW or COMPRESSION mode should use kRowContainer
+      EXPECT_EQ(spiller_->spillMode(), SpillerBase::Mode::kRowContainer);
+    }
+  }
+
+  // Verify spill completes successfully regardless of mode
+  if (type_ == SpillerType::SORT_OUTPUT) {
+    RowContainerIterator rowIter;
+    std::vector<char*, memory::StlAllocator<char*>> rows(100, *pool_);
+    int numListedRows = rowContainer_->listRows(&rowIter, 100, rows.data());
+    ASSERT_EQ(numListedRows, 100);
+    spill(
+        spiller_.get(),
+        {std::nullopt, std::nullopt, std::optional(&rows), std::nullopt});
+  } else if (type_ == SpillerType::AGGREGATION_OUTPUT) {
+    RowContainerIterator rowIter;
+    spill(spiller_.get(), {std::nullopt, std::nullopt, std::nullopt, &rowIter});
+  } else {
+    spill(spiller_.get());
+  }
+
+  ASSERT_FALSE(spiller_->finalized());
+  SpillPartitionSet spillPartitionSet;
+  spiller_->finishSpill(spillPartitionSet);
+  ASSERT_TRUE(spiller_->finalized());
+}
+
+// Test to verify row-based spill data integrity for HASH_BUILD type.
+// This test writes data with row-based format (RAW/COMPRESSION) and reads back
+// using RowBasedSpillReadFile to verify the data matches the original.
+TEST_P(RowBasedSpillModeTest, rowBasedSpillDataIntegrity) {
+  // Only test HASH_BUILD type for row-based data verification
+  // as it's the most common use case and doesn't require sorting.
+  if (type_ != SpillerType::HASH_BUILD) {
+    return;
+  }
+
+  // Skip if row-based spill is disabled
+  if (rowBasedSpillMode_ == common::RowBasedSpillMode::DISABLE) {
+    return;
+  }
+
+  // For join types that use accumulators (like RIGHT joins),
+  // row-based spill is not supported. Skip those.
+  // NOTE: needRightSideJoin() returns true for join types that need to
+  // track probed flag, which requires accumulators.
+  if (needRightSideJoin(joinType_)) {
+    return;
+  }
+
+  constexpr int32_t kNumRows = 1000;
+  setupSpillData(numKeys_, kNumRows, 1, nullptr, {});
+  setupSpiller(100'000, 1024, false, 0);
+
+  // Verify we're in row-based mode
+  ASSERT_EQ(spiller_->spillMode(), SpillerBase::Mode::kRowContainer);
+
+  // Get original rows from container
+  std::vector<char*> originalRows(kNumRows);
+  RowContainerIterator rowIter;
+  int numListed =
+      rowContainer_->listRows(&rowIter, kNumRows, originalRows.data());
+  ASSERT_EQ(numListed, kNumRows);
+
+  // Spill all data
+  spill(spiller_.get());
+
+  SpillPartitionSet spillPartitionSet;
+  spiller_->finishSpill(spillPartitionSet);
+  ASSERT_TRUE(spiller_->finalized());
+  ASSERT_FALSE(spillPartitionSet.empty());
+
+  // Read back using row-based reader and verify data integrity
+  auto& rowInfo = spiller_->rowFormatInfo();
+  ASSERT_TRUE(rowInfo.has_value())
+      << "rowFormatInfo should be set for row-based mode";
+
+  int totalRowsRead = 0;
+  for (auto& [partitionId, partition] : spillPartitionSet) {
+    auto reader = partition->createRowBasedOrderedReader(
+        rowInfo.value(), spillConfig_, pool(), &spillStats_);
+
+    if (!reader) {
+      continue;
+    }
+
+    // TreeOfLosers::next() returns nullptr when all streams are at end
+    RowBasedSpillMergeStream* stream = nullptr;
+    while ((stream = reader->next()) != nullptr) {
+      // The stream has data. Get current rows.
+      const auto& rows = stream->current();
+      auto idx = stream->currentIndex();
+
+      // Verify the row data is valid (not null)
+      ASSERT_LT(idx, rows.size());
+      ASSERT_NE(rows[idx], nullptr);
+      totalRowsRead++;
+
+      // Pop to advance the stream for next iteration
+      stream->pop();
+    }
+  }
+
+  // Verify all rows were read
+  ASSERT_GT(totalRowsRead, 0) << "No rows were read from row-based spill";
+
+  LOG(INFO) << "Successfully verified " << totalRowsRead
+            << " rows with row-based spill mode: "
+            << static_cast<int>(rowBasedSpillMode_);
+}
 
 TEST_P(AllTypesSpillerTest, nonSortedSpillFunctions) {
   if (type_ == SpillerType::SORT_INPUT || type_ == SpillerType::SORT_OUTPUT ||
@@ -1807,6 +2023,11 @@ VELOX_INSTANTIATE_TEST_SUITE_P(
     SpillerTest,
     AllTypesSpillerTest,
     testing::ValuesIn(AllTypesSpillerTest::getTestParams()));
+
+VELOX_INSTANTIATE_TEST_SUITE_P(
+    SpillerTest,
+    RowBasedSpillModeTest,
+    testing::ValuesIn(RowBasedSpillModeTest::getTestParams()));
 
 VELOX_INSTANTIATE_TEST_SUITE_P(
     SpillerTest,

@@ -267,6 +267,221 @@ class ConcatFilesSpillMergeStream final : public SpillMergeStream {
   size_t fileIndex_{0};
 };
 
+/// Type alias for row-to-row comparison function.
+using RowRowCompare = std::function<int32_t(const char*, const char*)>;
+
+/// A source of sorted spilled rows coming from a file in row format.
+/// This is used for row-based spill to avoid columnar format conversion.
+class RowBasedSpillMergeStream : public MergeStream {
+ public:
+  RowBasedSpillMergeStream() = default;
+  virtual ~RowBasedSpillMergeStream() = default;
+
+  /// Returns the id of a spill merge stream which is unique in the merge set.
+  virtual uint32_t id() const = 0;
+
+  virtual void prefetch() {}
+
+  /// Check if stream has more data.
+  bool hasData() const final {
+    return index_ < rowVector_.size();
+  }
+
+  bool operator<(const MergeStream& other) const final {
+    return compare(other) < 0;
+  }
+
+  /// Base class compare - actual implementation in derived class.
+  int32_t compare(const MergeStream& other) const override;
+
+  virtual const std::vector<std::pair<int32_t, int32_t>>& rowColumns()
+      const = 0;
+  virtual const RowTypePtr rowType() const = 0;
+
+  /// Advance to next row.
+  void pop() {
+    if (++index_ >= rowVector_.size()) {
+      setNextBatch();
+    }
+  }
+
+  /// Advance to next row (with lengths tracking).
+  void popWithLengths() {
+    if (++index_ >= rowVector_.size()) {
+      setNextBatchWithLengths();
+    }
+  }
+
+  const RowFormatInfo& getRowFormatInfo() const {
+    return info();
+  }
+
+  /// Get current rows.
+  const std::vector<char*>& current() const {
+    return rowVector_;
+  }
+
+  virtual uint64_t getSpillReadIOTime() {
+    return 0;
+  }
+
+  /// Get current row lengths.
+  const std::vector<size_t>& currentLengths() const {
+    return rowLengths_;
+  }
+
+  /// Get the current row index. If 'isLastRow' is not null, it is set to true
+  /// if current row is the last one in the current batch.
+  vector_size_t currentIndex(bool* isLastRow = nullptr) const {
+    if (isLastRow != nullptr) {
+      *isLastRow = (index_ == rowVector_.size() - 1);
+    }
+    return index_;
+  }
+
+  /// Overload with row size output.
+  vector_size_t currentIndex(bool* isLastRow, int32_t& rowSize) const {
+    if (LIKELY(isLastRow != nullptr)) {
+      *isLastRow = (index_ == rowVector_.size() - 1);
+      rowSize = *isLastRow ? 0 : rowVector_[index_ + 1] - rowVector_[index_];
+    }
+    return index_;
+  }
+
+  int64_t getSpillReadTime() const {
+    return spillReadTimeUs_;
+  }
+
+  int64_t getSpillDecompressTime() const {
+    return spillDecompressTimeUs_;
+  }
+
+ protected:
+  virtual int32_t numSortKeys() const = 0;
+  virtual const std::vector<CompareFlags>& sortCompareFlags() const = 0;
+  virtual void nextBatch() = 0;
+  virtual void nextBatchWithLengths() = 0;
+  virtual const RowFormatInfo& info() const = 0;
+
+  void setNextBatch() {
+    nextBatch();
+  }
+
+  void setNextBatchWithLengths() {
+    nextBatchWithLengths();
+  }
+
+  /// Current batch of rows.
+  std::vector<char*> rowVector_;
+
+  /// Lengths of rows in current batch.
+  std::vector<size_t> rowLengths_;
+
+  /// The current row in 'rowVector_'.
+  vector_size_t index_{0};
+
+  /// Timing statistics.
+  uint64_t spillReadTimeUs_{0};
+  uint64_t spillDecompressTimeUs_{0};
+};
+
+/// File-backed row-based merge stream.
+class RowBasedFileSpillMergeStream final : public RowBasedSpillMergeStream {
+ public:
+  static std::unique_ptr<RowBasedSpillMergeStream> create(
+      std::unique_ptr<RowBasedSpillReadFile> spillFile,
+      RowRowCompare cmp = nullptr) {
+    auto* spillStream =
+        new RowBasedFileSpillMergeStream(std::move(spillFile), std::move(cmp));
+    spillStream->nextBatch();
+    return std::unique_ptr<RowBasedSpillMergeStream>(spillStream);
+  }
+
+  /// Factory method with length tracking.
+  static std::unique_ptr<RowBasedSpillMergeStream> createWithLength(
+      std::unique_ptr<RowBasedSpillReadFile> spillFile,
+      RowRowCompare cmp = nullptr) {
+    auto* spillStream =
+        new RowBasedFileSpillMergeStream(std::move(spillFile), std::move(cmp));
+    spillStream->nextBatchWithLengths();
+    return std::unique_ptr<RowBasedSpillMergeStream>(spillStream);
+  }
+
+  /// Row comparison - actual implementation.
+  int32_t compare(const MergeStream& other) const override;
+
+  void prefetch() override {
+    spillFile_->prefetch();
+  }
+
+  uint32_t id() const override {
+    return spillFile_->id();
+  }
+
+  bool isNextEqual() const {
+    const auto offset = spillFile_->nextEqualOffset();
+    return offset > 0 && bits::isBitSet(rowVector_[index_], offset);
+  }
+
+  uint64_t getSpillReadIOTime() override {
+    return spillFile_->getSpillReadIOTime();
+  }
+
+  /// Destructor automatically deletes the spill file.
+  /// This ensures early cleanup of disk space when the stream is no longer
+  /// needed.
+  ~RowBasedFileSpillMergeStream();
+
+ private:
+  explicit RowBasedFileSpillMergeStream(
+      std::unique_ptr<RowBasedSpillReadFile> spillFile,
+      RowRowCompare cmp)
+      : spillFile_(std::move(spillFile)), cmp_(std::move(cmp)) {
+    VELOX_CHECK_NOT_NULL(spillFile_);
+  }
+
+  int32_t numSortKeys() const override {
+    return spillFile_->numSortKeys();
+  }
+
+  const std::vector<CompareFlags>& sortCompareFlags() const override {
+    return spillFile_->sortCompareFlags();
+  }
+
+  void nextBatch() override {
+    MicrosecondTimer timer(&spillReadTimeUs_);
+    index_ = 0;
+    if (!spillFile_->nextBatch(rowVector_)) {
+      spillDecompressTimeUs_ += spillFile_->getSpillDecompressTime();
+      return;
+    }
+  }
+
+  void nextBatchWithLengths() override {
+    MicrosecondTimer timer(&spillReadTimeUs_);
+    index_ = 0;
+    if (!spillFile_->nextBatch(rowVector_, rowLengths_)) {
+      spillDecompressTimeUs_ += spillFile_->getSpillDecompressTime();
+      return;
+    }
+  }
+
+  const RowFormatInfo& info() const override {
+    return spillFile_->info();
+  }
+
+  const std::vector<std::pair<int32_t, int32_t>>& rowColumns() const override {
+    return spillFile_->rowColumns();
+  }
+
+  const RowTypePtr rowType() const override {
+    return spillFile_->type();
+  }
+
+  std::unique_ptr<RowBasedSpillReadFile> spillFile_;
+  RowRowCompare cmp_{nullptr};
+};
+
 /// Identifies a spill partition generated from a given spilling operator. It
 /// provides with informattion on spill level and the partition number of each
 /// spill level. When recursive spilling happens, there will be more than one
@@ -463,6 +678,34 @@ class SpillPartition {
     addFiles(std::move(files));
   }
 
+  /// Constructs a spill partition with row-based spill format.
+  /// @param id The partition identifier.
+  /// @param files The spill files for this partition.
+  /// @param rowInfo The row format information for row-based spill.
+  SpillPartition(
+      const SpillPartitionId& id,
+      SpillFiles files,
+      const RowFormatInfo& rowInfo)
+      : id_(id), rowInfo_(rowInfo) {
+    addFiles(std::move(files));
+  }
+
+  /// Returns true if this partition uses row-based spill format.
+  bool isRowBased() const {
+    return rowInfo_.has_value();
+  }
+
+  /// Sets the row format info for this partition.
+  /// Should be called before reading if the partition uses row-based spill.
+  void setRowInfo(const RowFormatInfo& rowInfo) {
+    rowInfo_ = rowInfo;
+  }
+
+  /// Returns the row format info if set, or std::nullopt.
+  const std::optional<RowFormatInfo>& rowInfo() const {
+    return rowInfo_;
+  }
+
   void addFiles(SpillFiles files) {
     files_.reserve(files_.size() + files.size());
     for (auto& file : files) {
@@ -518,6 +761,20 @@ class SpillPartition {
       memory::MemoryPool* pool,
       folly::Synchronized<common::SpillStats>* spillStats);
 
+  /// Create a row-based ordered stream reader from this spill partition.
+  /// Uses row format files and RowBasedSpillMergeStream.
+  /// @param rowInfo The row format information for deserialization.
+  /// @param spillConfig The spill configuration.
+  /// @param pool Memory pool for allocations.
+  /// @param spillStats Stats for tracking spill operations.
+  /// @return A tree of losers merge stream, or nullptr if partition is empty.
+  std::unique_ptr<TreeOfLosers<RowBasedSpillMergeStream>>
+  createRowBasedOrderedReader(
+      const RowFormatInfo& rowInfo,
+      const common::SpillConfig& spillConfig,
+      memory::MemoryPool* pool,
+      folly::Synchronized<common::SpillStats>* spillStats);
+
   std::string toString() const;
 
  private:
@@ -538,6 +795,9 @@ class SpillPartition {
   SpillFiles files_;
   // Counts the total file size in bytes from this spilled partition.
   uint64_t size_{0};
+  // Row format info for row-based spill. If set, createOrderedReader will
+  // automatically use row-based reader instead of columnar reader.
+  std::optional<RowFormatInfo> rowInfo_;
 };
 
 using SpillPartitionSet =
@@ -648,6 +908,23 @@ class SpillState {
       const SpillPartitionId& id,
       const RowVectorPtr& rows);
 
+  /// Appends rows to partition with 'id' using row-based spill format.
+  /// The rows are serialized directly from RowContainer memory layout.
+  /// @param id The partition id to append to.
+  /// @param rows The row pointers from RowContainer.
+  /// @param rowInfo The row format information for serialization.
+  /// @return Total bytes written.
+  uint64_t appendRowsToPartition(
+      const SpillPartitionId& id,
+      const std::vector<char*, memory::StlAllocator<char*>>& rows,
+      const RowFormatInfo& rowInfo);
+
+  /// Finishes the row-based spill file for partition with 'id'.
+  void finishRowFile(const SpillPartitionId& id);
+
+  /// Returns the finished row-based spill files from a given 'partition'.
+  SpillFiles finishRowFiles(const SpillPartitionId& id);
+
   /// Finishes a sorted run for partition with 'id'. If write is called for
   /// 'partition' again, the data does not have to be sorted relative to the
   /// data written so far.
@@ -717,6 +994,14 @@ class SpillState {
   // started spilling have an entry here. It is made thread safe because
   // concurrent writes may involve concurrent creations of writers.
   folly::Synchronized<SpillPartitionWriterSet> partitionWriters_;
+
+  // Row-based spill writers for each spilled partition.
+  using RowBasedPartitionWriterSet =
+      folly::F14FastMap<SpillPartitionId, std::unique_ptr<RowBasedSpillWriter>>;
+  folly::Synchronized<RowBasedPartitionWriterSet> rowBasedPartitionWriters_;
+
+  // Helper to get row-based partition writer.
+  RowBasedSpillWriter* rowPartitionWriter(const SpillPartitionId& id) const;
 };
 
 /// Returns the partition bit offset of the current spill level of 'id'.
