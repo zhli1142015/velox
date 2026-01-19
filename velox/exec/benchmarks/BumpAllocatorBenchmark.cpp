@@ -199,9 +199,14 @@ void sortMixedKeyMixedDep(
 
 // =============================================================================
 // SECTION 2: AGG-like Benchmarks (Mixed allocate/free with updates)
+// NOTE: These benchmarks test OVERWRITE patterns (replacing accumulator
+// values), which is NOT ideal for bump mode. This is intentional to show edge
+// cases. For realistic aggregation patterns, see SECTION 5.
 // =============================================================================
 
 // Aggregation with BIGINT key, VARCHAR accumulator (like string_agg)
+// WARNING: This benchmark OVERWRITES accumulator values repeatedly,
+// causing memory waste in bump mode. Real aggregations typically append.
 void aggBigintKeyVarcharAcc(int numGroups, int numUpdates, int strLength) {
   auto container = std::make_unique<RowContainer>(
       std::vector<TypePtr>{BIGINT()},
@@ -300,6 +305,9 @@ void aggVarcharKeyVarcharAcc(
 
 // =============================================================================
 // SECTION 3: JOIN-like Benchmarks (Build side allocation)
+// NOTE: For BIGINT-only scenarios without VARCHAR payload, bump mode overhead
+// may outweigh benefits since no string allocation occurs. This is expected.
+// Bump mode shines when there are VARCHAR key or payload columns.
 // =============================================================================
 
 // Join build with BIGINT key, no payload
@@ -441,6 +449,104 @@ void directAllocFree(int numOps, int allocSize) {
       allocator->free(headers[idx]);
       headers[idx] = headers.back();
       headers.pop_back();
+    }
+  }
+}
+
+// =============================================================================
+// SECTION 5: Real Aggregation Scenarios (Group creation + integer updates)
+// =============================================================================
+
+// Realistic aggregation: VARCHAR key creation only, integer accumulator updates
+// This is the typical SUM/COUNT pattern where only the key requires string
+// alloc
+void aggRealSumCount(int numGroups, int numUpdates, int keyLength) {
+  auto container = std::make_unique<RowContainer>(
+      std::vector<TypePtr>{VARCHAR()},
+      std::vector<TypePtr>{BIGINT(), BIGINT()}, // sum, count
+      false,
+      getPool(),
+      FLAGS_velox_enable_bump_allocator);
+
+  std::mt19937 gen(42);
+  std::uniform_int_distribution<> groupDist(0, numGroups - 1);
+
+  // Phase 1: Create all groups (this is where string allocation happens)
+  std::vector<char*> groups(numGroups);
+  for (int i = 0; i < numGroups; ++i) {
+    groups[i] = container->newRow();
+    std::string keyStr = std::to_string(i) + std::string(keyLength - 5, 'k');
+    StringView keyView(keyStr);
+    container->stringAllocator().copyMultipart(
+        keyView, groups[i], container->columnAt(0).offset());
+    // Initialize accumulators to 0
+    *reinterpret_cast<int64_t*>(groups[i] + container->columnAt(1).offset()) =
+        0;
+    *reinterpret_cast<int64_t*>(groups[i] + container->columnAt(2).offset()) =
+        0;
+  }
+
+  // Phase 2: Update accumulators (no memory allocation, just integer updates)
+  for (int u = 0; u < numUpdates; ++u) {
+    int groupIdx = groupDist(gen);
+    char* rowPtr = groups[groupIdx];
+    // Increment sum and count - no memory allocation
+    *reinterpret_cast<int64_t*>(rowPtr + container->columnAt(1).offset()) += u;
+    *reinterpret_cast<int64_t*>(rowPtr + container->columnAt(2).offset()) += 1;
+  }
+}
+
+// Realistic MIN/MAX aggregation: VARCHAR key + VARCHAR accumulator
+// But accumulator is set once and potentially replaced (not repeatedly
+// overwritten)
+void aggRealMinMax(
+    int numGroups,
+    int numUpdates,
+    int keyLength,
+    int valueLength) {
+  auto container = std::make_unique<RowContainer>(
+      std::vector<TypePtr>{VARCHAR()},
+      std::vector<TypePtr>{VARCHAR()}, // min/max value
+      false,
+      getPool(),
+      FLAGS_velox_enable_bump_allocator);
+
+  std::mt19937 gen(42);
+  std::uniform_int_distribution<> groupDist(0, numGroups - 1);
+
+  // Phase 1: Create all groups with initial values
+  std::vector<char*> groups(numGroups);
+  std::vector<std::string> currentValues(numGroups);
+  for (int i = 0; i < numGroups; ++i) {
+    groups[i] = container->newRow();
+    std::string keyStr = std::to_string(i) + std::string(keyLength - 5, 'k');
+    StringView keyView(keyStr);
+    container->stringAllocator().copyMultipart(
+        keyView, groups[i], container->columnAt(0).offset());
+
+    // Initial accumulator value
+    currentValues[i] = std::string(valueLength, 'z');
+    StringView accView(currentValues[i]);
+    container->stringAllocator().copyMultipart(
+        accView, groups[i], container->columnAt(1).offset());
+  }
+
+  // Phase 2: Simulate MIN updates - only update when new value is smaller
+  // In practice, only ~log(N) updates per group, not N updates
+  int updateCount = 0;
+  for (int u = 0; u < numUpdates && updateCount < numGroups * 3; ++u) {
+    int groupIdx = groupDist(gen);
+    char currentChar = currentValues[groupIdx][0];
+    // Simulate finding a smaller value (decreasing probability)
+    if (gen() % 100 < 10) { // 10% chance of actually updating
+      char newFirstChar = 'a' + (gen() % (currentChar - 'a' + 1));
+      if (newFirstChar < currentChar) {
+        currentValues[groupIdx][0] = newFirstChar;
+        StringView newView(currentValues[groupIdx]);
+        container->stringAllocator().copyMultipart(
+            newView, groups[groupIdx], container->columnAt(1).offset());
+        updateCount++;
+      }
     }
   }
 }
@@ -621,6 +727,26 @@ BENCHMARK(Direct_AllocFree_1M_32bytes) {
 }
 BENCHMARK(Direct_AllocFree_1M_64bytes) {
   directAllocFree(1000000, 64);
+}
+
+// --- REAL AGG: SUM/COUNT with VARCHAR key (key alloc only, int updates) ---
+BENCHMARK(AggReal_SumCount_Varchar16Key_10kG_100kU) {
+  aggRealSumCount(10000, 100000, 16);
+}
+BENCHMARK(AggReal_SumCount_Varchar64Key_10kG_100kU) {
+  aggRealSumCount(10000, 100000, 64);
+}
+BENCHMARK(AggReal_SumCount_Varchar64Key_100kG_1MU) {
+  aggRealSumCount(100000, 1000000, 64);
+}
+
+// --- REAL AGG: MIN/MAX with VARCHAR key + VARCHAR accumulator (sparse updates)
+// ---
+BENCHMARK(AggReal_MinMax_Varchar64Key_Varchar64Val_10kG_100kU) {
+  aggRealMinMax(10000, 100000, 64, 64);
+}
+BENCHMARK(AggReal_MinMax_Varchar64Key_Varchar256Val_10kG_100kU) {
+  aggRealMinMax(10000, 100000, 64, 256);
 }
 
 } // namespace
