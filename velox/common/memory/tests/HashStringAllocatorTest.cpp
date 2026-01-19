@@ -866,40 +866,196 @@ TEST_F(HashStringAllocatorTest, bumpModeMultipleSlab) {
 }
 
 TEST_F(HashStringAllocatorTest, bumpModePerformance) {
+  std::cout
+      << "\n========== HashStringAllocator Performance Benchmark =========="
+      << std::endl;
+
+  // Test different allocation sizes
+  std::vector<int32_t> sizes = {16, 32, 64, 128, 256, 512, 1024, 4096};
   constexpr int kIterations = 100000;
+  constexpr int kWarmupIterations = 10000;
 
-  // Normal mode
-  HashStringAllocator normalAllocator(pool_.get(), /*bumpMode=*/false);
-  auto normalStart = std::chrono::high_resolution_clock::now();
-  for (int i = 0; i < kIterations; ++i) {
-    normalAllocator.allocate(64);
+  std::cout << "\n--- Allocation Size Comparison (iterations=" << kIterations
+            << ") ---" << std::endl;
+  std::cout << "Size(B)\tNormal(ns)\tBump(ns)\tSpeedup" << std::endl;
+
+  for (int32_t size : sizes) {
+    // Warmup
+    {
+      HashStringAllocator warmup(pool_.get(), true);
+      for (int i = 0; i < kWarmupIterations; ++i) {
+        warmup.allocate(size);
+      }
+      warmup.clear();
+    }
+
+    // Normal mode benchmark
+    HashStringAllocator normalAllocator(pool_.get(), /*bumpMode=*/false);
+    auto normalStart = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < kIterations; ++i) {
+      normalAllocator.allocate(size);
+    }
+    auto normalEnd = std::chrono::high_resolution_clock::now();
+    normalAllocator.clear();
+
+    // Bump mode benchmark
+    HashStringAllocator bumpAllocator(pool_.get(), /*bumpMode=*/true);
+    auto bumpStart = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < kIterations; ++i) {
+      bumpAllocator.allocate(size);
+    }
+    auto bumpEnd = std::chrono::high_resolution_clock::now();
+    bumpAllocator.clear();
+
+    auto normalNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        normalEnd - normalStart)
+                        .count() /
+        kIterations;
+    auto bumpNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      bumpEnd - bumpStart)
+                      .count() /
+        kIterations;
+    double speedup = static_cast<double>(normalNs) / bumpNs;
+
+    std::cout << size << "\t" << normalNs << "\t\t" << bumpNs << "\t\t"
+              << std::fixed << std::setprecision(2) << speedup << "x"
+              << std::endl;
   }
-  auto normalEnd = std::chrono::high_resolution_clock::now();
-  normalAllocator.clear();
 
-  // Bump mode
-  HashStringAllocator bumpAllocator(pool_.get(), /*bumpMode=*/true);
-  auto bumpStart = std::chrono::high_resolution_clock::now();
+  // Test mixed allocation pattern (simulating real workload)
+  std::cout << "\n--- Mixed Allocation Pattern ---" << std::endl;
+  std::vector<int32_t> mixedSizes;
+  std::mt19937 rng(42);
+  std::uniform_int_distribution<int32_t> dist(16, 512);
   for (int i = 0; i < kIterations; ++i) {
-    bumpAllocator.allocate(64);
+    mixedSizes.push_back(dist(rng));
   }
-  auto bumpEnd = std::chrono::high_resolution_clock::now();
-  bumpAllocator.clear();
 
-  auto normalDuration = std::chrono::duration_cast<std::chrono::microseconds>(
-                            normalEnd - normalStart)
-                            .count();
-  auto bumpDuration =
-      std::chrono::duration_cast<std::chrono::microseconds>(bumpEnd - bumpStart)
-          .count();
+  // Normal mode mixed
+  HashStringAllocator normalMixed(pool_.get(), false);
+  auto normalMixedStart = std::chrono::high_resolution_clock::now();
+  for (int32_t sz : mixedSizes) {
+    normalMixed.allocate(sz);
+  }
+  auto normalMixedEnd = std::chrono::high_resolution_clock::now();
+  normalMixed.clear();
 
-  LOG(INFO) << "Normal mode: " << normalDuration << " us";
-  LOG(INFO) << "Bump mode: " << bumpDuration << " us";
-  LOG(INFO) << "Speedup: " << static_cast<double>(normalDuration) / bumpDuration
-            << "x";
+  // Bump mode mixed
+  HashStringAllocator bumpMixed(pool_.get(), true);
+  auto bumpMixedStart = std::chrono::high_resolution_clock::now();
+  for (int32_t sz : mixedSizes) {
+    bumpMixed.allocate(sz);
+  }
+  auto bumpMixedEnd = std::chrono::high_resolution_clock::now();
+  bumpMixed.clear();
 
-  // Bump mode should be at least 2x faster
-  EXPECT_LT(bumpDuration * 2, normalDuration);
+  auto normalMixedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           normalMixedEnd - normalMixedStart)
+                           .count() /
+      kIterations;
+  auto bumpMixedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         bumpMixedEnd - bumpMixedStart)
+                         .count() /
+      kIterations;
+  std::cout << "Mixed (16-512B): Normal=" << normalMixedNs
+            << "ns, Bump=" << bumpMixedNs << "ns, Speedup=" << std::fixed
+            << std::setprecision(2)
+            << static_cast<double>(normalMixedNs) / bumpMixedNs << "x"
+            << std::endl;
+
+  // Test allocation + free pattern
+  std::cout << "\n--- Allocation + Free Pattern ---" << std::endl;
+  constexpr int kAllocFreeIterations = 50000;
+
+  // Normal mode alloc+free
+  HashStringAllocator normalAF(pool_.get(), false);
+  std::vector<HashStringAllocator::Header*> normalHeaders;
+  normalHeaders.reserve(kAllocFreeIterations);
+
+  auto normalAFStart = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < kAllocFreeIterations; ++i) {
+    normalHeaders.push_back(normalAF.allocate(64));
+  }
+  for (auto* h : normalHeaders) {
+    normalAF.free(h);
+  }
+  auto normalAFEnd = std::chrono::high_resolution_clock::now();
+  normalAF.clear();
+
+  // Bump mode alloc+free (free is no-op)
+  HashStringAllocator bumpAF(pool_.get(), true);
+  std::vector<HashStringAllocator::Header*> bumpHeaders;
+  bumpHeaders.reserve(kAllocFreeIterations);
+
+  auto bumpAFStart = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < kAllocFreeIterations; ++i) {
+    bumpHeaders.push_back(bumpAF.allocate(64));
+  }
+  for (auto* h : bumpHeaders) {
+    bumpAF.free(h);
+  }
+  auto bumpAFEnd = std::chrono::high_resolution_clock::now();
+  bumpAF.clear();
+
+  auto normalAFNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        normalAFEnd - normalAFStart)
+                        .count() /
+      kAllocFreeIterations;
+  auto bumpAFNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      bumpAFEnd - bumpAFStart)
+                      .count() /
+      kAllocFreeIterations;
+  std::cout << "Alloc+Free (64B): Normal=" << normalAFNs
+            << "ns, Bump=" << bumpAFNs << "ns, Speedup=" << std::fixed
+            << std::setprecision(2)
+            << static_cast<double>(normalAFNs) / bumpAFNs << "x" << std::endl;
+
+  // Test storeStringFast (string copy path)
+  std::cout << "\n--- String Copy Performance (storeStringFast) ---"
+            << std::endl;
+  std::string testString(100, 'x');
+  constexpr int kStringIterations = 100000;
+  std::vector<char> destBuffer(kStringIterations * sizeof(StringView));
+
+  // Normal mode string copy
+  HashStringAllocator normalStr(pool_.get(), false);
+  auto normalStrStart = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < kStringIterations; ++i) {
+    normalStr.copyMultipart(
+        StringView(testString), destBuffer.data() + i * sizeof(StringView), 0);
+  }
+  auto normalStrEnd = std::chrono::high_resolution_clock::now();
+  normalStr.clear();
+
+  // Bump mode string copy
+  HashStringAllocator bumpStr(pool_.get(), true);
+  auto bumpStrStart = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < kStringIterations; ++i) {
+    bumpStr.copyMultipart(
+        StringView(testString), destBuffer.data() + i * sizeof(StringView), 0);
+  }
+  auto bumpStrEnd = std::chrono::high_resolution_clock::now();
+  bumpStr.clear();
+
+  auto normalStrNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         normalStrEnd - normalStrStart)
+                         .count() /
+      kStringIterations;
+  auto bumpStrNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       bumpStrEnd - bumpStrStart)
+                       .count() /
+      kStringIterations;
+  std::cout << "String copy (100B): Normal=" << normalStrNs
+            << "ns, Bump=" << bumpStrNs << "ns, Speedup=" << std::fixed
+            << std::setprecision(2)
+            << static_cast<double>(normalStrNs) / bumpStrNs << "x" << std::endl;
+
+  std::cout
+      << "\n================================================================\n"
+      << std::endl;
+
+  // Assertion: Bump mode should be at least 2x faster for basic allocation
+  EXPECT_GT(static_cast<double>(normalMixedNs) / bumpMixedNs, 2.0);
 }
 
 TEST_F(HashStringAllocatorTest, normalModeUnchanged) {
@@ -919,6 +1075,70 @@ TEST_F(HashStringAllocatorTest, normalModeUnchanged) {
   ASSERT_NE(header2, nullptr);
 
   normalAllocator.clear();
+}
+
+TEST_F(HashStringAllocatorTest, bumpModeLargeAllocation) {
+  // Test that large allocations (>kMaxAlloc) in bump mode go to pool
+  HashStringAllocator bumpAllocator(pool_.get(), /*bumpMode=*/true);
+
+  // kMaxAlloc is typically 3/4 of page size (about 12KB on 4KB pages)
+  // Allocate something larger
+  constexpr int32_t kLargeSize = 64 * 1024; // 64KB
+  auto* header = bumpAllocator.allocate(kLargeSize);
+  ASSERT_NE(header, nullptr);
+  EXPECT_GE(header->size(), kLargeSize);
+
+  // Write to verify it's usable
+  memset(header->begin(), 'X', kLargeSize);
+
+  // Track memory before free
+  auto bytesBefore = bumpAllocator.currentBytes();
+
+  // Free should actually release the large allocation
+  bumpAllocator.free(header);
+
+  // Memory should be reduced (large alloc was freed to pool)
+  auto bytesAfter = bumpAllocator.currentBytes();
+  EXPECT_LT(bytesAfter, bytesBefore);
+
+  // Clear should work
+  bumpAllocator.clear();
+  EXPECT_EQ(bumpAllocator.currentBytes(), 0);
+}
+
+TEST_F(HashStringAllocatorTest, bumpModeInlineFastPath) {
+  // Test that the inline fast path in storeStringFast works correctly
+  HashStringAllocator bumpAllocator(pool_.get(), /*bumpMode=*/true);
+
+  // Allocate many small strings to test the inline fast path
+  constexpr int kIterations = 10000;
+  std::vector<StringView> views(kIterations);
+  std::vector<char> destinations(kIterations * sizeof(StringView));
+
+  std::string testStr = "test_string_data";
+
+  auto start = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < kIterations; ++i) {
+    bumpAllocator.copyMultipart(
+        StringView(testStr), destinations.data() + i * sizeof(StringView), 0);
+  }
+  auto end = std::chrono::high_resolution_clock::now();
+
+  auto duration =
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+          .count();
+  LOG(INFO) << "Inline fast path: " << kIterations << " strings in " << duration
+            << " us (" << (duration * 1000.0 / kIterations) << " ns/string)";
+
+  // Verify data integrity
+  for (int i = 0; i < kIterations; ++i) {
+    auto* view = reinterpret_cast<StringView*>(
+        destinations.data() + i * sizeof(StringView));
+    EXPECT_EQ(view->size(), testStr.size());
+    EXPECT_EQ(std::string(view->data(), view->size()), testStr);
+  }
+
+  bumpAllocator.clear();
 }
 
 } // namespace

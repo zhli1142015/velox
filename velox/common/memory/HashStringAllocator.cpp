@@ -107,35 +107,39 @@ void HashStringAllocator::clear() {
   }
 
 #ifndef NDEBUG
-  static const auto kHugePageSize = memory::AllocationTraits::kHugePageSize;
-  for (auto i = 0; i < state_.pool().numRanges(); ++i) {
-    const auto range = state_.pool().rangeAt(i);
-    const auto rangeSize = range.size();
-    if (rangeSize >= kHugePageSize) {
-      VELOX_CHECK_EQ(0, rangeSize % kHugePageSize);
-    }
+  // In bump mode, headers are laid out contiguously without kArenaEnd markers,
+  // so we cannot traverse them like in normal mode. Skip the detailed check.
+  if (!state_.isBumpMode()) {
+    static const auto kHugePageSize = memory::AllocationTraits::kHugePageSize;
+    for (auto i = 0; i < state_.pool().numRanges(); ++i) {
+      const auto range = state_.pool().rangeAt(i);
+      const auto rangeSize = range.size();
+      if (rangeSize >= kHugePageSize) {
+        VELOX_CHECK_EQ(0, rangeSize % kHugePageSize);
+      }
 
-    for (int64_t blockOffset = 0; blockOffset < rangeSize;
-         blockOffset += kHugePageSize) {
-      auto blockRange = folly::Range<char*>(
-          range.data() + blockOffset,
-          std::min<int64_t>(rangeSize, kHugePageSize));
-      const auto size = blockRange.size() - simd::kPadding;
-      auto* end = castToHeader(blockRange.data() + size);
-      auto* header = castToHeader(blockRange.data());
-      while (header != end) {
-        VELOX_CHECK_GE(reinterpret_cast<char*>(header), blockRange.data());
-        VELOX_CHECK_LT(
-            reinterpret_cast<char*>(header), reinterpret_cast<char*>(end));
-        VELOX_CHECK_LE(
-            reinterpret_cast<char*>(header->end()),
-            reinterpret_cast<char*>(end));
+      for (int64_t blockOffset = 0; blockOffset < rangeSize;
+           blockOffset += kHugePageSize) {
+        auto blockRange = folly::Range<char*>(
+            range.data() + blockOffset,
+            std::min<int64_t>(rangeSize, kHugePageSize));
+        const auto size = blockRange.size() - simd::kPadding;
+        auto* end = castToHeader(blockRange.data() + size);
+        auto* header = castToHeader(blockRange.data());
+        while (header != end) {
+          VELOX_CHECK_GE(reinterpret_cast<char*>(header), blockRange.data());
+          VELOX_CHECK_LT(
+              reinterpret_cast<char*>(header), reinterpret_cast<char*>(end));
+          VELOX_CHECK_LE(
+              reinterpret_cast<char*>(header->end()),
+              reinterpret_cast<char*>(end));
 
-        // Continued block & Non-free block.
-        if (!header->isFree()) {
-          state_.currentBytes() -= blockBytes(header);
+          // Continued block & Non-free block.
+          if (!header->isFree()) {
+            state_.currentBytes() -= blockBytes(header);
+          }
+          header = castToHeader(header->end());
         }
-        header = castToHeader(header->end());
       }
     }
   }
@@ -379,6 +383,8 @@ HashStringAllocator::Header* HashStringAllocator::allocate(
     int64_t size,
     bool exactSize) {
   // Bump mode: use fast bump pointer allocation
+  // Note: allocateFromBump now handles large objects (>kMaxAlloc) via
+  // allocateFromPool
   if (state_.isBumpMode()) {
     return allocateFromBump(size);
   }
@@ -449,12 +455,24 @@ HashStringAllocator::Header* HashStringAllocator::allocateFromFreeList(
 }
 
 void HashStringAllocator::free(Header* header) {
-  // Bump mode: free() is a no-op, only update statistics
+  // Bump mode: free() is mostly a no-op, but we need to handle large objects
+  // that were allocated via allocateFromPool
   if (state_.isBumpMode()) {
     Header* h = header;
     while (h) {
-      state_.currentBytes() -= blockBytes(h);
-      h = h->isContinued() ? h->nextContinued() : nullptr;
+      // Check if this is a large allocation from pool (not from bump slab)
+      if (h->size() > kMaxAlloc &&
+          state_.allocationsFromPool().find(h) !=
+              state_.allocationsFromPool().end()) {
+        // Large objects need to be freed to pool
+        Header* continued = h->isContinued() ? h->nextContinued() : nullptr;
+        freeToPool(h, h->size() + kHeaderSize);
+        h = continued;
+      } else {
+        // Regular bump allocation: just update statistics
+        state_.currentBytes() -= blockBytes(h);
+        h = h->isContinued() ? h->nextContinued() : nullptr;
+      }
     }
     return;
   }
@@ -589,17 +607,30 @@ inline bool HashStringAllocator::storeStringFast(
 
   Header* header = nullptr;
 
-  // Fast path for bump mode: allocate directly from bump pointer
+  // Fast path for bump mode: inline bump pointer allocation to avoid function
+  // call
   if (state_.isBumpMode()) {
-    header = allocateFromBump(roundedBytes);
-    if (header != nullptr) {
-      simd::memcpy(header->begin(), bytes, numBytes);
-      *reinterpret_cast<StringView*>(destination) =
-          StringView(reinterpret_cast<char*>(header->begin()), numBytes);
-      return true;
+    const int64_t totalSize = roundedBytes + kHeaderSize;
+    const int64_t alignedSize = bits::roundUp(totalSize, 8);
+    char* bumpHead = state_.bumpHead();
+    char* bumpEnd = state_.bumpEnd();
+
+    // Hot path: space available in current slab (most common case)
+    if (FOLLY_LIKELY(
+            bumpHead != nullptr && bumpHead + alignedSize <= bumpEnd)) {
+      header = reinterpret_cast<Header*>(bumpHead);
+      new (header) Header(roundedBytes);
+      state_.bumpHead() = bumpHead + alignedSize;
+      state_.currentBytes() += alignedSize;
+    } else {
+      // Cold path: need new slab or large allocation
+      header = allocateFromBump(roundedBytes);
     }
-    // If bump allocation fails (e.g., size too large), fall through to
-    // free list path which may use standalone allocation
+
+    simd::memcpy(header->begin(), bytes, numBytes);
+    *reinterpret_cast<StringView*>(destination) =
+        StringView(reinterpret_cast<char*>(header->begin()), numBytes);
+    return true;
   }
 
   if (state_.freeLists()[kNumFreeLists - 1].empty()) {
@@ -710,6 +741,14 @@ std::string HashStringAllocator::toString() const {
 }
 
 int64_t HashStringAllocator::checkConsistency() const {
+  // In bump mode, headers are laid out contiguously without kArenaEnd markers
+  // and free lists are not used. Just return currentBytes as allocated.
+  if (state_.isBumpMode()) {
+    VELOX_CHECK_EQ(state_.numFree(), 0);
+    VELOX_CHECK_EQ(state_.freeBytes(), 0);
+    return state_.currentBytes();
+  }
+
   static const auto kHugePageSize = memory::AllocationTraits::kHugePageSize;
 
   uint64_t numFree = 0;
@@ -805,6 +844,16 @@ HashStringAllocator::Header* HashStringAllocator::allocateFromBump(
     int64_t size) {
   VELOX_DCHECK(state_.isBumpMode());
   size = std::max(size, static_cast<int64_t>(kMinAlloc));
+
+  // Optimization 2: Large allocations go directly to pool to avoid wasting slab
+  // space
+  if (FOLLY_UNLIKELY(size > kMaxAlloc)) {
+    VELOX_CHECK_LE(size, Header::kSizeMask);
+    auto* header = castToHeader(allocateFromPool(size + kHeaderSize));
+    new (header) Header(size);
+    return header;
+  }
+
   const int64_t totalSize = size + kHeaderSize;
   const int64_t alignedSize = bits::roundUp(totalSize, 8);
 
@@ -812,7 +861,7 @@ HashStringAllocator::Header* HashStringAllocator::allocateFromBump(
   char* bumpEnd = state_.bumpEnd();
 
   // Check if we need a new slab
-  if (bumpHead == nullptr || bumpHead + alignedSize > bumpEnd) {
+  if (FOLLY_UNLIKELY(bumpHead == nullptr || bumpHead + alignedSize > bumpEnd)) {
     newBumpSlab(alignedSize);
     bumpHead = state_.bumpHead();
   }
@@ -823,18 +872,30 @@ HashStringAllocator::Header* HashStringAllocator::allocateFromBump(
   state_.bumpHead() = bumpHead + alignedSize;
   state_.currentBytes() += alignedSize;
 
+  // Optimization 3: Prefetch hint - if remaining space is low, hint the CPU
+  // that we might need more memory soon (reduces allocation latency spikes)
+  const int64_t remaining = state_.bumpEnd() - state_.bumpHead();
+  if (FOLLY_UNLIKELY(remaining < kMinAlloc + kHeaderSize)) {
+    // Prefetch the pool's internal structures for the upcoming newBumpSlab call
+    __builtin_prefetch(&state_.pool(), 0, 1);
+  }
+
   return header;
 }
 
 void HashStringAllocator::newBumpSlab(int64_t minSize) {
   VELOX_DCHECK(state_.isBumpMode());
   // Use kUnitSize as default slab size, same as newSlab()
-  const int64_t slabSize = std::max(minSize, static_cast<int64_t>(kUnitSize));
+  // Account for SIMD padding at the end of the slab for safe memory access
+  constexpr int32_t kSimdPadding = simd::kPadding;
+  const int64_t slabSize =
+      std::max(minSize + kSimdPadding, static_cast<int64_t>(kUnitSize));
   // Allocate through AllocationPool to maintain consistent memory tracking
   char* run = state_.pool().allocateFixed(slabSize);
   VELOX_CHECK_NOT_NULL(
       run, "Failed to allocate bump slab of size {}", slabSize);
   state_.bumpHead() = run;
-  state_.bumpEnd() = run + slabSize;
+  // Reserve SIMD padding at the end for safe memory operations
+  state_.bumpEnd() = run + slabSize - kSimdPadding;
 }
 } // namespace facebook::velox
