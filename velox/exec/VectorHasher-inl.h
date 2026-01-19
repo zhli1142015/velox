@@ -19,6 +19,7 @@ template <typename T>
 bool VectorHasher::tryMapToRangeSimd(
     const T* values,
     const SelectivityVector& rows,
+    uint64_t multiplier,
     uint64_t* result) {
   bool inRange = true;
   auto allLow = xsimd::broadcast<T>(min_);
@@ -26,35 +27,77 @@ bool VectorHasher::tryMapToRangeSimd(
   auto allOne = xsimd::broadcast<T>(1);
   vector_size_t row = rows.begin();
   constexpr int kWidth = xsimd::batch<T>::size;
-  for (; row + kWidth <= rows.end(); row += kWidth) {
-    auto data = xsimd::load_unaligned(values + row);
-    int32_t gtMax = simd::toBitMask(data > allHigh);
-    int32_t ltMin = simd::toBitMask(data < allLow);
-    // value - (low - 1) doesn't work when low is the lowest possible (e.g.
-    // std::numeric_limits<int64_t>::min())
-    if constexpr (sizeof(T) == sizeof(uint64_t)) {
-      (data - allLow + allOne).store_unaligned(result + row);
-    }
-    if ((gtMax | ltMin) != 0) {
-      inRange = false;
-      break;
-    }
-  }
 
-  if (inRange) {
-    for (; row < rows.end(); row++) {
-      auto value = values[row];
-      if (value > max_ || value < min_) {
+  if (multiplier == 1) {
+    // Fast path: multiplier == 1, directly store result
+    for (; row + kWidth <= rows.end(); row += kWidth) {
+      auto data = xsimd::load_unaligned(values + row);
+      int32_t gtMax = simd::toBitMask(data > allHigh);
+      int32_t ltMin = simd::toBitMask(data < allLow);
+      // value - (low - 1) doesn't work when low is the lowest possible (e.g.
+      // std::numeric_limits<int64_t>::min())
+      if constexpr (sizeof(T) == sizeof(uint64_t)) {
+        (data - allLow + allOne).store_unaligned(result + row);
+      }
+      if ((gtMax | ltMin) != 0) {
         inRange = false;
         break;
       }
-      if constexpr (sizeof(T) == sizeof(uint64_t)) {
-        result[row] = value - min_ + 1;
+    }
+
+    if (inRange) {
+      for (; row < rows.end(); row++) {
+        auto value = values[row];
+        if (value > max_ || value < min_) {
+          inRange = false;
+          break;
+        }
+        if constexpr (sizeof(T) == sizeof(uint64_t)) {
+          result[row] = value - min_ + 1;
+        }
+      }
+      if constexpr (sizeof(T) != sizeof(uint64_t)) {
+        for (row = rows.begin(); row < rows.end(); row++) {
+          result[row] = values[row] - min_ + 1;
+        }
       }
     }
-    if constexpr (sizeof(T) != sizeof(uint64_t)) {
-      for (row = rows.begin(); row < rows.end(); row++) {
-        result[row] = values[row] - min_ + 1;
+  } else {
+    // Slower path: multiplier != 1, need to multiply and add
+    // Use signed type for multiplier to match the batch type
+    auto allMultiplier = xsimd::broadcast<T>(static_cast<T>(multiplier));
+    for (; row + kWidth <= rows.end(); row += kWidth) {
+      auto data = xsimd::load_unaligned(values + row);
+      int32_t gtMax = simd::toBitMask(data > allHigh);
+      int32_t ltMin = simd::toBitMask(data < allLow);
+      if constexpr (sizeof(T) == sizeof(uint64_t)) {
+        auto mapped = data - allLow + allOne;
+        auto existing =
+            xsimd::load_unaligned(reinterpret_cast<const T*>(result + row));
+        (existing + mapped * allMultiplier)
+            .store_unaligned(reinterpret_cast<T*>(result + row));
+      }
+      if ((gtMax | ltMin) != 0) {
+        inRange = false;
+        break;
+      }
+    }
+
+    if (inRange) {
+      for (; row < rows.end(); row++) {
+        auto value = values[row];
+        if (value > max_ || value < min_) {
+          inRange = false;
+          break;
+        }
+        if constexpr (sizeof(T) == sizeof(uint64_t)) {
+          result[row] = result[row] + (value - min_ + 1) * multiplier;
+        }
+      }
+      if constexpr (sizeof(T) != sizeof(uint64_t)) {
+        for (row = rows.begin(); row < rows.end(); row++) {
+          result[row] = result[row] + (values[row] - min_ + 1) * multiplier;
+        }
       }
     }
   }

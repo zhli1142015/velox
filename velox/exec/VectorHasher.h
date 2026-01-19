@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <folly/container/F14Map.h>
 #include <folly/container/F14Set.h>
 
 #include <velox/type/Filter.h>
@@ -277,6 +278,7 @@ class VectorHasher {
 
   void resetStats() {
     uniqueValues_.clear();
+    intUniqueValues_.clear();
     uniqueValuesStorage_.clear();
   }
 
@@ -341,13 +343,13 @@ class VectorHasher {
 
   // true if no values have been added.
   bool empty() const {
-    return !hasRange_ && uniqueValues_.empty();
+    return !hasRange_ && uniqueValues_.empty() && intUniqueValues_.empty();
   }
 
   std::string toString() const;
 
   size_t numUniqueValues() const {
-    return uniqueValues_.size();
+    return uniqueValues_.size() + intUniqueValues_.size();
   }
 
  private:
@@ -389,6 +391,12 @@ class VectorHasher {
 
   template <typename T>
   bool makeValueIdsFlatNoNulls(const SelectivityVector& rows, uint64_t* result);
+
+  // Helper function for integer types with cache optimization
+  template <typename T>
+  bool makeValueIdsFlatNoNullsWithCache(
+      const SelectivityVector& rows,
+      uint64_t* result);
 
   template <typename T>
   bool makeValueIdsFlatWithNulls(
@@ -457,16 +465,29 @@ class VectorHasher {
 
   template <typename T>
   void analyzeValue(T value) {
+    // Early termination: if both overflow flags are set, nothing to do.
+    if (FOLLY_UNLIKELY(rangeOverflow_ && distinctOverflow_)) {
+      return;
+    }
     auto normalized = toInt64(value);
     if (!rangeOverflow_) {
       updateRange(normalized);
     }
     if (!distinctOverflow_) {
-      UniqueValue unique(normalized);
-      unique.setId(uniqueValues_.size() + 1);
-      if (uniqueValues_.insert(unique).second) {
-        if (uniqueValues_.size() > kMaxDistinct) {
+      // Use integer-specific map for integer types
+      if constexpr (std::is_integral_v<T>) {
+        auto [iter, inserted] = intUniqueValues_.try_emplace(
+            normalized, static_cast<uint32_t>(intUniqueValues_.size() + 1));
+        if (inserted && intUniqueValues_.size() > kMaxDistinct) {
           setDistinctOverflow();
+        }
+      } else {
+        UniqueValue unique(normalized);
+        unique.setId(uniqueValues_.size() + 1);
+        if (uniqueValues_.insert(unique).second) {
+          if (uniqueValues_.size() > kMaxDistinct) {
+            setDistinctOverflow();
+          }
         }
       }
     }
@@ -476,6 +497,7 @@ class VectorHasher {
   bool tryMapToRangeSimd(
       const T* values,
       const SelectivityVector& rows,
+      uint64_t multiplier,
       uint64_t* result);
 
   template <typename T>
@@ -491,8 +513,10 @@ class VectorHasher {
     if constexpr (
         std::is_same_v<T, std::int64_t> || std::is_same_v<T, std::int32_t> ||
         std::is_same_v<T, std::int16_t>) {
-      if (rows.isAllSelected() && multiplier_ == 1) {
-        return tryMapToRangeSimd(values, rows, result);
+      // Relax SIMD condition: use SIMD for all selected rows, supporting any
+      // multiplier
+      if (rows.isAllSelected()) {
+        return tryMapToRangeSimd(values, rows, multiplier_, result);
       }
     }
 
@@ -521,17 +545,31 @@ class VectorHasher {
       return int64Value - min_ + 1;
     }
 
-    UniqueValue unique(value);
-    unique.setId(uniqueValues_.size() + 1);
-    auto pair = uniqueValues_.insert(unique);
-    if (!pair.second) {
-      return pair.first->id();
+    // Fast path for integer types: use dedicated int map
+    if constexpr (std::is_integral_v<T>) {
+      auto [iter, inserted] = intUniqueValues_.try_emplace(
+          int64Value, static_cast<uint32_t>(intUniqueValues_.size() + 1));
+      if (!inserted) {
+        return iter->second;
+      }
+      updateRange(int64Value);
+      if (intUniqueValues_.size() >= rangeSize_) {
+        return kUnmappable;
+      }
+      return iter->second;
+    } else {
+      UniqueValue unique(value);
+      unique.setId(uniqueValues_.size() + 1);
+      auto pair = uniqueValues_.insert(unique);
+      if (!pair.second) {
+        return pair.first->id();
+      }
+      updateRange(int64Value);
+      if (uniqueValues_.size() >= rangeSize_) {
+        return kUnmappable;
+      }
+      return unique.id();
     }
-    updateRange(int64Value);
-    if (uniqueValues_.size() >= rangeSize_) {
-      return kUnmappable;
-    }
-    return unique.id();
   }
 
   template <typename T>
@@ -543,12 +581,22 @@ class VectorHasher {
       }
       return int64Value - min_ + 1;
     }
-    UniqueValue unique(value);
-    auto iter = uniqueValues_.find(unique);
-    if (iter != uniqueValues_.end()) {
-      return iter->id();
+
+    // Fast path for integer types: use dedicated int map
+    if constexpr (std::is_integral_v<T>) {
+      auto iter = intUniqueValues_.find(int64Value);
+      if (iter != intUniqueValues_.end()) {
+        return iter->second;
+      }
+      return kUnmappable;
+    } else {
+      UniqueValue unique(value);
+      auto iter = uniqueValues_.find(unique);
+      if (iter != uniqueValues_.end()) {
+        return iter->id();
+      }
+      return kUnmappable;
     }
-    return kUnmappable;
   }
 
   void updateRange(int64_t value) {
@@ -626,6 +674,10 @@ class VectorHasher {
   // Table for mapping distinct values to small ints.
   folly::F14FastSet<UniqueValue, UniqueValueHasher, UniqueValueComparer>
       uniqueValues_;
+
+  // Fast path map for integer types. Maps int64_t directly to id without
+  // UniqueValue wrapper overhead. Used when typeKind_ is an integer type.
+  folly::F14FastMap<int64_t, uint32_t> intUniqueValues_;
 
   // Memory for unique string values.
   std::vector<std::string> uniqueValuesStorage_;

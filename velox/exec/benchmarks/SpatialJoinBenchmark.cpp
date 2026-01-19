@@ -115,7 +115,8 @@ class SpatialJoinBenchmark : public facebook::velox::test::VectorTestBase {
           if (nulls && (row % kNullPatternModulo == 0)) {
             return std::string("");
           }
-          double x, y;
+          double x = 0;
+          double y = 0;
           if (distribution == Distribution::kUniform) {
             x = (folly::Random::rand32(rng_) % kRandomCoordinateMax) /
                 kCoordinateScaleDivisor;

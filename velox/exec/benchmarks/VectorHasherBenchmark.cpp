@@ -115,6 +115,127 @@ BENCHMARK_RELATIVE(computeValueIdsSmallintWithNulls) {
   benchmarkComputeValueIds<int16_t>(true);
 }
 
+// Benchmark for integer types using UniqueValues mode (not range mode)
+// This tests the caching optimization for flat integer vectors
+template <typename T>
+void benchmarkComputeValueIdsUniqueMode(bool flatten) {
+  folly::BenchmarkSuspender suspender;
+  vector_size_t size = 1'000;
+  BenchmarkBase base;
+
+  // Create a dictionary vector with low cardinality (10 unique values)
+  auto baseVector = base.vectorMaker().flatVector<T>(
+      10, [](vector_size_t row) { return row * 100; });
+
+  auto dictVector = base.makeDictionary(size, baseVector);
+
+  VectorPtr vector;
+  if (flatten) {
+    vector = VectorMaker::flatten(dictVector);
+  } else {
+    vector = dictVector;
+  }
+
+  std::unique_ptr<exec::VectorHasher> hasher =
+      exec::VectorHasher::create(vector->type(), 0);
+
+  raw_vector<uint64_t> result(size, base.pool());
+  SelectivityVector rows(size);
+
+  // First pass to populate uniqueValues_
+  hasher->decode(*vector, rows);
+  auto ok = hasher->computeValueIds(rows, result);
+  folly::doNotOptimizeAway(ok);
+
+  // Enable value IDs mode (not range mode)
+  hasher->enableValueIds(1, 0);
+
+  suspender.dismiss();
+
+  for (int i = 0; i < 10'000; i++) {
+    hasher->decode(*vector, rows);
+    ok = hasher->computeValueIds(rows, result);
+    folly::doNotOptimizeAway(ok);
+  }
+}
+
+BENCHMARK(computeValueIdsBigintDictUnique) {
+  benchmarkComputeValueIdsUniqueMode<int64_t>(false);
+}
+
+BENCHMARK_RELATIVE(computeValueIdsBigintFlatUnique) {
+  benchmarkComputeValueIdsUniqueMode<int64_t>(true);
+}
+
+// Benchmark for multi-column integer keys (tests SIMD with multiplier != 1)
+// Uses Range mode where SIMD optimization applies
+void benchmarkComputeValueIdsMultiColumnInt(bool flatten) {
+  folly::BenchmarkSuspender suspender;
+  BenchmarkBase base;
+  vector_size_t size = 1'000;
+
+  // Create 4 integer columns with low cardinality
+  std::vector<VectorPtr> baseVectors;
+  baseVectors.push_back(
+      base.vectorMaker().flatVector<int64_t>(10, [](auto row) { return row; }));
+  baseVectors.push_back(base.vectorMaker().flatVector<int64_t>(
+      20, [](auto row) { return row * 100; }));
+  baseVectors.push_back(base.vectorMaker().flatVector<int64_t>(
+      15, [](auto row) { return row * 1000; }));
+  baseVectors.push_back(base.vectorMaker().flatVector<int64_t>(
+      25, [](auto row) { return row * 10000; }));
+
+  std::vector<VectorPtr> vectors;
+  vectors.reserve(4);
+  for (auto& baseVector : baseVectors) {
+    auto dict = base.makeDictionary(size, baseVector);
+    if (flatten) {
+      vectors.emplace_back(VectorMaker::flatten(dict));
+    } else {
+      vectors.emplace_back(dict);
+    }
+  }
+
+  std::vector<std::unique_ptr<exec::VectorHasher>> hashers;
+  hashers.reserve(4);
+  for (int i = 0; i < 4; i++) {
+    hashers.emplace_back(exec::VectorHasher::create(vectors[i]->type(), i));
+  }
+
+  SelectivityVector allRows(size);
+  uint64_t multiplier = 1;
+  for (int i = 0; i < 4; i++) {
+    auto hasher = hashers[i].get();
+    raw_vector<uint64_t> result(size, base.pool());
+    hasher->decode(*vectors[i], allRows);
+    auto ok = hasher->computeValueIds(allRows, result);
+    folly::doNotOptimizeAway(ok);
+    multiplier = hasher->enableValueRange(multiplier, 0);
+  }
+  suspender.dismiss();
+
+  raw_vector<uint64_t> result(size, base.pool());
+  for (int i = 0; i < 10'000; i++) {
+    for (int j = 0; j < 4; j++) {
+      auto hasher = hashers[j].get();
+      hasher->decode(*vectors[j], allRows);
+      bool ok = hasher->computeValueIds(allRows, result);
+      folly::doNotOptimizeAway(ok);
+    }
+  }
+}
+
+// This test compares:
+// - Dict: Dictionary vector, no SIMD (uses cachedHashes_)
+// - Flat: Flat vector, uses SIMD with multiplier > 1 (new optimization)
+BENCHMARK(computeValueIdsMultiColIntDict) {
+  benchmarkComputeValueIdsMultiColumnInt(false);
+}
+
+BENCHMARK_RELATIVE(computeValueIdsMultiColIntFlat) {
+  benchmarkComputeValueIdsMultiColumnInt(true);
+}
+
 void benchmarkComputeValueIdsForStrings(bool flattenDictionaries) {
   folly::BenchmarkSuspender suspender;
   BenchmarkBase base;

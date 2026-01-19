@@ -237,6 +237,152 @@ bool VectorHasher::makeValueIdsFlatNoNulls(
   return success;
 }
 
+// Specialization for StringView to leverage uniqueValues_ cache for flat
+// vectors. When uniqueValues_ already contains values (common case after first
+// batch), we use find() first which is faster than insert() for existing
+// values.
+template <>
+bool VectorHasher::makeValueIdsFlatNoNulls<StringView>(
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  const auto* values = decoded_.data<StringView>();
+
+  // Range mode or empty uniqueValues_ - use standard path
+  // (range mode uses value-to-range mapping, not uniqueValues_ lookup)
+  if (isRange_ || uniqueValues_.empty()) {
+    bool success = true;
+    rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+      makeValueIdForOneRow<StringView, false>(
+          nullptr, row, values, row, result, success);
+    });
+    return success;
+  }
+
+  // Fast path: use uniqueValues_.find() to quickly lookup existing values
+  // without the overhead of constructing a new UniqueValue and attempting
+  // insert.
+  bool success = true;
+  rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+    if (!success) {
+      analyzeValue(values[row]);
+      return;
+    }
+
+    StringView value = values[row];
+    UniqueValue lookup(value.data(), value.size());
+
+    // Try find first - this is faster for existing values
+    auto iter = uniqueValues_.find(lookup);
+    if (iter != uniqueValues_.end()) {
+      auto id = iter->id();
+      result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+      return;
+    }
+
+    // Not found - call valueId which will insert
+    auto id = valueId(value);
+    if (id == kUnmappable) {
+      success = false;
+      analyzeValue(value);
+    } else {
+      result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+    }
+  });
+
+  return success;
+}
+
+// Helper function for integer types to leverage intUniqueValues_ cache for flat
+// vectors.
+template <typename T>
+bool VectorHasher::makeValueIdsFlatNoNullsWithCache(
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  static_assert(
+      std::is_integral_v<T>,
+      "makeValueIdsFlatNoNullsWithCache only for integer types");
+
+  const auto* values = decoded_.data<T>();
+
+  // Range mode is fast, use standard path
+  if (isRange_) {
+    if (tryMapToRange(values, rows, result)) {
+      return true;
+    }
+  }
+
+  // Empty intUniqueValues_ - use standard path
+  if (intUniqueValues_.empty()) {
+    bool success = true;
+    rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+      makeValueIdForOneRow<T, false>(
+          nullptr, row, values, row, result, success);
+    });
+    return success;
+  }
+
+  // Fast path: use intUniqueValues_.find() to quickly lookup existing values
+  // This avoids the UniqueValue wrapper overhead for integer types
+  bool success = true;
+  rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+    if (!success) {
+      analyzeValue(values[row]);
+      return;
+    }
+
+    T value = values[row];
+    auto int64Value = static_cast<int64_t>(value);
+
+    // Try find first - this is faster for existing values
+    auto iter = intUniqueValues_.find(int64Value);
+    if (iter != intUniqueValues_.end()) {
+      auto id = iter->second;
+      result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+      return;
+    }
+
+    // Not found - call valueId which will insert
+    auto id = valueId(value);
+    if (id == kUnmappable) {
+      success = false;
+      analyzeValue(value);
+    } else {
+      result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+    }
+  });
+
+  return success;
+}
+
+// Explicit specializations for integer types
+template <>
+bool VectorHasher::makeValueIdsFlatNoNulls<int64_t>(
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  return makeValueIdsFlatNoNullsWithCache<int64_t>(rows, result);
+}
+
+template <>
+bool VectorHasher::makeValueIdsFlatNoNulls<int32_t>(
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  return makeValueIdsFlatNoNullsWithCache<int32_t>(rows, result);
+}
+
+template <>
+bool VectorHasher::makeValueIdsFlatNoNulls<int16_t>(
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  return makeValueIdsFlatNoNullsWithCache<int16_t>(rows, result);
+}
+
+template <>
+bool VectorHasher::makeValueIdsFlatNoNulls<int8_t>(
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  return makeValueIdsFlatNoNullsWithCache<int8_t>(rows, result);
+}
+
 template <typename T>
 bool VectorHasher::makeValueIdsFlatWithNulls(
     const SelectivityVector& rows,
@@ -259,7 +405,13 @@ bool VectorHasher::makeValueIdsDecoded(
   auto values = decoded_.data<T>();
   bool success = true;
 
-  if (rows.countSelected() <= decoded_.base()->size()) {
+  auto baseSize = decoded_.base()->size();
+  // Use cache when:
+  // 1. Selected rows exceed base size (original condition), OR
+  // 2. Base size is small (≤1000) - caching is always beneficial for small
+  //    dictionaries due to potential repeated values and low overhead
+  bool useCache = rows.countSelected() > baseSize || baseSize <= 1000;
+  if (!useCache) {
     // Cache is not beneficial in this case and we don't use them.
     auto* nulls = decoded_.nulls(&rows);
     rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
@@ -431,7 +583,19 @@ void VectorHasher::lookupValueIdsTyped(
       lookupIdsRangeSimd<int64_t>(decoded, rows, result);
     } else if (Kind == TypeKind::INTEGER && isRange_) {
       lookupIdsRangeSimd<int32_t>(decoded, rows, result);
+    } else if (!decoded.mayHaveNulls()) {
+      // Fast path: no nulls to check
+      rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+        T value = decoded.valueAt<T>(row);
+        uint64_t id = lookupValueId(value);
+        if (id == kUnmappable) {
+          rows.setValid(row, false);
+          return;
+        }
+        result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+      });
     } else {
+      // Slow path: need to check nulls
       rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
         if (decoded.isNullAt(row)) {
           if (multiplier_ == 1) {
@@ -452,26 +616,45 @@ void VectorHasher::lookupValueIdsTyped(
   } else {
     hashes.resize(decoded.base()->size());
     std::fill(hashes.begin(), hashes.end(), 0);
-    rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
-      if (decoded.isNullAt(row)) {
-        if (multiplier_ == 1) {
-          result[row] = 0;
+    if (!decoded.mayHaveNulls()) {
+      // Fast path: no nulls to check
+      rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+        auto baseIndex = decoded.index(row);
+        uint64_t id = hashes[baseIndex];
+        if (id == 0) {
+          T value = decoded.valueAt<T>(row);
+          id = lookupValueId(value);
+          if (id == kUnmappable) {
+            rows.setValid(row, false);
+            return;
+          }
+          hashes[baseIndex] = id;
         }
-        return;
-      }
-      auto baseIndex = decoded.index(row);
-      uint64_t id = hashes[baseIndex];
-      if (id == 0) {
-        T value = decoded.valueAt<T>(row);
-        id = lookupValueId(value);
-        if (id == kUnmappable) {
-          rows.setValid(row, false);
+        result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+      });
+    } else {
+      // Slow path: need to check nulls
+      rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+        if (decoded.isNullAt(row)) {
+          if (multiplier_ == 1) {
+            result[row] = 0;
+          }
           return;
         }
-        hashes[baseIndex] = id;
-      }
-      result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
-    });
+        auto baseIndex = decoded.index(row);
+        uint64_t id = hashes[baseIndex];
+        if (id == 0) {
+          T value = decoded.valueAt<T>(row);
+          id = lookupValueId(value);
+          if (id == kUnmappable) {
+            rows.setValid(row, false);
+            return;
+          }
+          hashes[baseIndex] = id;
+        }
+        result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+      });
+    }
     rows.updateBounds();
   }
 }
@@ -610,6 +793,10 @@ void VectorHasher::analyze(
 
 template <>
 void VectorHasher::analyzeValue(StringView value) {
+  // Early termination: if both overflow flags are set, nothing to do.
+  if (FOLLY_UNLIKELY(rangeOverflow_ && distinctOverflow_)) {
+    return;
+  }
   int size = value.size();
   auto data = value.data();
   if (!rangeOverflow_) {
@@ -690,9 +877,9 @@ std::unique_ptr<common::Filter> VectorHasher::getFilter(
     case TypeKind::BIGINT:
       if (!distinctOverflow_) {
         std::vector<int64_t> values;
-        values.reserve(uniqueValues_.size());
-        for (const auto& value : uniqueValues_) {
-          values.emplace_back(value.data());
+        values.reserve(intUniqueValues_.size());
+        for (const auto& [intValue, id] : intUniqueValues_) {
+          values.emplace_back(intValue);
         }
 
         return common::createBigintValues(values, nullAllowed);
@@ -818,7 +1005,7 @@ void VectorHasher::cardinality(
     return;
   }
   // Padded count of values + 1 for null.
-  asDistincts = addIdReserve(uniqueValues_.size(), reservePct) + 1;
+  asDistincts = addIdReserve(numUniqueValues(), reservePct) + 1;
 }
 
 uint64_t VectorHasher::enableValueIds(uint64_t multiplier, int32_t reservePct) {
@@ -829,7 +1016,7 @@ uint64_t VectorHasher::enableValueIds(uint64_t multiplier, int32_t reservePct) {
   checkTypeSupportsValueIds();
 
   multiplier_ = multiplier;
-  rangeSize_ = addIdReserve(uniqueValues_.size(), reservePct) + 1;
+  rangeSize_ = addIdReserve(numUniqueValues(), reservePct) + 1;
   isRange_ = false;
   uint64_t result;
   if (__builtin_mul_overflow(multiplier_, rangeSize_, &result)) {
@@ -869,6 +1056,7 @@ void VectorHasher::copyStatsFrom(const VectorHasher& other) {
   min_ = other.min_;
   max_ = other.max_;
   uniqueValues_ = other.uniqueValues_;
+  intUniqueValues_ = other.intUniqueValues_;
 }
 
 void VectorHasher::merge(const VectorHasher& other, size_t maxNumDistinct) {
@@ -898,13 +1086,23 @@ void VectorHasher::merge(const VectorHasher& other, size_t maxNumDistinct) {
   }
   // Unique values can be merged without dispatch on type. All the
   // merged hashers must stay live for string type columns.
+  // Merge integer unique values first (fast path for integer types)
+  for (const auto& [intValue, id] : other.intUniqueValues_) {
+    auto [iter, inserted] = intUniqueValues_.try_emplace(
+        intValue, static_cast<uint32_t>(intUniqueValues_.size() + 1));
+    if (inserted && numUniqueValues() > maxNumDistinct) {
+      setDistinctOverflow();
+      return;
+    }
+  }
+  // Merge non-integer unique values
   for (UniqueValue value : other.uniqueValues_) {
     // Assign a new id at end of range for the case 'value' is not
     // in 'uniqueValues_'. We do not set overflow here because the
     // memory is already allocated and there is a known cap on size.
     value.setId(uniqueValues_.size() + 1);
     if (uniqueValues_.insert(value).second &&
-        uniqueValues_.size() > maxNumDistinct) {
+        numUniqueValues() > maxNumDistinct) {
       setDistinctOverflow();
       break;
     }
@@ -919,7 +1117,7 @@ std::string VectorHasher::toString() const {
     out << " range size " << rangeSize_ << ": [" << min_ << ", " << max_ << "]";
   }
   if (!distinctOverflow_) {
-    out << " numDistinct: " << uniqueValues_.size();
+    out << " numDistinct: " << numUniqueValues();
   }
   return out.str();
 }
