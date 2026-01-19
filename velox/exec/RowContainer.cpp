@@ -137,13 +137,15 @@ RowContainer::RowContainer(
     bool hasProbedFlag,
     bool hasNormalizedKeys,
     bool useListRowIndex,
-    memory::MemoryPool* pool)
+    memory::MemoryPool* pool,
+    bool useBumpAllocator)
     : keyTypes_(keyTypes),
       nullableKeys_(nullableKeys),
       isJoinBuild_(isJoinBuild),
       hasNormalizedKeys_(hasNormalizedKeys),
       useListRowIndex_(useListRowIndex),
-      stringAllocator_(std::make_unique<HashStringAllocator>(pool)),
+      stringAllocator_(
+          std::make_unique<HashStringAllocator>(pool, useBumpAllocator)),
       accumulators_(accumulators),
       rows_(pool),
       rowPointers_(StlAllocator<char*>(stringAllocator_.get())) {

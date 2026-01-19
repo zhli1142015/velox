@@ -97,6 +97,7 @@ add_executable(
   SplitTest.cpp
   SqlTest.cpp
   StreamingAggregationTest.cpp
+  RowContainerPerfTest.cpp
   TableScanTest.cpp
   TableWriterTest.cpp
   TaskListenerTest.cpp

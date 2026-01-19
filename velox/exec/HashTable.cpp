@@ -53,7 +53,8 @@ HashTable<ignoreNullKeys>::HashTable(
     bool hasProbedFlag,
     uint32_t minTableSizeForParallelJoinBuild,
     memory::MemoryPool* pool,
-    uint64_t bloomFilterMaxSize)
+    uint64_t bloomFilterMaxSize,
+    bool useBumpAllocator)
     : BaseHashTable(std::move(hashers)),
       pool_(pool),
       minTableSizeForParallelJoinBuild_(minTableSizeForParallelJoinBuild),
@@ -80,7 +81,9 @@ HashTable<ignoreNullKeys>::HashTable(
       hasProbedFlag,
       hashMode_ != HashMode::kHash,
       /*useListRowIndex=*/false,
-      pool);
+      pool,
+      /*useBumpAllocator=*/(useBumpAllocator || isJoinBuild) &&
+          FLAGS_velox_enable_bump_allocator);
   nextOffset_ = rows_->nextOffset();
 }
 

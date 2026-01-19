@@ -179,8 +179,15 @@ class HashStringAllocator : public StreamArena {
     }
   };
 
-  explicit HashStringAllocator(memory::MemoryPool* pool)
-      : StreamArena(pool), state_(pool) {}
+  /// Creates a HashStringAllocator.
+  /// @param pool The memory pool to allocate from.
+  /// @param bumpMode If true, enables bump-pointer allocation mode which is
+  ///        faster but does not support individual object deallocation.
+  ///        In bump mode, free() becomes a no-op and memory is only released
+  ///        via clear(). This is ideal for Sort, HashJoin, and Aggregation
+  ///        scenarios where all data is cleared at once.
+  explicit HashStringAllocator(memory::MemoryPool* pool, bool bumpMode = false)
+      : StreamArena(pool), state_(pool, bumpMode) {}
 
   ~HashStringAllocator();
 
@@ -309,6 +316,13 @@ class HashStringAllocator : public StreamArena {
   /// the pointer because in the worst case we would have one allocation that
   /// chains many small free blocks together via kContinued.
   uint64_t freeSpace() const {
+    if (state_.isBumpMode()) {
+      // In bump mode, return remaining space in current slab
+      if (state_.bumpHead() == nullptr) {
+        return 0;
+      }
+      return state_.bumpEnd() - state_.bumpHead();
+    }
     const int64_t minFree = state_.freeBytes() -
         state_.numFree() * (kHeaderSize + Header::kContinuedPtrSize);
     VELOX_CHECK_GE(minFree, 0, "Guaranteed free space cannot be negative");
@@ -336,6 +350,12 @@ class HashStringAllocator : public StreamArena {
   bool isEmpty() const;
 
   std::string toString() const;
+
+  /// Returns true if this allocator is in bump mode.
+  /// In bump mode, free() is a no-op and memory is only released via clear().
+  bool isBumpMode() const {
+    return state_.isBumpMode();
+  }
 
   /// Effectively makes this immutable while executing f, any attempt to access
   /// state_ in a mutable way while f is executing will cause an exception to be
@@ -406,13 +426,18 @@ class HashStringAllocator : public StreamArena {
   // Returns the free list index for 'size'.
   int32_t freeListIndex(int size);
 
+  // Bump allocation mode methods
+  Header* allocateFromBump(int64_t size);
+  void newBumpSlab(int64_t minSize);
+
   /// A class that wraps any fields in the HashStringAllocator, it's main
   /// purpose is to simplify the freeze/unfreeze mechanic.  Fields are exposed
   /// via accessor methods, attempting to invoke a non-const accessor when the
   /// HashStringAllocator is frozen will cause an exception to be thrown.
   class State {
    public:
-    explicit State(memory::MemoryPool* pool) : pool_(pool) {}
+    explicit State(memory::MemoryPool* pool, bool bumpMode = false)
+        : pool_(pool), bumpMode_(bumpMode) {}
 
     void freeze() {
       VELOX_CHECK(
@@ -426,6 +451,11 @@ class HashStringAllocator : public StreamArena {
           !mutable_,
           "Attempting to unfreeze an already unfrozen HashStringAllocator.");
       mutable_ = true;
+    }
+
+    /// Returns true if bump allocation mode is enabled.
+    bool isBumpMode() const {
+      return bumpMode_;
     }
 
    private:
@@ -494,9 +524,17 @@ class HashStringAllocator : public StreamArena {
     // Sum of sizes in 'allocationsFromPool_'.
     DECLARE_FIELD_WITH_INIT_VALUE(int64_t, sizeFromPool, 0);
 
+    // Bump allocation mode fields (only used when bumpMode_ is true)
+    DECLARE_FIELD_WITH_INIT_VALUE(char*, bumpHead, nullptr);
+    DECLARE_FIELD_WITH_INIT_VALUE(char*, bumpEnd, nullptr);
+
 #undef DECLARE_FIELD_WITH_INIT_VALUE
 #undef DECLARE_FIELD
 #undef DECLARE_GETTERS
+
+    // Whether bump allocation mode is enabled. Must be const since it's set
+    // at construction time and never changes.
+    const bool bumpMode_{false};
 
     void assertMutability() const {
       VELOX_CHECK(mutable_, "The HashStringAllocator is immutable.");

@@ -20,6 +20,10 @@
 #include "velox/exec/RowContainer.h"
 #include "velox/exec/VectorHasher.h"
 
+#include <gflags/gflags.h>
+
+DECLARE_bool(velox_enable_bump_allocator);
+
 namespace facebook::velox::exec {
 
 using PartitionBoundIndexType = int64_t;
@@ -546,7 +550,8 @@ class HashTable : public BaseHashTable {
       bool hasProbedFlag,
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
-      uint64_t bloomFilterMaxSize = 0);
+      uint64_t bloomFilterMaxSize = 0,
+      bool useBumpAllocator = false);
 
   ~HashTable() override = default;
 
@@ -562,7 +567,10 @@ class HashTable : public BaseHashTable {
         false, // isJoinBuild
         false, // hasProbedFlag
         0, // minTableSizeForParallelJoinBuild
-        pool);
+        pool,
+        0, // bloomFilterMaxSize
+        FLAGS_velox_enable_bump_allocator); // useBumpAllocator controlled by
+                                            // flag
   }
 
   static std::unique_ptr<HashTable> createForJoin(

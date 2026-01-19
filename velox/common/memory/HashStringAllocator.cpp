@@ -86,6 +86,11 @@ HashStringAllocator::~HashStringAllocator() {
 }
 
 void HashStringAllocator::clear() {
+  // Reset bump mode state
+  if (state_.isBumpMode()) {
+    state_.bumpHead() = nullptr;
+    state_.bumpEnd() = nullptr;
+  }
   state_.numFree() = 0;
   state_.freeBytes() = 0;
   std::fill(
@@ -373,6 +378,10 @@ void HashStringAllocator::removeFromFreeList(Header* header) {
 HashStringAllocator::Header* HashStringAllocator::allocate(
     int64_t size,
     bool exactSize) {
+  // Bump mode: use fast bump pointer allocation
+  if (state_.isBumpMode()) {
+    return allocateFromBump(size);
+  }
   if (size > kMaxAlloc && exactSize) {
     VELOX_CHECK_LE(size, Header::kSizeMask);
     auto* header = castToHeader(allocateFromPool(size + kHeaderSize));
@@ -440,6 +449,15 @@ HashStringAllocator::Header* HashStringAllocator::allocateFromFreeList(
 }
 
 void HashStringAllocator::free(Header* header) {
+  // Bump mode: free() is a no-op, only update statistics
+  if (state_.isBumpMode()) {
+    Header* h = header;
+    while (h) {
+      state_.currentBytes() -= blockBytes(h);
+      h = h->isContinued() ? h->nextContinued() : nullptr;
+    }
+    return;
+  }
   Header* headerToFree = header;
   do {
     Header* continued = nullptr;
@@ -570,6 +588,20 @@ inline bool HashStringAllocator::storeStringFast(
   const auto roundedBytes = std::max(numBytes, kMinAlloc);
 
   Header* header = nullptr;
+
+  // Fast path for bump mode: allocate directly from bump pointer
+  if (state_.isBumpMode()) {
+    header = allocateFromBump(roundedBytes);
+    if (header != nullptr) {
+      simd::memcpy(header->begin(), bytes, numBytes);
+      *reinterpret_cast<StringView*>(destination) =
+          StringView(reinterpret_cast<char*>(header->begin()), numBytes);
+      return true;
+    }
+    // If bump allocation fails (e.g., size too large), fall through to
+    // free list path which may use standalone allocation
+  }
+
   if (state_.freeLists()[kNumFreeLists - 1].empty()) {
     if (roundedBytes >= kMaxAlloc) {
       return false;
@@ -767,5 +799,42 @@ int64_t HashStringAllocator::checkConsistency() const {
 
 bool HashStringAllocator::isEmpty() const {
   return state_.sizeFromPool() == 0 && checkConsistency() == 0;
+}
+
+HashStringAllocator::Header* HashStringAllocator::allocateFromBump(
+    int64_t size) {
+  VELOX_DCHECK(state_.isBumpMode());
+  size = std::max(size, static_cast<int64_t>(kMinAlloc));
+  const int64_t totalSize = size + kHeaderSize;
+  const int64_t alignedSize = bits::roundUp(totalSize, 8);
+
+  char* bumpHead = state_.bumpHead();
+  char* bumpEnd = state_.bumpEnd();
+
+  // Check if we need a new slab
+  if (bumpHead == nullptr || bumpHead + alignedSize > bumpEnd) {
+    newBumpSlab(alignedSize);
+    bumpHead = state_.bumpHead();
+  }
+
+  // Bump pointer allocation
+  auto* header = reinterpret_cast<Header*>(bumpHead);
+  new (header) Header(size);
+  state_.bumpHead() = bumpHead + alignedSize;
+  state_.currentBytes() += alignedSize;
+
+  return header;
+}
+
+void HashStringAllocator::newBumpSlab(int64_t minSize) {
+  VELOX_DCHECK(state_.isBumpMode());
+  // Use kUnitSize as default slab size, same as newSlab()
+  const int64_t slabSize = std::max(minSize, static_cast<int64_t>(kUnitSize));
+  // Allocate through AllocationPool to maintain consistent memory tracking
+  char* run = state_.pool().allocateFixed(slabSize);
+  VELOX_CHECK_NOT_NULL(
+      run, "Failed to allocate bump slab of size {}", slabSize);
+  state_.bumpHead() = run;
+  state_.bumpEnd() = run + slabSize;
 }
 } // namespace facebook::velox

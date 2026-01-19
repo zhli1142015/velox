@@ -188,6 +188,10 @@ add_executable(velox_atomics_benchmark AtomicsBench.cpp)
 
 target_link_libraries(velox_atomics_benchmark Folly::follybenchmark)
 
+add_executable(velox_bump_allocator_benchmark BumpAllocatorBenchmark.cpp)
+
+target_link_libraries(velox_bump_allocator_benchmark velox_exec velox_memory Folly::follybenchmark)
+
 if(VELOX_ENABLE_GEO)
   add_executable(velox_spatial_join_benchmark SpatialJoinBenchmark.cpp)
 

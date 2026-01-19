@@ -289,11 +289,14 @@ class RowContainer {
   /// row pointers so that listRowsFast() can return rows without scanning
   /// underlying allocations or checking free/probe flags. It is intended to be
   /// used in SortBuffer and SortInputSpiller to improve performance.
+  /// If 'useBumpAllocator' is true, the container uses bump-pointer allocation
+  /// which is faster but does not support individual object deallocation.
   RowContainer(
       const std::vector<TypePtr>& keyTypes,
       const std::vector<TypePtr>& dependentTypes,
       bool useListRowIndex,
-      memory::MemoryPool* pool)
+      memory::MemoryPool* pool,
+      bool useBumpAllocator = false)
       : RowContainer(
             keyTypes,
             true, // nullableKeys
@@ -304,7 +307,8 @@ class RowContainer {
             false, // hasProbedFlag
             false, // hasNormalizedKey
             useListRowIndex,
-            pool) {}
+            pool,
+            useBumpAllocator) {}
 
   ~RowContainer();
 
@@ -336,7 +340,8 @@ class RowContainer {
       bool hasProbedFlag,
       bool hasNormalizedKey,
       bool useListRowIndex,
-      memory::MemoryPool* pool);
+      memory::MemoryPool* pool,
+      bool useBumpAllocator = false);
 
   /// Allocates a new row and initializes possible aggregates to null.
   char* newRow();

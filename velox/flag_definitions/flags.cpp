@@ -115,6 +115,14 @@ DEFINE_bool(
 
 DEFINE_bool(velox_memory_use_hugepages, true, "Use explicit huge pages");
 
+// Used in HashStringAllocator for Sort/HashJoin/Aggregation optimization
+DEFINE_bool(
+    velox_enable_bump_allocator,
+    true,
+    "If true, enable bump-pointer allocation mode in HashStringAllocator for "
+    "Sort, HashJoin, and Aggregation scenarios. This provides 3-5x faster "
+    "allocation but free() becomes a no-op and memory is only released via clear()");
+
 DEFINE_int32(
     cache_prefetch_min_pct,
     80,

@@ -815,5 +815,111 @@ TEST_F(HashStringAllocatorTest, inputStream) {
   ASSERT_EQ(in.tellp(), in.size());
 }
 
+TEST_F(HashStringAllocatorTest, bumpModeBasic) {
+  // Create bump mode allocator
+  HashStringAllocator bumpAllocator(pool_.get(), /*bumpMode=*/true);
+  EXPECT_TRUE(bumpAllocator.isBumpMode());
+
+  // Test allocation
+  auto* header1 = bumpAllocator.allocate(100);
+  ASSERT_NE(header1, nullptr);
+  EXPECT_GE(header1->size(), 100);
+
+  auto* header2 = bumpAllocator.allocate(200);
+  ASSERT_NE(header2, nullptr);
+  EXPECT_GE(header2->size(), 200);
+
+  // Verify currentBytes is tracked
+  EXPECT_GT(bumpAllocator.currentBytes(), 0);
+
+  // Test that free() is a no-op (should not crash)
+  bumpAllocator.free(header1);
+  bumpAllocator.free(header2);
+
+  // Test clear()
+  bumpAllocator.clear();
+  EXPECT_EQ(bumpAllocator.currentBytes(), 0);
+}
+
+TEST_F(HashStringAllocatorTest, bumpModeMultipleSlab) {
+  HashStringAllocator bumpAllocator(pool_.get(), /*bumpMode=*/true);
+
+  // Allocate enough to trigger multiple slabs
+  constexpr int kIterations = 10000;
+  std::vector<HashStringAllocator::Header*> headers;
+  headers.reserve(kIterations);
+
+  for (int i = 0; i < kIterations; ++i) {
+    auto* header = bumpAllocator.allocate(100);
+    ASSERT_NE(header, nullptr);
+    headers.push_back(header);
+  }
+
+  // Free all (should be no-op)
+  for (auto* header : headers) {
+    bumpAllocator.free(header);
+  }
+
+  // Clear should release all memory
+  bumpAllocator.clear();
+  EXPECT_EQ(bumpAllocator.currentBytes(), 0);
+}
+
+TEST_F(HashStringAllocatorTest, bumpModePerformance) {
+  constexpr int kIterations = 100000;
+
+  // Normal mode
+  HashStringAllocator normalAllocator(pool_.get(), /*bumpMode=*/false);
+  auto normalStart = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < kIterations; ++i) {
+    normalAllocator.allocate(64);
+  }
+  auto normalEnd = std::chrono::high_resolution_clock::now();
+  normalAllocator.clear();
+
+  // Bump mode
+  HashStringAllocator bumpAllocator(pool_.get(), /*bumpMode=*/true);
+  auto bumpStart = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < kIterations; ++i) {
+    bumpAllocator.allocate(64);
+  }
+  auto bumpEnd = std::chrono::high_resolution_clock::now();
+  bumpAllocator.clear();
+
+  auto normalDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                            normalEnd - normalStart)
+                            .count();
+  auto bumpDuration =
+      std::chrono::duration_cast<std::chrono::microseconds>(bumpEnd - bumpStart)
+          .count();
+
+  LOG(INFO) << "Normal mode: " << normalDuration << " us";
+  LOG(INFO) << "Bump mode: " << bumpDuration << " us";
+  LOG(INFO) << "Speedup: " << static_cast<double>(normalDuration) / bumpDuration
+            << "x";
+
+  // Bump mode should be at least 2x faster
+  EXPECT_LT(bumpDuration * 2, normalDuration);
+}
+
+TEST_F(HashStringAllocatorTest, normalModeUnchanged) {
+  // Verify normal mode behavior is unchanged
+  HashStringAllocator normalAllocator(
+      pool_.get()); // bumpMode defaults to false
+  EXPECT_FALSE(normalAllocator.isBumpMode());
+
+  auto* header = normalAllocator.allocate(100);
+  ASSERT_NE(header, nullptr);
+
+  // Free should work normally
+  normalAllocator.free(header);
+
+  // Should be able to allocate again from free list
+  auto* header2 = normalAllocator.allocate(100);
+  ASSERT_NE(header2, nullptr);
+
+  normalAllocator.clear();
+}
+
 } // namespace
 } // namespace facebook::velox

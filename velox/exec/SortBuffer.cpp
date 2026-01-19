@@ -18,6 +18,10 @@
 #include "velox/exec/MemoryReclaimer.h"
 #include "velox/exec/Spiller.h"
 
+#include <gflags/gflags.h>
+
+DECLARE_bool(velox_enable_bump_allocator);
+
 namespace facebook::velox::exec {
 
 SortBuffer::SortBuffer(
@@ -74,7 +78,11 @@ SortBuffer::SortBuffer(
   }
 
   data_ = std::make_unique<RowContainer>(
-      sortedColumnTypes, nonSortedColumnTypes, /*useListRowIndex=*/true, pool_);
+      sortedColumnTypes,
+      nonSortedColumnTypes,
+      /*useListRowIndex=*/true,
+      pool_,
+      /*useBumpAllocator=*/FLAGS_velox_enable_bump_allocator);
   spillerStoreType_ =
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
 }
