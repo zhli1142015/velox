@@ -365,15 +365,59 @@ bool HashTable<ignoreNullKeys>::compareKeys(
   int32_t i = 0;
   do {
     auto& hasher = lookup.hashers[i];
-    if (rows_->compare<!ignoreNullKeys>(
-            group,
-            rows_->columnAt(i),
-            hasher->decodedVector(),
-            row,
-            CompareFlags::equality(
-                CompareFlags::NullHandlingMode::kNullAsValue)) != 0) {
-      return false;
+    auto column = rows_->columnAt(i);
+    auto& decoded = hasher->decodedVector();
+    // Fast path for string keys: avoid RowContainer::compare type dispatch.
+    if (FOLLY_LIKELY(hasher->typeKind() == TypeKind::VARCHAR)) {
+      if constexpr (!ignoreNullKeys) {
+        if ((group[column.nullByte()] & column.nullMask()) != 0) {
+          if (!decoded.isNullAt(row)) {
+            return false;
+          }
+          goto next_key;
+        }
+        if (decoded.isNullAt(row)) {
+          return false;
+        }
+      }
+      {
+        auto left =
+            *reinterpret_cast<const StringView*>(group + column.offset());
+        auto right = decoded.valueAt<StringView>(row);
+        if (left.size() != right.size()) {
+          return false;
+        }
+        if (left.isInline()) {
+          if (!(left == right)) {
+            return false;
+          }
+        } else {
+          auto* header = HashStringAllocator::headerOf(left.data());
+          if (FOLLY_LIKELY(left.size() <= header->size())) {
+            if (memcmp(left.data(), right.data(), left.size()) != 0) {
+              return false;
+            }
+          } else {
+            std::string storage;
+            if (!(HashStringAllocator::contiguousString(left, storage) ==
+                  right)) {
+              return false;
+            }
+          }
+        }
+      }
+    } else {
+      if (rows_->compare<!ignoreNullKeys>(
+              group,
+              column,
+              decoded,
+              row,
+              CompareFlags::equality(
+                  CompareFlags::NullHandlingMode::kNullAsValue)) != 0) {
+        return false;
+      }
     }
+  next_key:;
   } while (++i < numKeys);
   return true;
 }
@@ -385,9 +429,61 @@ bool HashTable<ignoreNullKeys>::compareKeys(
   auto numKeys = hashers_.size();
   int32_t i = 0;
   do {
-    if (rows_->compare(group, inserted, i, CompareFlags{true, true})) {
-      return false;
+    auto column = rows_->columnAt(i);
+    // Fast path for string keys: avoid RowContainer::compare type dispatch.
+    if (FOLLY_LIKELY(rows_->keyTypes()[i]->kind() == TypeKind::VARCHAR)) {
+      bool leftNull = (group[column.nullByte()] & column.nullMask()) != 0;
+      bool rightNull = (inserted[column.nullByte()] & column.nullMask()) != 0;
+      if (leftNull) {
+        if (!rightNull) {
+          return false;
+        }
+        goto next_key;
+      }
+      if (rightNull) {
+        return false;
+      }
+      {
+        auto left =
+            *reinterpret_cast<const StringView*>(group + column.offset());
+        auto right =
+            *reinterpret_cast<const StringView*>(inserted + column.offset());
+        if (left.size() != right.size()) {
+          return false;
+        }
+        if (left.isInline()) {
+          if (!(left == right)) {
+            return false;
+          }
+        } else {
+          auto* lHeader = HashStringAllocator::headerOf(left.data());
+          auto* rHeader = HashStringAllocator::headerOf(right.data());
+          if (FOLLY_LIKELY(
+                  left.size() <= lHeader->size() &&
+                  right.size() <= rHeader->size())) {
+            if (memcmp(left.data(), right.data(), left.size()) != 0) {
+              return false;
+            }
+          } else {
+            std::string lStorage, rStorage;
+            if (!(HashStringAllocator::contiguousString(left, lStorage) ==
+                  HashStringAllocator::contiguousString(right, rStorage))) {
+              return false;
+            }
+          }
+        }
+      }
+    } else {
+      if (rows_->compare(
+              group,
+              inserted,
+              i,
+              CompareFlags::equality(
+                  CompareFlags::NullHandlingMode::kNullAsValue))) {
+        return false;
+      }
     }
+  next_key:;
   } while (++i < numKeys);
   return true;
 }
@@ -483,75 +579,61 @@ void HashTable<ignoreNullKeys>::groupProbe(
     groupNormalizedKeyProbe(lookup);
     return;
   }
-  ProbeState state1;
-  ProbeState state2;
-  ProbeState state3;
-  ProbeState state4;
   int32_t probeIndex = 0;
   int32_t numProbes = lookup.rows.size();
-  auto rows = lookup.rows.data();
-  for (; probeIndex + 4 <= numProbes; probeIndex += 4) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 1];
-    state2.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 2];
-    state3.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 3];
-    state4.preProbe(*this, lookup.hashes[row], row);
-
-    state1.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state2.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state3.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-    state4.firstProbe<ProbeState::Operation::kInsert>(*this, 0);
-
-    fullProbe<false>(lookup, state1, false);
-    fullProbe<false>(lookup, state2, true);
-    fullProbe<false>(lookup, state3, true);
-    fullProbe<false>(lookup, state4, true);
+  const vector_size_t* rows = lookup.rows.data();
+  ProbeState states[kPrefetchSize];
+  for (; probeIndex + kPrefetchSize <= numProbes; probeIndex += kPrefetchSize) {
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      auto row = rows[probeIndex + i];
+      states[i].preProbe(*this, lookup.hashes[row], row);
+    }
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      states[i].firstProbe(*this, 0);
+    }
+    // Use extraCheck for states[1..] because earlier inserts in the same
+    // batch may have modified tags in the same bucket.
+    fullProbe<false>(lookup, states[0], false);
+    for (int32_t i = 1; i < kPrefetchSize; ++i) {
+      fullProbe<false>(lookup, states[i], true);
+    }
   }
   for (; probeIndex < numProbes; ++probeIndex) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe(*this, 0);
-    fullProbe<false>(lookup, state1, false);
+    auto row = rows[probeIndex];
+    states[0].preProbe(*this, lookup.hashes[row], row);
+    states[0].firstProbe(*this, 0);
+    fullProbe<false>(lookup, states[0], false);
   }
 }
 
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::groupNormalizedKeyProbe(HashLookup& lookup) {
-  ProbeState state1;
-  ProbeState state2;
-  ProbeState state3;
-  ProbeState state4;
   int32_t probeIndex = 0;
   int32_t numProbes = lookup.rows.size();
-  auto rows = lookup.rows.data();
+  const vector_size_t* rows = lookup.rows.data();
+  ProbeState states[kPrefetchSize];
   constexpr int32_t kKeyOffset =
       -static_cast<int32_t>(sizeof(normalized_key_t));
-  for (; probeIndex + 4 <= numProbes; probeIndex += 4) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 1];
-    state2.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 2];
-    state3.preProbe(*this, lookup.hashes[row], row);
-    row = rows[probeIndex + 3];
-    state4.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state2.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state3.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    state4.firstProbe<ProbeState::Operation::kInsert>(*this, kKeyOffset);
-    fullProbe<false, true>(lookup, state1, false);
-    fullProbe<false, true>(lookup, state2, true);
-    fullProbe<false, true>(lookup, state3, true);
-    fullProbe<false, true>(lookup, state4, true);
+  for (; probeIndex + kPrefetchSize <= numProbes; probeIndex += kPrefetchSize) {
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      auto row = rows[probeIndex + i];
+      states[i].preProbe(*this, lookup.hashes[row], row);
+    }
+    for (int32_t i = 0; i < kPrefetchSize; ++i) {
+      states[i].firstProbe(*this, kKeyOffset);
+    }
+    // Use extraCheck for states[1..] because earlier inserts in the same
+    // batch may have modified tags in the same bucket.
+    fullProbe<false, true>(lookup, states[0], false);
+    for (int32_t i = 1; i < kPrefetchSize; ++i) {
+      fullProbe<false, true>(lookup, states[i], true);
+    }
   }
   for (; probeIndex < numProbes; ++probeIndex) {
-    int32_t row = rows[probeIndex];
-    state1.preProbe(*this, lookup.hashes[row], row);
-    state1.firstProbe(*this, kKeyOffset);
-    fullProbe<false, true>(lookup, state1, false);
+    auto row = rows[probeIndex];
+    states[0].preProbe(*this, lookup.hashes[row], row);
+    states[0].firstProbe(*this, kKeyOffset);
+    fullProbe<false, true>(lookup, states[0], false);
   }
 }
 
@@ -2076,6 +2158,15 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
   size_t numOut = 0;
   auto maxOut = inputRows.size();
   uint64_t totalBytes{0};
+
+  // Try AMAC path for duplicate chains. Interleaved output order is
+  // incompatible with NoMatchDetector, so exclude includeMisses
+  // (LEFT/FULL/ANTI).
+  if (nextOffset_ && hasDuplicates_ && !includeMisses &&
+      iter.estimatedRowSize.has_value()) {
+    return listJoinResultsAmac(iter, inputRows, hits, maxBytes);
+  }
+
   while (iter.lastRowIndex < iter.rows->size()) {
     if (!iter.nextHit) {
       const auto row = (*iter.rows)[iter.lastRowIndex];
@@ -2119,6 +2210,99 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
       }
     }
   }
+  return numOut;
+}
+
+template <bool ignoreNullKeys>
+int32_t HashTable<ignoreNullKeys>::listJoinResultsAmac(
+    JoinResultIterator& iter,
+    folly::Range<vector_size_t*> inputRows,
+    folly::Range<char**> hits,
+    uint64_t maxBytes) {
+  constexpr int32_t kGroupSize = 6;
+  const auto bytesPerRow = iter.estimatedRowSize.value();
+  const auto maxOut = inputRows.size();
+  int32_t numOut{0};
+  uint64_t totalBytes{0};
+
+  struct Slot {
+    vector_size_t probeRow;
+    char* hit;
+  };
+  Slot slots[kGroupSize];
+  int32_t numSlots{0};
+
+  // Prefetches the next chain element to overlap memory latency.
+  auto prefetchNext = [&](char* hit) {
+    char* next = nextRow(hit);
+    if (next) {
+      __builtin_prefetch(reinterpret_cast<char*>(next) + nextOffset_);
+      __builtin_prefetch(next);
+    }
+  };
+
+  auto hasCapacity = [&]() {
+    return numOut < maxOut && totalBytes + bytesPerRow <= maxBytes;
+  };
+
+  auto emitRow = [&](vector_size_t probeRow, char* hit) {
+    inputRows[numOut] = probeRow;
+    hits[numOut] = hit;
+    totalBytes += bytesPerRow;
+    ++numOut;
+  };
+
+  // Fills slots from the probe row iterator, skipping miss rows.
+  auto fillSlots = [&]() {
+    while (numSlots < kGroupSize && iter.lastRowIndex < iter.rows->size()) {
+      const auto row = (*iter.rows)[iter.lastRowIndex++];
+      char* hit = (*iter.hits)[row]; // NOLINT
+      if (hit) {
+        slots[numSlots++] = {row, hit};
+        prefetchNext(hit);
+      }
+    }
+  };
+
+  // Restore saved slots from a previous call that hit the output budget.
+  for (int32_t i = 0; i < iter.numActiveChains; ++i) {
+    slots[numSlots++] = {iter.activeChainProbeRows[i], iter.activeChainHits[i]};
+    prefetchNext(iter.activeChainHits[i]);
+  }
+  iter.numActiveChains = 0;
+
+  fillSlots();
+
+  // Round-robin across active slots: emit one result per slot per round.
+  // While processing slot[i], prefetched data for slot[i+1..N] arrives,
+  // hiding DRAM latency of nextRow() pointer chasing.
+  while (numSlots > 0) {
+    for (int32_t i = 0; i < numSlots;) {
+      if (!hasCapacity()) {
+        // Save all remaining active slots.
+        for (int32_t j = 0; j < numSlots; ++j) {
+          iter.activeChainProbeRows[j] = slots[j].probeRow;
+          iter.activeChainHits[j] = slots[j].hit;
+        }
+        iter.numActiveChains = numSlots;
+        return numOut;
+      }
+
+      emitRow(slots[i].probeRow, slots[i].hit);
+
+      char* next = nextRow(slots[i].hit);
+      if (next) {
+        slots[i].hit = next;
+        prefetchNext(next);
+        ++i;
+      } else {
+        // Chain exhausted. Swap-remove with last slot and fill replacement.
+        slots[i] = slots[--numSlots];
+        fillSlots();
+      }
+    }
+  }
+
   return numOut;
 }
 

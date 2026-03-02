@@ -113,6 +113,12 @@ class PrefixSortIterator {
 /// Provides methods (mostly required by the sort
 /// algorithm) for PrefixSort. Maintains the buffer for swap operations and
 /// some necessary context information such as entrySize.
+/// Template parameter UseRegisterSwap controls swap strategy at compile time:
+/// - true: uses 64-bit register loads/stores for swapping (better for small
+///   entries <=48B by avoiding simd::memcpy function call overhead)
+/// - false: uses simd::memcpy with AVX2 (better for large entries where
+///   256-bit bulk copy dominates)
+template <bool UseRegisterSwap = false>
 class PrefixSortRunner {
  public:
   /// @param swapBuffer The buffer must be at least entrySize bytes long.
@@ -162,9 +168,22 @@ class PrefixSortRunner {
   FOLLY_ALWAYS_INLINE void swap(
       const detail::PrefixSortIterator& lhs,
       const detail::PrefixSortIterator& rhs) const {
-    simd::memcpy(swapBuffer_, *lhs, entrySize_);
-    simd::memcpy(*lhs, *rhs, entrySize_);
-    simd::memcpy(*rhs, swapBuffer_, entrySize_);
+    if constexpr (UseRegisterSwap) {
+      char* a = *lhs;
+      char* b = *rhs;
+      for (uint64_t i = 0; i + sizeof(uint64_t) <= entrySize_;
+           i += sizeof(uint64_t)) {
+        uint64_t va, vb;
+        std::memcpy(&va, a + i, sizeof(uint64_t));
+        std::memcpy(&vb, b + i, sizeof(uint64_t));
+        std::memcpy(a + i, &vb, sizeof(uint64_t));
+        std::memcpy(b + i, &va, sizeof(uint64_t));
+      }
+    } else {
+      simd::memcpy(swapBuffer_, *lhs, entrySize_);
+      simd::memcpy(*lhs, *rhs, entrySize_);
+      simd::memcpy(*rhs, swapBuffer_, entrySize_);
+    }
   }
 
   FOLLY_ALWAYS_INLINE void rangeSwap(

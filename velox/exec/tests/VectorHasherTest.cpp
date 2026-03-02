@@ -15,6 +15,7 @@
  */
 #include "velox/exec/VectorHasher.h"
 #include <gtest/gtest.h>
+#include <set>
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/type/Type.h"
 #include "velox/type/tests/utils/CustomTypesForTesting.h"
@@ -1317,4 +1318,76 @@ DEBUG_ONLY_TEST_F(VectorHasherTest, computeValueIdsForRowsCustomComparison) {
           kNullMask,
           result),
       "Value IDs cannot be used");
+}
+
+// Regression test: 16-byte strings that differ only in the last 2 bytes
+// must produce different value IDs.
+TEST_F(VectorHasherTest, cache16ByteStringDistinction) {
+  auto hasher = exec::VectorHasher::create(VARCHAR(), 0);
+  const int kRows = 100;
+  SelectivityVector rows(kRows);
+
+  std::vector<std::string> strings(kRows);
+  for (int i = 0; i < kRows; ++i) {
+    strings[i] = std::string(14, 'A');
+    strings[i] += static_cast<char>('0' + (i / 10));
+    strings[i] += static_cast<char>('0' + (i % 10));
+    ASSERT_EQ(strings[i].size(), 16);
+  }
+  auto vector =
+      makeFlatVector<StringView>(kRows, [&](vector_size_t row) -> StringView {
+        return StringView(strings[row]);
+      });
+
+  raw_vector<uint64_t> initResult(kRows);
+  hasher->decode(*vector, rows);
+  hasher->computeValueIds(rows, initResult);
+
+  hasher->enableValueIds(1, 100);
+
+  raw_vector<uint64_t> result(kRows);
+  std::fill(result.begin(), result.end(), 0);
+  hasher->decode(*vector, rows);
+  ASSERT_TRUE(hasher->computeValueIds(rows, result));
+
+  std::set<uint64_t> idSet(result.begin(), result.end());
+  ASSERT_EQ(idSet.size(), kRows)
+      << "16-byte strings differing in last 2 bytes must get distinct IDs";
+}
+
+// Test that directMapping does not produce stale IDs after enableValueRange.
+TEST_F(VectorHasherTest, directMappingClearedOnEnableValueRange) {
+  auto hasher = exec::VectorHasher::create(BIGINT(), 0);
+  const int kRows = 10;
+  SelectivityVector rows(kRows);
+
+  auto vector = makeFlatVector<int64_t>(kRows, [](auto row) { return row; });
+
+  // First pass: populate distinct values.
+  raw_vector<uint64_t> initResult(kRows);
+  hasher->decode(*vector, rows);
+  hasher->computeValueIds(rows, initResult);
+
+  // Enable value IDs (distinct mode) — should build directMapping.
+  hasher->enableValueIds(1, 100);
+
+  raw_vector<uint64_t> distinctResult(kRows);
+  std::fill(distinctResult.begin(), distinctResult.end(), 0);
+  hasher->decode(*vector, rows);
+  ASSERT_TRUE(hasher->computeValueIds(rows, distinctResult));
+
+  // Now switch to range mode — directMapping must be cleared.
+  hasher->enableValueRange(1, 50);
+
+  raw_vector<uint64_t> rangeResult(kRows);
+  std::fill(rangeResult.begin(), rangeResult.end(), 0);
+  hasher->decode(*vector, rows);
+  ASSERT_TRUE(hasher->computeValueIds(rows, rangeResult));
+
+  // In range mode, IDs are (value - min + 1), which differs from distinct mode.
+  // The point is it should NOT crash or use stale directMapping IDs.
+  for (int i = 0; i < kRows; ++i) {
+    ASSERT_NE(rangeResult[i], 0)
+        << "Row " << i << " should have a valid ID in range mode";
+  }
 }

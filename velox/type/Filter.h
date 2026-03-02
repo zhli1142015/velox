@@ -1285,7 +1285,7 @@ class BigintValuesUsingBitmask final : public Filter {
   std::unique_ptr<Filter>
   mergeWith(int64_t min, int64_t max, const Filter* other) const;
 
-  std::vector<bool> bitmask_;
+  std::vector<char> bitmask_;
   const int64_t min_;
   const int64_t max_;
 };
@@ -2286,7 +2286,7 @@ class BytesValues final : public Filter {
 
   bool testBytes(const char* value, int32_t length) const final {
     return lengths_.contains(length) &&
-        values_.contains(std::string(value, length));
+        values_.contains(std::string_view(value, length));
   }
 
   bool testBytesRange(

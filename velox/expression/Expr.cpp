@@ -814,7 +814,7 @@ void Expr::eval(
     VectorPtr& result,
     const ExprSet* parentExprSet) {
   if (supportsFlatNoNullsFastPath_ && context.throwOnError() &&
-      context.inputFlatNoNulls() && rows.countSelected() < 1'000) {
+      context.inputFlatNoNulls()) {
     evalFlatNoNulls(rows, context, result, parentExprSet);
     checkResultInternalState(result);
     return;

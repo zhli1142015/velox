@@ -498,6 +498,10 @@ class HashProbe : public Operator {
   RowVectorPtr filterTableInput_;
   SelectivityVector filterTableInputRows_;
 
+  // Reusable filter input vector to avoid repeated allocations when
+  // evalFilter is called multiple times per getOutput (accumulation loop).
+  RowVectorPtr filterInput_;
+
   // Used to store the filter result for null-key joined rows.
   std::vector<VectorPtr> filterTableResult_;
   DecodedVector decodedFilterTableResult_;
@@ -515,6 +519,11 @@ class HashProbe : public Operator {
   // Rows of table found by join probe, later filtered by 'filter_'.
   BufferPtr outputTableRows_;
   vector_size_t outputTableRowsCapacity_;
+
+  // Accumulation buffers used to combine low-selectivity filter results across
+  // multiple listJoinResults iterations into a single dense output batch.
+  BufferPtr accumulatedRowMapping_;
+  BufferPtr accumulatedTableRows_;
 
   // For left join with filter, we could overwrite the row which we have not
   // checked if there is a carryover.  Use a temporary buffer in this case.
@@ -571,33 +580,28 @@ class HashProbe : public Operator {
   // with multiple matches.
   class LeftSemiFilterJoinTracker {
    public:
-    // Called for each row that the filter passes. Expects that probe
-    // side rows with multiple matches are next to each other. Calls onLastMatch
-    // just once for each probe side row with at least one match.
+    /// Called for each row that the filter passes. Tracks which probe rows
+    /// have at least one match and calls 'onLastMatch' on first occurrence.
     template <typename TOnLastMatch>
     void advance(vector_size_t row, TOnLastMatch onLastMatch) {
-      if (currentRow != row) {
-        if (currentRow != -1) {
-          onLastMatch(currentRow);
-        }
-        currentRow = row;
+      if (row >= seenRows_.size()) {
+        seenRows_.resize(row + 1, false);
+      }
+      if (!seenRows_[row]) {
+        seenRows_[row] = true;
+        onLastMatch(row);
       }
     }
 
-    // Called when all rows from the current input batch were processed. Calls
-    // onLastMatch for the last probe row with at least one match.
+    /// Called when all rows from the current input batch were processed.
     template <typename TOnLastMatch>
-    void finish(TOnLastMatch onLastMatch) {
-      if (currentRow != -1) {
-        onLastMatch(currentRow);
-      }
-
-      currentRow = -1;
+    void finish(TOnLastMatch /*onLastMatch*/) {
+      seenRows_.clear();
     }
 
    private:
-    // The last row number passed to advance for the current input batch.
-    vector_size_t currentRow{-1};
+    /// Tracks which probe rows have been emitted (at least one match found).
+    std::vector<bool> seenRows_;
   };
 
   // For left semi join project with filter, de-duplicates probe side rows

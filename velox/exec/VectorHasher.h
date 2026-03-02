@@ -16,6 +16,7 @@
 #pragma once
 
 #include <folly/container/F14Set.h>
+#include <array>
 
 #include <velox/type/Filter.h>
 #include "velox/common/memory/RawVector.h"
@@ -278,6 +279,7 @@ class VectorHasher {
   void resetStats() {
     uniqueValues_.clear();
     uniqueValuesStorage_.clear();
+    valueIdCache_.fill({});
   }
 
   // Sets 'this' to range mode and adds 'reservePct' values to the
@@ -521,17 +523,41 @@ class VectorHasher {
       return int64Value - min_ + 1;
     }
 
+    // O(1) direct mapping for integer types with small value range.
+    if (hasDirectMapping_) {
+      auto offset = int64Value - min_ + 1;
+      if (offset >= 0 &&
+          offset < static_cast<int64_t>(directIdMapping_.size())) {
+        auto id = directIdMapping_[offset];
+        if (id != 0) {
+          return id;
+        }
+      }
+    }
+
     UniqueValue unique(value);
     unique.setId(uniqueValues_.size() + 1);
     auto pair = uniqueValues_.insert(unique);
+    uint64_t id;
     if (!pair.second) {
-      return pair.first->id();
+      id = pair.first->id();
+    } else {
+      updateRange(int64Value);
+      if (uniqueValues_.size() >= rangeSize_) {
+        return kUnmappable;
+      }
+      id = unique.id();
     }
-    updateRange(int64Value);
-    if (uniqueValues_.size() >= rangeSize_) {
-      return kUnmappable;
+
+    // Keep direct mapping in sync with newly inserted values.
+    if (hasDirectMapping_) {
+      auto offset = int64Value - min_ + 1;
+      if (offset >= 0 &&
+          offset < static_cast<int64_t>(directIdMapping_.size())) {
+        directIdMapping_[offset] = id;
+      }
     }
-    return unique.id();
+    return id;
   }
 
   template <typename T>
@@ -542,6 +568,17 @@ class VectorHasher {
         return kUnmappable;
       }
       return int64Value - min_ + 1;
+    }
+    // Try direct mapping before F14 probe.
+    if (hasDirectMapping_) {
+      auto offset = int64Value - min_ + 1;
+      if (offset >= 0 &&
+          offset < static_cast<int64_t>(directIdMapping_.size())) {
+        auto id = directIdMapping_[offset];
+        if (id != 0) {
+          return id;
+        }
+      }
     }
     UniqueValue unique(value);
     auto iter = uniqueValues_.find(unique);
@@ -565,6 +602,30 @@ class VectorHasher {
   }
 
   void copyStringToLocal(const UniqueValue* unique);
+
+  /// Copies newly inserted string to local storage, updates range, and checks
+  /// for overflow. Returns false on overflow.
+  bool recordNewStringValue(
+      const UniqueValue* inserted,
+      const char* data,
+      uint32_t size);
+
+  /// Looks up value ID using L1-resident cache with inline key verification.
+  /// Falls back to valueId() on cache miss. Returns value ID, or 0 on overflow.
+  uint64_t valueIdWithCache(const StringView& value, bool& success);
+
+  /// Processes all rows using value ID cache for low-cardinality StringView.
+  bool makeValueIdsCached(
+      const StringView* values,
+      const SelectivityVector& rows,
+      uint64_t* result);
+
+  /// AMAC-style pipelined F14 lookup for high-cardinality StringView keys.
+  /// Prefetches hash table buckets 4 rows ahead to hide memory latency.
+  bool makeValueIdsPipelined(
+      const StringView* values,
+      const SelectivityVector& rows,
+      uint64_t* result);
 
   void setDistinctOverflow();
 
@@ -627,6 +688,22 @@ class VectorHasher {
   folly::F14FastSet<UniqueValue, UniqueValueHasher, UniqueValueComparer>
       uniqueValues_;
 
+  /// L1-resident direct-mapped cache for fast StringView value ID lookup.
+  static constexpr int32_t kValueIdCacheSize = 256;
+  struct ValueIdCacheEntry {
+    uint64_t hash{0};
+    uint32_t id{0};
+    uint32_t size{0};
+    int64_t data0{0};
+    int64_t data1{0};
+  };
+  std::array<ValueIdCacheEntry, kValueIdCacheSize> valueIdCache_{};
+
+  /// O(1) direct mapping for integer types with small value range.
+  static constexpr int64_t kDirectMappingMaxRange = 65536;
+  bool hasDirectMapping_{false};
+  std::vector<uint64_t> directIdMapping_;
+
   // Memory for unique string values.
   std::vector<std::string> uniqueValuesStorage_;
   uint64_t distinctStringsBytes_ = 0;
@@ -667,15 +744,7 @@ inline uint64_t VectorHasher::valueId(StringView value) {
   if (!pair.second) {
     return pair.first->id();
   }
-  copyStringToLocal(&*pair.first);
-  if (!rangeOverflow_) {
-    if (size > kStringASRangeMaxSize) {
-      setRangeOverflow();
-    } else {
-      updateRange(stringAsNumber(data, size));
-    }
-  }
-  if (uniqueValues_.size() >= rangeSize_ || distinctOverflow_) {
+  if (!recordNewStringValue(&*pair.first, data, size)) {
     return kUnmappable;
   }
   return unique.id();

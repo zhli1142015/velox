@@ -45,7 +45,7 @@ class SelectivityVector {
     size_ = length;
     begin_ = 0;
     end_ = allSelected ? size_ : 0;
-    allSelected_ = allSelected;
+    cachedCount_ = allSelected ? length : 0;
   }
 
   // Returns a statically allocated reference to an empty selectivity vector
@@ -87,7 +87,7 @@ class SelectivityVector {
     size_ = size;
     begin_ = 0;
     end_ = value ? size_ : 0;
-    allSelected_ = value;
+    cachedCount_ = value ? size : 0;
   }
 
   /**
@@ -98,7 +98,7 @@ class SelectivityVector {
   void setValid(vector_size_t idx, bool valid) {
     VELOX_DCHECK_LT(idx, bits_.size() * sizeof(bits_[0]) * 8);
     bits::setBit(bits_.data(), idx, valid);
-    allSelected_.reset();
+    cachedCount_.reset();
   }
 
   /**
@@ -113,7 +113,7 @@ class SelectivityVector {
     }
     VELOX_DCHECK_LE(end, bits_.size() * sizeof(bits_[0]) * 8);
     bits::fillBits(bits_.data(), begin, end, valid);
-    allSelected_.reset();
+    cachedCount_.reset();
   }
 
   /**
@@ -160,9 +160,7 @@ class SelectivityVector {
     bits::fillBits(bits_.data(), 0, size_, false);
     begin_ = 0;
     end_ = 0;
-    VELOX_SUPPRESS_STRINGOP_OVERFLOW_WARNING
-    allSelected_ = false;
-    VELOX_UNSUPPRESS_STRINGOP_OVERFLOW_WARNING
+    cachedCount_ = 0;
   }
 
   /**
@@ -172,7 +170,7 @@ class SelectivityVector {
     bits::fillBits(bits_.data(), 0, size_, true);
     begin_ = 0;
     end_ = size_;
-    allSelected_ = true;
+    cachedCount_ = size_;
   }
 
   void setFromBits(const uint64_t* bits, int32_t size) {
@@ -293,32 +291,37 @@ class SelectivityVector {
     if (begin_ == -1) {
       begin_ = 0;
       end_ = 0;
-      VELOX_SUPPRESS_STRINGOP_OVERFLOW_WARNING
-      allSelected_ = false;
-      VELOX_UNSUPPRESS_STRINGOP_OVERFLOW_WARNING
+      cachedCount_ = 0;
       return;
     }
     end_ = bits::findLastBit(bits_.data(), begin_, size_) + 1;
-    allSelected_.reset();
+    cachedCount_.reset();
   }
 
   bool isAllSelected() const {
-    if (allSelected_.has_value()) {
-      return allSelected_.value();
+    if (cachedCount_.has_value()) {
+      return cachedCount_.value() == size_;
     }
-    allSelected_ = begin_ == 0 && end_ == size_ &&
-        bits::isAllSet(bits_.data(), 0, size_, true);
-    return allSelected_.value();
+    // Fast path: bounds must cover full range for all-selected.
+    if (begin_ != 0 || end_ != size_) {
+      return false;
+    }
+    // Use isAllSet (can early-exit) instead of full countBits.
+    if (bits::isAllSet(bits_.data(), 0, size_, true)) {
+      cachedCount_ = size_;
+      return true;
+    }
+    return false;
   }
   /**
    * Iterate and count the number of selected values in this SelectivityVector
    */
   vector_size_t countSelected() const {
-    if (allSelected_.has_value() && *allSelected_) {
-      return size();
+    if (cachedCount_.has_value()) {
+      return cachedCount_.value();
     }
     auto count = bits::countBits(bits_.data(), begin_, end_);
-    allSelected_ = count == size();
+    cachedCount_ = count;
     return count;
   }
 
@@ -388,7 +391,10 @@ class SelectivityVector {
   // One past the last selected value, if there are any selected.
   vector_size_t end_ = 0;
 
-  mutable std::optional<bool> allSelected_;
+  // Cached result of countSelected() to avoid repeated bit-counting.
+  // Also serves as isAllSelected() cache: cachedCount_ == size_ means all
+  // selected.
+  mutable std::optional<vector_size_t> cachedCount_;
 
   friend class SelectivityIterator;
 };

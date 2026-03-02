@@ -540,6 +540,44 @@ class RowContainer {
         result);
   }
 
+  /// Batch-extract multiple columns into result vectors. When
+  /// columnIndices.size() >= 2, uses a tiled column-major strategy with
+  /// dynamic tile sizing to improve cache efficiency.
+  void extractColumns(
+      const char* const* rows,
+      int32_t numRows,
+      const std::vector<column_index_t>& columnIndices,
+      int32_t resultOffset,
+      std::vector<VectorPtr>& results) const;
+
+  /// Convenience: extract columns 0..numColumns-1 directly into 'result'
+  /// RowVector's children (indices 0..numColumns-1). This is the common
+  /// pattern in TopN, StreamingAggregation, HashBuild, Spiller, etc.
+  void extractColumns(
+      const char* const* rows,
+      int32_t numRows,
+      int32_t numColumns,
+      RowVectorPtr& result) const;
+
+  /// Cache budget (bytes) for dynamic tile sizing. The tile size is computed
+  /// as kTileBudgetBytes / fixedRowSize_, clamped to [64, kMaxTileSize].
+  /// With hyperthreading, two threads share L1d (48KB Intel / 32KB AMD),
+  /// giving ~16-24KB effective per thread. Using 20KB as the budget keeps
+  /// the tile working set within L1d under contention.
+  static constexpr int32_t kTileBudgetBytes = 20 * 1024;
+
+  /// Maximum tile size (rows). Capped to limit per-tile dispatch overhead.
+  static constexpr int32_t kMaxTileSize = 256;
+
+  /// Computes the optimal tile size (in rows) for tiled column-major
+  /// extraction, based on the fixed row size. Returns a power-of-2 in
+  /// [64, kMaxTileSize] that keeps tile × rowBytes within kTileBudgetBytes.
+  static int32_t computeTileSize(int32_t fixedRowBytes) {
+    int32_t raw = kTileBudgetBytes / std::max(fixedRowBytes, 1);
+    raw = std::clamp(raw, 64, kMaxTileSize);
+    return 1 << (31 - __builtin_clz(raw));
+  }
+
   /// Sets in result all locations with null values in columnIndex for rows.
   void extractNulls(
       const char* const* rows,
@@ -1249,8 +1287,23 @@ class RowContainer {
         Kind == TypeKind::MAP) {
       return compareComplexType(row, column.offset(), decoded, index, flags);
     } else if constexpr (is_string_kind(Kind)) {
-      auto result = compareStringAsc(
-          valueAt<StringView>(row, column.offset()), decoded, index);
+      auto left = valueAt<StringView>(row, column.offset());
+      if (flags.equalsOnly) {
+        auto right = decoded.valueAt<StringView>(index);
+        if (left.size() != right.size()) {
+          return 1;
+        }
+        if (left.isInline()) {
+          return left == right ? 0 : 1;
+        }
+        // Non-inline: check contiguity inline to avoid compareStringAsc
+        // overhead (std::string construction + function calls).
+        auto* header = HashStringAllocator::headerOf(left.data());
+        if (FOLLY_LIKELY(left.size() <= header->size())) {
+          return memcmp(left.data(), right.data(), left.size()) != 0 ? 1 : 0;
+        }
+      }
+      auto result = compareStringAsc(left, decoded, index);
       return flags.ascending ? result : result * -1;
     } else {
       auto left = valueAt<T>(row, column.offset());
@@ -1331,6 +1384,25 @@ class RowContainer {
     } else if constexpr (is_string_kind(Kind)) {
       auto leftValue = valueAt<StringView>(left, leftOffset);
       auto rightValue = valueAt<StringView>(right, rightOffset);
+      if (flags.equalsOnly) {
+        if (leftValue.size() != rightValue.size()) {
+          return 1;
+        }
+        if (leftValue.isInline()) {
+          return leftValue == rightValue ? 0 : 1;
+        }
+        // Both non-inline from RowContainer: check contiguity inline.
+        auto* lHeader = HashStringAllocator::headerOf(leftValue.data());
+        auto* rHeader = HashStringAllocator::headerOf(rightValue.data());
+        if (FOLLY_LIKELY(
+                leftValue.size() <= lHeader->size() &&
+                rightValue.size() <= rHeader->size())) {
+          return memcmp(
+                     leftValue.data(), rightValue.data(), leftValue.size()) != 0
+              ? 1
+              : 0;
+        }
+      }
       auto result = compareStringAsc(leftValue, rightValue);
       return flags.ascending ? result : result * -1;
     } else {

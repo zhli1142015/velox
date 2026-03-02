@@ -43,7 +43,7 @@ class PrefixSortAlgorithmTest : public testing::Test,
       char* end = start + sizeof(int64_t) * data1.size();
       uint32_t entrySize = sizeof(int64_t);
       auto swapBuffer = AlignedBuffer::allocate<char>(entrySize, pool());
-      PrefixSortRunner sortRunner(entrySize, swapBuffer->asMutable<char>());
+      PrefixSortRunner<> sortRunner(entrySize, swapBuffer->asMutable<char>());
       encodeInPlace(data1);
       sortRunner.quickSort(
           start, end, [&](char* a, char* b) { return memcmp(a, b, 8); });
@@ -62,12 +62,12 @@ class PrefixSortAlgorithmTest : public testing::Test,
 };
 
 TEST_F(PrefixSortAlgorithmTest, quickSort) {
-  testQuickSort(PrefixSortRunner::kSmallSort - 1);
-  testQuickSort(PrefixSortRunner::kSmallSort);
-  testQuickSort(PrefixSortRunner::kSmallSort + 1);
-  testQuickSort(PrefixSortRunner::kMediumSort);
+  testQuickSort(PrefixSortRunner<>::kSmallSort - 1);
+  testQuickSort(PrefixSortRunner<>::kSmallSort);
+  testQuickSort(PrefixSortRunner<>::kSmallSort + 1);
+  testQuickSort(PrefixSortRunner<>::kMediumSort);
   // Any number bigger than kMediumSort is sufficient for testing.
-  testQuickSort(PrefixSortRunner::kMediumSort + 1000);
+  testQuickSort(PrefixSortRunner<>::kMediumSort + 1000);
 }
 
 TEST_F(PrefixSortAlgorithmTest, testingMedian3) {
@@ -82,7 +82,7 @@ TEST_F(PrefixSortAlgorithmTest, testingMedian3) {
   auto ptr1 = (char*)data1.data();
   auto ptr2 = ptr1 + entrySize;
   auto ptr3 = ptr2 + entrySize;
-  auto medianPtr = PrefixSortRunner::testingMedian3(
+  auto medianPtr = PrefixSortRunner<>::testingMedian3(
       ptr1, ptr2, ptr3, entrySize, [&](char* a, char* b) {
         return memcmp(a, b, entrySize);
       });

@@ -190,6 +190,84 @@ bool VectorHasher::makeValueIdsFlatWithNulls<bool>(
   return true;
 }
 
+uint64_t VectorHasher::valueIdWithCache(
+    const StringView& value,
+    bool& success) {
+  const auto size = value.size();
+  const auto data = value.data();
+
+  uint64_t hash;
+  int64_t keyData0 = 0, keyData1 = 0;
+  if (size <= sizeof(int64_t)) {
+    memcpy(&keyData0, data, size);
+    hash = simd::crc32U64(0, keyData0);
+  } else {
+    auto w = reinterpret_cast<const uint64_t*>(data);
+    keyData0 = static_cast<int64_t>(w[0]);
+    uint32_t h = simd::crc32U64(0, w[0]);
+    if (size <= 2 * sizeof(int64_t)) {
+      // For exactly 16-byte strings (remaining == 8), read the full second
+      // word directly. bits::loadPartialWord only handles sizes 1-7 correctly.
+      const auto remaining = size - sizeof(int64_t);
+      uint64_t word1 = (remaining == sizeof(int64_t))
+          ? w[1]
+          : bits::loadPartialWord(
+                reinterpret_cast<const uint8_t*>(w + 1), remaining);
+      h = simd::crc32U64(h, word1);
+      keyData1 = static_cast<int64_t>(word1);
+    } else {
+      auto numFullWords = size / 8;
+      for (size_t i = 1; i < numFullWords; ++i) {
+        h = simd::crc32U64(h, w[i]);
+      }
+      auto remainder = size - numFullWords * 8;
+      if (remainder > 0) {
+        h = simd::crc32U64(
+            h,
+            bits::loadPartialWord(
+                reinterpret_cast<const uint8_t*>(w + numFullWords), remainder));
+      }
+    }
+    hash = h;
+  }
+
+  auto& cacheEntry = valueIdCache_[hash & (kValueIdCacheSize - 1)];
+  if (cacheEntry.id != 0 && cacheEntry.size == size) {
+    bool hit;
+    if (size <= sizeof(int64_t)) {
+      hit = (cacheEntry.data0 == keyData0);
+    } else if (size <= 2 * sizeof(int64_t)) {
+      hit = (cacheEntry.data0 == keyData0 && cacheEntry.data1 == keyData1);
+    } else {
+      hit =
+          (cacheEntry.hash == hash &&
+           memcmp(
+               reinterpret_cast<const char*>(cacheEntry.data0), data, size) ==
+               0);
+    }
+    if (FOLLY_LIKELY(hit)) {
+      return cacheEntry.id;
+    }
+  }
+
+  auto id = valueId(value);
+  if (id == kUnmappable) {
+    success = false;
+    return 0;
+  }
+
+  cacheEntry.hash = hash;
+  cacheEntry.id = id;
+  cacheEntry.size = size;
+  cacheEntry.data0 = keyData0;
+  cacheEntry.data1 = keyData1;
+  if (size > 2 * sizeof(int64_t)) {
+    UniqueValue lookupKey(data, size);
+    cacheEntry.data0 = uniqueValues_.find(lookupKey)->data();
+  }
+  return id;
+}
+
 template <typename T, bool mayHaveNulls>
 void VectorHasher::makeValueIdForOneRow(
     const uint64_t* nulls,
@@ -211,6 +289,16 @@ void VectorHasher::makeValueIdForOneRow(
     analyzeValue(value);
     return;
   }
+  // Use cache for low-cardinality strings to avoid F14 lookup overhead.
+  if constexpr (std::is_same_v<T, StringView>) {
+    if (!isRange_ && uniqueValues_.size() < kValueIdCacheSize) {
+      auto id = valueIdWithCache(value, success);
+      if (id != 0) {
+        result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+      }
+      return;
+    }
+  }
   auto id = valueId(value);
   if (id == kUnmappable) {
     success = false;
@@ -230,10 +318,157 @@ bool VectorHasher::makeValueIdsFlatNoNulls(
   }
 
   bool success = true;
-  rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
-    makeValueIdForOneRow<T, false>(nullptr, row, values, row, result, success);
-  });
+  if constexpr (std::is_same_v<T, StringView>) {
+    if (!isRange_ && rows.isAllSelected() &&
+        uniqueValues_.size() < kValueIdCacheSize) {
+      return makeValueIdsCached(values, rows, result);
+    } else if (!isRange_ && rows.isAllSelected()) {
+      return makeValueIdsPipelined(values, rows, result);
+    } else {
+      rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+        makeValueIdForOneRow<StringView, false>(
+            nullptr, row, values, row, result, success);
+      });
+    }
+  } else {
+    // For integer types with direct mapping, use O(1) array lookup.
+    if (hasDirectMapping_ && rows.isAllSelected()) {
+      const bool isMult1 = multiplier_ == 1;
+      const auto begin = rows.begin();
+      const auto end = rows.end();
+      for (auto row = begin; row < end; ++row) {
+        auto int64Value = toInt64(values[row]);
+        auto offset = int64Value - min_ + 1;
+        if (offset >= 0 &&
+            offset < static_cast<int64_t>(directIdMapping_.size())) {
+          auto id = directIdMapping_[offset];
+          if (id != 0) {
+            result[row] = isMult1 ? id : result[row] + multiplier_ * id;
+            continue;
+          }
+        }
+        // Fall back to F14 for unmapped values.
+        makeValueIdForOneRow<T, false>(
+            nullptr, row, values, row, result, success);
+        if (!success) {
+          for (++row; row < end; ++row) {
+            analyzeValue(values[row]);
+          }
+          break;
+        }
+      }
+    } else {
+      rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+        makeValueIdForOneRow<T, false>(
+            nullptr, row, values, row, result, success);
+      });
+    }
+  }
 
+  return success;
+}
+
+bool VectorHasher::makeValueIdsCached(
+    const StringView* values,
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  const auto begin = rows.begin();
+  const auto end = rows.end();
+  if (begin >= end) {
+    return true;
+  }
+
+  bool success = true;
+  const bool isMult1 = multiplier_ == 1;
+  for (auto row = begin; row < end; ++row) {
+    if (FOLLY_UNLIKELY(!success)) {
+      analyzeValue(values[row]);
+      continue;
+    }
+
+    auto id = valueIdWithCache(values[row], success);
+    if (FOLLY_LIKELY(id != 0)) {
+      result[row] = isMult1 ? id : result[row] + multiplier_ * id;
+    }
+    if (FOLLY_UNLIKELY(uniqueValues_.size() >= kValueIdCacheSize)) {
+      for (++row; row < end; ++row) {
+        makeValueIdForOneRow<StringView, false>(
+            nullptr, row, values, row, result, success);
+      }
+      break;
+    }
+  }
+  return success;
+}
+
+bool VectorHasher::makeValueIdsPipelined(
+    const StringView* values,
+    const SelectivityVector& rows,
+    uint64_t* result) {
+  const auto begin = rows.begin();
+  const auto end = rows.end();
+  if (begin >= end) {
+    return true;
+  }
+
+  bool success = true;
+  static constexpr int32_t kPipeDepth = 4;
+  const bool isMult1 = multiplier_ == 1;
+
+  UniqueValue pipeKeys[kPipeDepth] = {
+      UniqueValue(0), UniqueValue(0), UniqueValue(0), UniqueValue(0)};
+  folly::F14HashToken pipeTokens[kPipeDepth];
+  auto pipelineLength = std::min(kPipeDepth, static_cast<int32_t>(end - begin));
+  for (int32_t i = 0; i < pipelineLength; ++i) {
+    auto sv = values[begin + i];
+    pipeKeys[i] = UniqueValue(sv.data(), sv.size());
+    pipeTokens[i] = uniqueValues_.prehash(pipeKeys[i]);
+    uniqueValues_.prefetch(pipeTokens[i]);
+  }
+
+  int32_t pipelineIndex = 0;
+  for (auto row = begin; row < end; ++row) {
+    if (FOLLY_UNLIKELY(!success)) {
+      analyzeValue(values[row]);
+      pipelineIndex = (pipelineIndex + 1) % kPipeDepth;
+      continue;
+    }
+
+    UniqueValue curKey = pipeKeys[pipelineIndex];
+    auto curToken = pipeTokens[pipelineIndex];
+
+    auto futureRow = row + kPipeDepth;
+    if (futureRow < end) {
+      auto sv = values[futureRow];
+      pipeKeys[pipelineIndex] = UniqueValue(sv.data(), sv.size());
+      pipeTokens[pipelineIndex] =
+          uniqueValues_.prehash(pipeKeys[pipelineIndex]);
+      uniqueValues_.prefetch(pipeTokens[pipelineIndex]);
+    }
+    pipelineIndex = (pipelineIndex + 1) % kPipeDepth;
+
+    auto iter = uniqueValues_.find(curToken, curKey);
+    if (FOLLY_LIKELY(iter != uniqueValues_.end())) {
+      uint64_t id = iter->id();
+      result[row] = isMult1 ? id : result[row] + multiplier_ * id;
+      continue;
+    }
+
+    curKey.setId(uniqueValues_.size() + 1);
+    auto pair = uniqueValues_.insert(curKey);
+    if (!pair.second) {
+      uint64_t id = pair.first->id();
+      result[row] = isMult1 ? id : result[row] + multiplier_ * id;
+    } else {
+      if (!recordNewStringValue(
+              &*pair.first, values[row].data(), curKey.size())) {
+        success = false;
+        continue;
+      }
+      uint64_t id = curKey.id();
+      result[row] = isMult1 ? id : result[row] + multiplier_ * id;
+    }
+  }
   return success;
 }
 
@@ -667,11 +902,27 @@ void VectorHasher::setDistinctOverflow() {
   uniqueValues_.clear();
   uniqueValuesStorage_.clear();
   distinctStringsBytes_ = 0;
+  valueIdCache_.fill({});
 }
 
 void VectorHasher::setRangeOverflow() {
   rangeOverflow_ = true;
   hasRange_ = false;
+}
+
+bool VectorHasher::recordNewStringValue(
+    const UniqueValue* inserted,
+    const char* data,
+    uint32_t size) {
+  copyStringToLocal(inserted);
+  if (!rangeOverflow_) {
+    if (size > kStringASRangeMaxSize) {
+      setRangeOverflow();
+    } else {
+      updateRange(stringAsNumber(data, size));
+    }
+  }
+  return !(uniqueValues_.size() >= rangeSize_ || distinctOverflow_);
 }
 
 std::unique_ptr<common::Filter> VectorHasher::getFilter(
@@ -831,6 +1082,33 @@ uint64_t VectorHasher::enableValueIds(uint64_t multiplier, int32_t reservePct) {
   multiplier_ = multiplier;
   rangeSize_ = addIdReserve(uniqueValues_.size(), reservePct) + 1;
   isRange_ = false;
+  // Build direct mapping for integer types with small value range.
+  hasDirectMapping_ = false;
+  if (hasRange_ && !rangeOverflow_ &&
+      (max_ - min_ + 2) <= kDirectMappingMaxRange) {
+    switch (typeKind_) {
+      case TypeKind::TINYINT:
+      case TypeKind::SMALLINT:
+      case TypeKind::INTEGER:
+      case TypeKind::BIGINT:
+      case TypeKind::TIMESTAMP: {
+        directIdMapping_.assign(max_ - min_ + 2, 0);
+        for (const auto& uv : uniqueValues_) {
+          auto offset = uv.data() - min_ + 1;
+          if (offset >= 0 &&
+              offset < static_cast<int64_t>(directIdMapping_.size())) {
+            directIdMapping_[offset] = uv.id();
+          }
+        }
+        hasDirectMapping_ = true;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  // Clear string cache to prevent stale entries across multiplier changes.
+  valueIdCache_.fill({});
   uint64_t result;
   if (__builtin_mul_overflow(multiplier_, rangeSize_, &result)) {
     return kRangeTooLarge;
@@ -848,6 +1126,7 @@ uint64_t VectorHasher::enableValueRange(
   VELOX_CHECK(hasRange_);
   extendRange(type_->kind(), reservePct, min_, max_);
   isRange_ = true;
+  hasDirectMapping_ = false;
   // No overflow because max range is under 63 bits.
   if (typeKind_ == TypeKind::BOOLEAN) {
     rangeSize_ = 3;

@@ -681,6 +681,57 @@ inline void storeTranslatePermute(
   simd::filter(translated, selected).store_unaligned(values);
 }
 
+#if XSIMD_WITH_AVX2
+// SIMD specialization for int64_t: gather dict values using two 4-wide
+// masked i32gather_epi64, then permute each half to compact passing values.
+template <>
+inline void storeTranslatePermute(
+    const int64_t* input,
+    int32_t inputIndex,
+    xsimd::batch<int32_t> indices,
+    int selected,
+    xsimd::batch_bool<int32_t> dictMask,
+    int8_t numBits,
+    const int64_t* dict,
+    int64_t* values) {
+  // Split dictMask into two 4-wide masks for the int64 halves.
+  auto dictMaskBits = simd::toBitMask(dictMask);
+  auto loMaskBits = dictMaskBits & 0xF;
+  auto hiMaskBits = (dictMaskBits >> 4) & 0xF;
+  auto loMask = simd::fromBitMask<int64_t>(loMaskBits);
+  auto hiMask = simd::fromBitMask<int64_t>(hiMaskBits);
+
+  // Gather dict values with mask (non-dict positions get raw input values).
+  auto loIdx = _mm256_castsi256_si128(indices);
+  auto hiIdx = _mm256_extracti128_si256(indices, 1);
+  // Load raw input values as defaults for non-dict positions.
+  auto loDefault =
+      _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input + inputIndex));
+  auto hiDefault = _mm256_loadu_si256(
+      reinterpret_cast<const __m256i*>(input + inputIndex + 4));
+  auto loVals = _mm256_mask_i32gather_epi64(
+      loDefault,
+      reinterpret_cast<const long long*>(dict),
+      loIdx,
+      reinterpret_cast<__m256i>(loMask.data),
+      8);
+  auto hiVals = _mm256_mask_i32gather_epi64(
+      hiDefault,
+      reinterpret_cast<const long long*>(dict),
+      hiIdx,
+      reinterpret_cast<__m256i>(hiMask.data),
+      8);
+  // Filter each half with the corresponding bits of 'selected'.
+  auto loResult = simd::filter(
+      reinterpret_cast<xsimd::batch<int64_t>&>(loVals), selected & 0xF);
+  int loCount = __builtin_popcount(selected & 0xF);
+  loResult.store_unaligned(values);
+  auto hiResult = simd::filter(
+      reinterpret_cast<xsimd::batch<int64_t>&>(hiVals), (selected >> 4) & 0xF);
+  hiResult.store_unaligned(values + loCount);
+}
+#endif
+
 // Stores 8 elements starting at 'input' + 'inputIndex' into
 // 'values'. The values are translated via 'dict' for the positions
 // that are true in 'dictMask'.
@@ -896,6 +947,7 @@ class DictionaryColumnVisitor
     // write  the whole register to the end of 'values'
     constexpr bool kFilterOnly = super::kFilterOnly;
     constexpr int32_t kWidth = xsimd::batch<int32_t>::size;
+    prePopulateFilterCache();
     int32_t last = numInput & ~(kWidth - 1);
     for (auto i = 0; i < numInput; i += kWidth) {
       int8_t width = UNLIKELY(i == last) ? numInput - last : kWidth;
@@ -1147,6 +1199,28 @@ class DictionaryColumnVisitor
 
   uint8_t* filterCache() const {
     return state_.filterCache;
+  }
+
+  // Pre-evaluates all dictionary entries against the filter, eliminating
+  // per-batch cache miss handling in the hot processRun loop.
+  void prePopulateFilterCache() {
+    if (!TFilter::deterministic || !filterCache()) {
+      return;
+    }
+    auto numValues = dictionarySize();
+    auto* cache = filterCache();
+    // Check if already populated (first entry is not kUnknown).
+    if (numValues > 0 && cache[0] != FilterResult::kUnknown) {
+      return;
+    }
+    const auto* dictionary = dict();
+    for (int32_t i = 0; i < numValues; ++i) {
+      if (velox::common::applyFilter(super::filter_, dictionary[i])) {
+        cache[i] = FilterResult::kSuccess;
+      } else {
+        cache[i] = FilterResult::kFailure;
+      }
+    }
   }
 
   static constexpr bool hasFilter() {

@@ -136,10 +136,37 @@ bool nonNullRowsFromSparse(
         (detail::bitMaskIndices<int32_t>(flags) + i)
             .store_unaligned(outer + numInner);
       }
-      // Calculate the inner row corresponding to each non-null in 'next8Rows'.
-      while (flags) {
-        int32_t index = bits::getAndClearLastSetBit(flags);
-        inner[numInner++] = innerFor(i + index);
+      // Calculate the inner row corresponding to each non-null in
+      // 'next8Rows'. Uses a closed-form formula to break the serial
+      // dependency through numNulls/lastNonNull:
+      //   inner[j] = base - numNulls + countNonNulls(nulls, base, row_j)
+      // where base = lastNonNull + 1.
+      {
+        auto base = lastNonNull + 1;
+        auto lastRow = rows[i + width - 1];
+        auto totalRange = lastRow - base + 1;
+        if (FOLLY_LIKELY(totalRange <= 56)) {
+          // Common case: load null bitmap once for the entire range.
+          auto allBits = loadUpTo56Bits(nulls, base, totalRange);
+          auto baseInner = base - numNulls;
+          int32_t lastIndex = 0;
+          while (flags) {
+            lastIndex = bits::getAndClearLastSetBit(flags);
+            auto row = rows[i + lastIndex];
+            inner[numInner++] = baseInner +
+                __builtin_popcountll(allBits & bits::lowMask(row - base));
+          }
+          auto lastNonNullRow = rows[i + lastIndex];
+          numNulls += (lastNonNullRow - base) -
+              __builtin_popcountll(
+                          allBits & bits::lowMask(lastNonNullRow - base));
+          lastNonNull = lastNonNullRow;
+        } else {
+          while (flags) {
+            int32_t index = bits::getAndClearLastSetBit(flags);
+            inner[numInner++] = innerFor(i + index);
+          }
+        }
       }
     }
   }

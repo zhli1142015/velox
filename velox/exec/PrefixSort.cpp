@@ -15,6 +15,8 @@
  */
 #include "velox/exec/PrefixSort.h"
 
+#include <algorithm>
+
 using namespace facebook::velox::exec::prefixsort;
 
 namespace facebook::velox::exec {
@@ -291,11 +293,17 @@ void PrefixSort::extractRowAndEncodePrefixKeys(char* row, char* prefixBuffer) {
         prefixBuffer);
   }
 
-  simd::memset(
-      prefixBuffer + sortLayout_.normalizedBufferSize -
-          sortLayout_.numPaddingBytes,
-      0,
-      sortLayout_.numPaddingBytes);
+  // Zero alignment padding bytes. Padding is always 0-7 bytes at the end of
+  // the last 8-byte word. Use a single masked write instead of memset to avoid
+  // function call overhead (~68 insn for simd::memset, ~34 insn for glibc
+  // memset, vs ~5 insn for masked write).
+  if (sortLayout_.numPaddingBytes > 0) {
+    auto* lastWord = reinterpret_cast<uint64_t*>(
+        prefixBuffer + sortLayout_.normalizedBufferSize - kAlignment);
+    const int keepBytes = kAlignment - sortLayout_.numPaddingBytes;
+    const uint64_t mask = (uint64_t(1) << (keepBytes * 8)) - 1;
+    *lastWord &= mask;
+  }
 
   // When comparing in std::memcmp, each byte is compared. If it is changed to
   // compare every 8 bytes, the number of comparisons will be reduced and the
@@ -377,28 +385,47 @@ void PrefixSort::sortInternal(
   }
 
   // Sort rows with the normalized prefix keys.
+  // Use register-based swap for small entries (<=48B) which avoids
+  // simd::memcpy function call overhead. For larger entries, AVX2 bulk copy
+  // in simd::memcpy is more efficient. The threshold is chosen at compile
+  // time via template parameter to avoid runtime branch in the hot swap path.
   {
     const auto swapBuffer = AlignedBuffer::allocate<char>(entrySize, pool_);
-    PrefixSortRunner sortRunner(entrySize, swapBuffer->asMutable<char>());
-    auto* prefixBufferStart = prefixBuffer;
-    auto* prefixBufferEnd = prefixBuffer + numRows * entrySize;
     if (sortLayout_.numNormalizedKeys > 0) {
       addThreadLocalRuntimeStat(
           PrefixSort::kNumPrefixSortKeys,
           RuntimeCounter(
               sortLayout_.numNormalizedKeys, RuntimeCounter::Unit::kNone));
     }
-    if (sortLayout_.hasNonNormalizedKey ||
-        sortLayout_.nonPrefixSortStartIndex < sortLayout_.numNormalizedKeys) {
-      sortRunner.quickSort(
-          prefixBufferStart, prefixBufferEnd, [&](char* lhs, char* rhs) {
-            return comparePartNormalizedKeys(lhs, rhs);
-          });
+    // Threshold for register-based swap: entries with up to 6 uint64 words
+    // (48 bytes) benefit from register swap. Beyond that, simd::memcpy's
+    // AVX2 256-bit operations are more efficient.
+    static constexpr uint64_t kRegisterSwapMaxEntrySize = 48;
+
+    auto* prefixBufferStart = prefixBuffer;
+    auto* prefixBufferEnd = prefixBuffer + numRows * entrySize;
+    auto runSort = [&](auto& sortRunner) {
+      if (sortLayout_.hasNonNormalizedKey ||
+          sortLayout_.nonPrefixSortStartIndex < sortLayout_.numNormalizedKeys) {
+        sortRunner.quickSort(
+            prefixBufferStart, prefixBufferEnd, [&](char* lhs, char* rhs) {
+              return comparePartNormalizedKeys(lhs, rhs);
+            });
+      } else {
+        sortRunner.quickSort(
+            prefixBufferStart, prefixBufferEnd, [&](char* lhs, char* rhs) {
+              return compareAllNormalizedKeys(lhs, rhs);
+            });
+      }
+    };
+    if (entrySize <= kRegisterSwapMaxEntrySize) {
+      PrefixSortRunner<true> sortRunner(
+          entrySize, swapBuffer->asMutable<char>());
+      runSort(sortRunner);
     } else {
-      sortRunner.quickSort(
-          prefixBufferStart, prefixBufferEnd, [&](char* lhs, char* rhs) {
-            return compareAllNormalizedKeys(lhs, rhs);
-          });
+      PrefixSortRunner<false> sortRunner(
+          entrySize, swapBuffer->asMutable<char>());
+      runSort(sortRunner);
     }
   }
 
