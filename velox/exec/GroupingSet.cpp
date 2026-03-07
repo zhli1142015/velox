@@ -383,6 +383,10 @@ void GroupingSet::createHashTable() {
     table_ = HashTable<false>::createForAggregation(
         std::move(hashers_), accumulators(false), pool_);
   }
+  table_->setPartitionParameters(
+      queryConfig_->hashTableDirectoryPartitionThreshold(),
+      queryConfig_->hashTableDirectoryPartitionTargetSize(),
+      queryConfig_->hashTableDirectoryPartitionMaxCount());
 
   RowContainer& rows = *table_->rows();
   initializeAggregates(aggregates_, rows, false);

@@ -749,6 +749,11 @@ class RowContainer {
     normalizedKeySize_ = 0;
   }
 
+  /// Returns true if newly allocated rows include normalized key space.
+  bool normalizedKeysEnabled() const {
+    return normalizedKeySize_ > 0;
+  }
+
   RowColumn columnAt(int32_t index) const {
     return rowColumns_[index];
   }
@@ -1167,7 +1172,23 @@ class RowContainer {
     VELOX_DCHECK_LE(maxRows, result->size());
     BufferPtr valuesBuffer = result->mutableValues();
     [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
+    // Prefetch row data to hide DRAM latency for random access patterns
+    // (e.g., hash join result extraction).
+    constexpr int32_t kPrefetchAhead = 16;
     for (int32_t i = 0; i < numRows; ++i) {
+      // Prefetch upcoming row data.
+      if (i + kPrefetchAhead < numRows) {
+        const char* futureRow;
+        if constexpr (useRowNumbers) {
+          auto futureRowNumber = rowNumbers[i + kPrefetchAhead];
+          futureRow = futureRowNumber >= 0 ? rows[futureRowNumber] : nullptr;
+        } else {
+          futureRow = rows[i + kPrefetchAhead];
+        }
+        if (futureRow) {
+          __builtin_prefetch(futureRow + offset);
+        }
+      }
       const char* row;
       if constexpr (useRowNumbers) {
         auto rowNumber = rowNumbers[i];

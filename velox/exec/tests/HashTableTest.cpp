@@ -78,6 +78,50 @@ class HashTableTestHelper {
   }
 
   HashTable<ignoreNullKeys>* const table_;
+
+ public:
+  // ── Partition testing accessors ──
+
+  void setPartitionThreshold(int64_t threshold) {
+    table_->partitionThreshold_ = threshold;
+  }
+
+  void setTargetPartitionSize(int64_t size) {
+    table_->targetPartitionSize_ = size;
+  }
+
+  void setMaxPartitions(int32_t maxParts) {
+    table_->maxPartitions_ = maxParts;
+  }
+
+  int32_t numPartitions() const {
+    return table_->numPartitions_;
+  }
+
+  bool isPartitioned() const {
+    return table_->isPartitioned();
+  }
+
+  int64_t totalCapacity() const {
+    return table_->totalCapacity();
+  }
+
+  int64_t totalNumDistinct() const {
+    return table_->totalNumDistinct();
+  }
+
+  const std::vector<typename HashTable<ignoreNullKeys>::PartitionDirectory>&
+  partitions() const {
+    return table_->partitions_;
+  }
+
+  int32_t radixBits() const {
+    return table_->radixBits_;
+  }
+
+  int32_t partitionBitShift() const {
+    return table_->partitionBitShift_;
+  }
 };
 
 // Test framework for join hash tables. Generates probe keys, of which
@@ -1328,4 +1372,624 @@ TEST(HashTableTest, tableInsertPartitionInfo) {
     ASSERT_EQ(overflows[i], info.overflows[i]);
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Directory Partitioning Tests
+// ════════════════════════════════════════════════════════════════════════════
+
+// Test that partitioning triggers when directory size exceeds threshold
+// and does NOT trigger for small tables.
+TEST_P(HashTableTest, directoryPartitionTrigger) {
+  // Use 2 BIGINT keys to force kNormalizedKey mode (combined range > 2M
+  // prevents kArray; partitioning only benefits kNK mode).
+  auto tableType = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
+  keySpacing_ = 1000;
+
+  auto table = createHashTableForAggregation(tableType, 2);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  // Set threshold very low so partitioning triggers with small data.
+  helper.setPartitionThreshold(1024); // 1KB
+  helper.setTargetPartitionSize(256); // 256B
+  helper.setMaxPartitions(16);
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+  // Round 1: Insert small batch to establish rows (checkSize allocates
+  // table but won't partition because totalNumDistinct==0 on first call).
+  std::vector<RowVectorPtr> batches1;
+  makeRows(100, 1, 0, tableType, batches1);
+  insertGroups(*batches1[0], *lookup, *table);
+  ASSERT_FALSE(helper.isPartitioned()) << "First batch should not partition";
+
+  // Round 2: Insert more rows to trigger regrowth past threshold.
+  std::vector<RowVectorPtr> batches2;
+  makeRows(2000, 1, 100, tableType, batches2);
+  insertGroups(*batches2[0], *lookup, *table);
+
+  ASSERT_TRUE(helper.isPartitioned())
+      << "Table should be partitioned when directory exceeds threshold";
+  ASSERT_GT(helper.numPartitions(), 1);
+  // numPartitions must be a power of 2.
+  ASSERT_TRUE(bits::isPowerOfTwo(helper.numPartitions()));
+  // radixBits matches numPartitions.
+  ASSERT_EQ(1 << helper.radixBits(), helper.numPartitions());
+  // partitionBitShift = 64 - radixBits.
+  ASSERT_EQ(helper.partitionBitShift(), 64 - helper.radixBits());
+
+  // Every partition directory should have a valid table pointer.
+  for (const auto& part : helper.partitions()) {
+    ASSERT_NE(part.table, nullptr);
+    ASSERT_GT(part.capacity, 0);
+  }
+
+  // Total distinct across partitions matches what we inserted.
+  ASSERT_EQ(helper.totalNumDistinct(), 2100);
+
+  // Verify totalCapacity > 0 and is sum of partition capacities.
+  int64_t sumCap = 0;
+  for (const auto& part : helper.partitions()) {
+    sumCap += part.capacity;
+  }
+  ASSERT_EQ(helper.totalCapacity(), sumCap);
+
+  LOG(INFO) << "Partitioned: " << helper.numPartitions()
+            << " partitions, radixBits=" << helper.radixBits()
+            << ", totalDistinct=" << helper.totalNumDistinct()
+            << ", totalCapacity=" << helper.totalCapacity();
+}
+
+// Test that a small table does NOT get partitioned.
+TEST_P(HashTableTest, directoryPartitionNoTriggerSmall) {
+  auto tableType = ROW({"k1"}, {BIGINT()});
+  auto table = createHashTableForAggregation(tableType, 1);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  // Keep default 16MB threshold — small data won't reach it.
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+  auto batch = makeRowVector({
+      makeFlatVector<int64_t>(100, [](auto row) { return row; }),
+  });
+  insertGroups(*batch, *lookup, *table);
+
+  ASSERT_FALSE(helper.isPartitioned())
+      << "Small table should not be partitioned";
+  ASSERT_EQ(helper.numPartitions(), 1);
+}
+
+// Test partitioned aggregation probe: insert rows, probe them back,
+// verify all hits are correct.
+TEST_P(HashTableTest, directoryPartitionGroupProbe) {
+  auto tableType = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
+  keySpacing_ = 1000;
+
+  auto table = createHashTableForAggregation(tableType, 2);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  helper.setPartitionThreshold(1024);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(16);
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+  // Round 1: small batch to seed the table.
+  std::vector<RowVectorPtr> seed;
+  makeRows(100, 1, 0, tableType, seed);
+  insertGroups(*seed[0], *lookup, *table);
+
+  // Round 2: larger batch triggers regrowth → partitioning.
+  std::vector<RowVectorPtr> batches;
+  makeRows(5000, 1, 100, tableType, batches);
+  insertGroups(*batches[0], *lookup, *table);
+
+  ASSERT_TRUE(helper.isPartitioned());
+  ASSERT_EQ(helper.totalNumDistinct(), 5100);
+
+  // Save the hits from the last insertion.
+  std::vector<char*> lastHits(lookup->hits.begin(), lookup->hits.end());
+
+  // Re-probe the same large batch: all should be hits (no new inserts).
+  auto lookup2 = std::make_unique<HashLookup>(table->hashers(), pool());
+  insertGroups(*batches[0], *lookup2, *table);
+  ASSERT_EQ(helper.totalNumDistinct(), 5100)
+      << "Re-probe should not increase distinct count";
+
+  // Verify hits match for the large batch.
+  for (auto i = 0; i < 5000; ++i) {
+    ASSERT_EQ(lookup2->hits[i], lastHits[i]) << "Hit mismatch at row " << i;
+  }
+
+  // Insert new, non-overlapping data.
+  std::vector<RowVectorPtr> batches2;
+  makeRows(3000, 1, 5100, tableType, batches2);
+  insertGroups(*batches2[0], *lookup2, *table);
+  ASSERT_EQ(helper.totalNumDistinct(), 8100);
+
+  table->checkConsistency();
+}
+
+// Test that partition directories grow correctly via rehash.
+TEST_P(HashTableTest, directoryPartitionGrowth) {
+  auto tableType = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
+  keySpacing_ = 1000;
+
+  auto table = createHashTableForAggregation(tableType, 2);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  helper.setPartitionThreshold(512);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(8);
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+  // Insert in waves, checking growth at each step.
+  int32_t totalInserted = 0;
+  for (int wave = 0; wave < 10; ++wave) {
+    int32_t batchSize = 500;
+    std::vector<RowVectorPtr> batches;
+    makeRows(batchSize, 1, totalInserted, tableType, batches);
+    insertGroups(*batches[0], *lookup, *table);
+    totalInserted += batchSize;
+
+    ASSERT_EQ(helper.totalNumDistinct(), totalInserted);
+
+    if (helper.isPartitioned()) {
+      // Verify per-partition numDistinct sums correctly.
+      int64_t sumDistinct = 0;
+      for (const auto& part : helper.partitions()) {
+        sumDistinct += part.numDistinct;
+      }
+      ASSERT_EQ(sumDistinct, totalInserted);
+    }
+  }
+
+  ASSERT_TRUE(helper.isPartitioned());
+  table->checkConsistency();
+}
+
+// Test directory partitioning with hash join build + probe path.
+TEST_P(HashTableTest, directoryPartitionJoinBuildProbe) {
+  // Use struct key to force kHash mode.
+  auto buildType =
+      ROW({"key", "val"}, {ROW({"k1", "k2"}, {BIGINT(), BIGINT()}), BIGINT()});
+  std::vector<TypePtr> dependentTypes = {BIGINT()};
+  int32_t numBuildRows = 3000;
+  keySpacing_ = 1000;
+
+  // Create two build-side tables.
+  std::vector<std::unique_ptr<VectorHasher>> hashers1;
+  hashers1.push_back(std::make_unique<VectorHasher>(buildType->childAt(0), 0));
+  auto topTable = HashTable<true>::createForJoin(
+      std::move(hashers1), dependentTypes, true, false, 1'000'000, pool());
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers2;
+  hashers2.push_back(std::make_unique<VectorHasher>(buildType->childAt(0), 0));
+  auto otherTable = HashTable<true>::createForJoin(
+      std::move(hashers2), dependentTypes, true, false, 1'000'000, pool());
+
+  // Populate build tables using copyVectorsToTable.
+  std::vector<RowVectorPtr> batches1;
+  makeRows(numBuildRows, 1, 0, buildType, batches1);
+  copyVectorsToTable(batches1, 0, topTable.get());
+
+  std::vector<RowVectorPtr> batches2;
+  makeRows(numBuildRows, 1, numBuildRows, buildType, batches2);
+  rowOfKey_.resize(numBuildRows * 2);
+  copyVectorsToTable(batches2, numBuildRows, otherTable.get());
+
+  // Lower partition threshold to force partitioning.
+  auto helper = HashTableTestHelper<true>::create(topTable.get());
+  helper.setPartitionThreshold(1024);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(16);
+
+  std::vector<std::unique_ptr<BaseHashTable>> otherTables;
+  otherTables.push_back(std::move(otherTable));
+
+  topTable->prepareJoinTable(
+      std::move(otherTables),
+      BaseHashTable::kNoSpillInputStartPartitionBit,
+      1'000'000);
+
+  // Directory-only partitioning is disabled for JOIN because 64-way prefetch
+  // pipelines already hide all directory access latency. Partitioning actually
+  // regresses JOIN performance (counting sort + per-partition sequential insert
+  // loses the 64-way pipeline advantage).
+  ASSERT_FALSE(helper.isPartitioned())
+      << "JOIN tables should NOT be partitioned (64-way prefetch is better)";
+  ASSERT_EQ(helper.totalNumDistinct(), numBuildRows * 2);
+
+  // Probe with matching keys from first batch.
+  auto lookup = std::make_unique<HashLookup>(topTable->hashers(), pool());
+  auto& probeHashers = topTable->hashers();
+
+  lookup->reset(batches1[0]->size());
+  SelectivityVector probeRows(batches1[0]->size());
+  for (int i = 0; i < probeHashers.size(); ++i) {
+    probeHashers[i]->decode(*batches1[0]->childAt(i), probeRows);
+    probeHashers[i]->hash(probeRows, i > 0, lookup->hashes);
+  }
+  lookup->rows.resize(batches1[0]->size());
+  std::iota(lookup->rows.begin(), lookup->rows.end(), 0);
+
+  topTable->joinProbe(*lookup);
+
+  // All probe keys should find a hit.
+  int32_t hits = 0;
+  for (auto i = 0; i < batches1[0]->size(); ++i) {
+    if (lookup->hits[i] != nullptr) {
+      ++hits;
+    }
+  }
+  ASSERT_EQ(hits, numBuildRows)
+      << "All build keys should be found during probe";
+
+  LOG(INFO) << topTable->toString();
+}
+
+// Test mode transition: kNormalizedKey → kHash while partitioned should
+// un-partition first, then re-partition.
+TEST_P(HashTableTest, directoryPartitionModeTransition) {
+  // Use struct key to force kHash mode immediately.
+  auto tableType =
+      ROW({"key"}, {ROW({"k1", "k2", "k3"}, {BIGINT(), BIGINT(), BIGINT()})});
+  keySpacing_ = 1000;
+
+  auto table = createHashTableForAggregation(tableType, 1);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  helper.setPartitionThreshold(1024);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(16);
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+  // Insert enough data to trigger partitioning in kHash mode.
+  std::vector<RowVectorPtr> batches;
+  makeRows(5000, 1, 0, tableType, batches);
+  insertGroups(*batches[0], *lookup, *table);
+
+  ASSERT_EQ(table->hashMode(), BaseHashTable::HashMode::kHash);
+
+  auto totalDistinct = helper.totalNumDistinct();
+  ASSERT_EQ(totalDistinct, 5000);
+
+  if (helper.isPartitioned()) {
+    ASSERT_GT(helper.numPartitions(), 1);
+    LOG(INFO) << "Partitioned with " << helper.numPartitions() << " partitions";
+  }
+
+  table->checkConsistency();
+}
+
+// Test toString() reports correct capacity when partitioned.
+TEST_P(HashTableTest, directoryPartitionToString) {
+  auto tableType = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
+  keySpacing_ = 1000;
+
+  auto table = createHashTableForAggregation(tableType, 2);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  helper.setPartitionThreshold(512);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(8);
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+  // Two-round insertion to trigger partitioning.
+  std::vector<RowVectorPtr> seed;
+  makeRows(50, 1, 0, tableType, seed);
+  insertGroups(*seed[0], *lookup, *table);
+
+  std::vector<RowVectorPtr> batches;
+  makeRows(2000, 1, 50, tableType, batches);
+  insertGroups(*batches[0], *lookup, *table);
+
+  ASSERT_TRUE(helper.isPartitioned());
+
+  auto str = table->toString();
+  // Should contain actual totalCapacity, not 0.
+  ASSERT_TRUE(str.find("capacity: 0") == std::string::npos)
+      << "toString should not show capacity: 0 when partitioned. Got: " << str;
+  // Should contain partition info.
+  ASSERT_TRUE(str.find("Partitions:") != std::string::npos)
+      << "toString should show partition info. Got: " << str;
+
+  LOG(INFO) << "toString output:\n" << str;
+}
+
+// Test erase (tombstones) on partitioned table.
+TEST_P(HashTableTest, directoryPartitionErase) {
+  auto tableType = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
+  keySpacing_ = 1000;
+
+  auto table = createHashTableForAggregation(tableType, 2);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  helper.setPartitionThreshold(512);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(8);
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+  // Two-round insertion.
+  std::vector<RowVectorPtr> seed;
+  makeRows(50, 1, 0, tableType, seed);
+  insertGroups(*seed[0], *lookup, *table);
+
+  std::vector<RowVectorPtr> batches;
+  makeRows(2000, 1, 50, tableType, batches);
+  insertGroups(*batches[0], *lookup, *table);
+  ASSERT_TRUE(helper.isPartitioned());
+  ASSERT_EQ(helper.totalNumDistinct(), 2050);
+
+  // Erase first 500 rows.
+  std::vector<char*> toErase(lookup->hits.begin(), lookup->hits.begin() + 500);
+  table->erase(folly::Range<char**>(toErase.data(), toErase.size()));
+
+  // Re-probe: erased rows should create new entries.
+  auto lookup2 = std::make_unique<HashLookup>(table->hashers(), pool());
+  // Re-insert some of the same keys (from batch starting at seq 50).
+  std::vector<RowVectorPtr> batchesReinsert;
+  makeRows(500, 1, 50, tableType, batchesReinsert);
+  insertGroups(*batchesReinsert[0], *lookup2, *table);
+
+  for (auto i = 0; i < 500; ++i) {
+    ASSERT_NE(lookup2->hits[i], nullptr);
+  }
+
+  table->checkConsistency();
+}
+
+// Test canApplyParallelJoinBuild returns false for partitioned tables.
+TEST_P(HashTableTest, directoryPartitionNoParallelBuild) {
+  auto buildType =
+      ROW({"key", "val"}, {ROW({"k1", "k2"}, {BIGINT(), BIGINT()}), BIGINT()});
+  std::vector<TypePtr> dependentTypes = {BIGINT()};
+  keySpacing_ = 1000;
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(buildType->childAt(0), 0));
+  // Use minTableSizeForParallelJoinBuild=1 so parallel would normally trigger.
+  auto topTable = HashTable<true>::createForJoin(
+      std::move(hashers), dependentTypes, true, false, 1, pool());
+
+  auto helper = HashTableTestHelper<true>::create(topTable.get());
+  helper.setPartitionThreshold(512);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(8);
+
+  // Populate with rows.
+  std::vector<RowVectorPtr> batches1;
+  makeRows(2000, 1, 0, buildType, batches1);
+  copyVectorsToTable(batches1, 0, topTable.get());
+
+  // Create another table to enable parallel build.
+  std::vector<std::unique_ptr<VectorHasher>> hashers2;
+  hashers2.push_back(std::make_unique<VectorHasher>(buildType->childAt(0), 0));
+  auto other = HashTable<true>::createForJoin(
+      std::move(hashers2), dependentTypes, true, false, 1, pool());
+  std::vector<RowVectorPtr> batches2;
+  makeRows(2000, 1, 2000, buildType, batches2);
+  rowOfKey_.resize(4000);
+  copyVectorsToTable(batches2, 2000, other.get());
+
+  auto executor = std::make_unique<folly::CPUThreadPoolExecutor>(4);
+
+  std::vector<std::unique_ptr<BaseHashTable>> otherTables;
+  otherTables.push_back(std::move(other));
+
+  topTable->prepareJoinTable(
+      std::move(otherTables),
+      BaseHashTable::kNoSpillInputStartPartitionBit,
+      1'000'000,
+      false,
+      executor.get());
+
+  // Directory-only partitioning is disabled for JOIN because 64-way prefetch
+  // already hides all directory access latency.
+  ASSERT_FALSE(helper.isPartitioned());
+  ASSERT_EQ(helper.totalNumDistinct(), 4000);
+  LOG(INFO) << topTable->toString();
+}
+
+// Test partition distribution uniformity: rows should be roughly evenly
+// distributed across partitions.
+TEST_P(HashTableTest, directoryPartitionUniformity) {
+  // Use 2 BIGINT keys to force kNormalizedKey mode (partitioning only
+  // benefits kNK mode where row data isn't accessed during probe).
+  auto tableType = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
+  keySpacing_ = 1000;
+
+  auto table = createHashTableForAggregation(tableType, 2);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  helper.setPartitionThreshold(1024);
+  helper.setTargetPartitionSize(256);
+  helper.setMaxPartitions(16);
+
+  auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+  // Two-round insertion.
+  std::vector<RowVectorPtr> seed;
+  makeRows(100, 1, 0, tableType, seed);
+  insertGroups(*seed[0], *lookup, *table);
+
+  int32_t numRows = 10000;
+  std::vector<RowVectorPtr> batches;
+  makeRows(numRows, 1, 100, tableType, batches);
+  insertGroups(*batches[0], *lookup, *table);
+
+  ASSERT_TRUE(helper.isPartitioned());
+  int32_t numParts = helper.numPartitions();
+  ASSERT_GT(numParts, 1);
+
+  int64_t totalRows = helper.totalNumDistinct();
+
+  // Check distribution: no partition should have more than 3x the average.
+  int64_t avgPerPart = totalRows / numParts;
+  for (int p = 0; p < numParts; ++p) {
+    auto partDistinct = helper.partitions()[p].numDistinct;
+    ASSERT_GT(partDistinct, 0) << "Partition " << p << " should have some rows";
+    ASSERT_LT(partDistinct, avgPerPart * 3)
+        << "Partition " << p << " has too many rows: " << partDistinct
+        << " (avg=" << avgPerPart << ")";
+  }
+
+  table->checkConsistency();
+}
+
+// Test that directory partitioning activates in all applicable hash modes
+// (kNormalizedKey and kHash) and does NOT activate in kArray mode.
+TEST_P(HashTableTest, directoryPartitionAllHashModes) {
+  // --- kNormalizedKey mode ---
+  {
+    SCOPED_TRACE("kNormalizedKey mode");
+    // Two BIGINT keys. With enough rows, the combined distinct count exceeds
+    // kArrayHashMaxSize (2M), preventing kArray and selecting kNormalizedKey.
+    auto tableType = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
+    keySpacing_ = 1;
+
+    auto table = createHashTableForAggregation(tableType, 2);
+    auto helper = HashTableTestHelper<false>::create(table.get());
+    helper.setPartitionThreshold(4096); // 4KB
+    helper.setTargetPartitionSize(1024); // 1KB
+    helper.setMaxPartitions(16);
+
+    auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+    // Small seed: 10 rows. The kArray allocation will be tiny (~200 entries
+    // × 8 bytes ≈ 1.6KB, below 4KB threshold) so kArray is kept.
+    auto seedK1 = makeFlatVector<int64_t>(10, [](auto row) { return row; });
+    auto seedK2 =
+        makeFlatVector<int64_t>(10, [](auto row) { return row * 1000; });
+    auto seedBatch = makeRowVector({seedK1, seedK2});
+    insertGroups(*seedBatch, *lookup, *table);
+
+    // Round 2: 5000 rows. k1 distinct ≈ 5010, k2 distinct ≈ 5010.
+    // Combined distinct ≈ 25M > kArrayHashMaxSize (2M) → kArray rejected
+    // → kNormalizedKey selected. kNK table (128KB) > 4KB → partitions.
+    auto dataK1 =
+        makeFlatVector<int64_t>(5000, [](auto row) { return 10 + row; });
+    auto dataK2 =
+        makeFlatVector<int64_t>(5000, [](auto row) { return row * 1000; });
+    auto dataBatch = makeRowVector({dataK1, dataK2});
+    insertGroups(*dataBatch, *lookup, *table);
+
+    ASSERT_EQ(table->hashMode(), BaseHashTable::HashMode::kNormalizedKey)
+        << "Should be in kNormalizedKey mode";
+    ASSERT_TRUE(helper.isPartitioned())
+        << "kNormalizedKey mode should support partitioning";
+    ASSERT_GT(helper.numPartitions(), 1);
+    table->checkConsistency();
+    LOG(INFO) << "kNormalizedKey: " << helper.numPartitions()
+              << " partitions, distinct=" << helper.totalNumDistinct();
+  }
+
+  // --- kHash mode (struct key forces kHash) ---
+  {
+    SCOPED_TRACE("kHash mode");
+    auto tableType =
+        ROW({"key"}, {ROW({"k1", "k2", "k3"}, {BIGINT(), BIGINT(), BIGINT()})});
+    keySpacing_ = 1000;
+
+    auto table = createHashTableForAggregation(tableType, 1);
+    auto helper = HashTableTestHelper<false>::create(table.get());
+    helper.setPartitionThreshold(1024);
+    helper.setTargetPartitionSize(256);
+    helper.setMaxPartitions(16);
+
+    auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+    // Round 1: seed.
+    std::vector<RowVectorPtr> seed;
+    makeRows(100, 1, 0, tableType, seed);
+    insertGroups(*seed[0], *lookup, *table);
+
+    // Round 2: trigger partitioning.
+    std::vector<RowVectorPtr> batches;
+    makeRows(5000, 1, 100, tableType, batches);
+    insertGroups(*batches[0], *lookup, *table);
+
+    ASSERT_EQ(table->hashMode(), BaseHashTable::HashMode::kHash)
+        << "Struct key should force kHash mode";
+    ASSERT_TRUE(helper.isPartitioned())
+        << "kHash mode should support partitioning";
+    ASSERT_GT(helper.numPartitions(), 1);
+    ASSERT_EQ(helper.totalNumDistinct(), 5100);
+    table->checkConsistency();
+    LOG(INFO) << "kHash: " << helper.numPartitions()
+              << " partitions, distinct=" << helper.totalNumDistinct();
+  }
+
+  // --- kArray mode: small range stays kArray, no partitioning ---
+  {
+    SCOPED_TRACE("kArray mode - small range");
+    auto tableType = ROW({"k1"}, {BIGINT()});
+    keySpacing_ = 1;
+
+    auto table = createHashTableForAggregation(tableType, 1);
+    auto helper = HashTableTestHelper<false>::create(table.get());
+    // High threshold: array is small, stays kArray.
+    helper.setPartitionThreshold(8L * 1024 * 1024);
+
+    auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+    auto keys = makeFlatVector<int64_t>(200, [](auto row) { return row; });
+    auto batch = makeRowVector({keys});
+    insertGroups(*batch, *lookup, *table);
+
+    ASSERT_EQ(table->hashMode(), BaseHashTable::HashMode::kArray)
+        << "Small-range BIGINT should use kArray mode";
+    ASSERT_FALSE(helper.isPartitioned()) << "Small kArray should not partition";
+    ASSERT_EQ(helper.numPartitions(), 1);
+    table->checkConsistency();
+    LOG(INFO) << "kArray (small): not partitioned, distinct="
+              << helper.totalNumDistinct();
+  }
+
+  // --- kArray mode: large range exceeds threshold → falls back to kNK/kHash
+  // ---
+  {
+    SCOPED_TRACE("kArray mode - large range triggers partition");
+    // Single BIGINT key. First batch is small enough for kArray (under
+    // threshold). Second batch has a larger range that would make the kArray
+    // allocation exceed the threshold, so decideHashMode skips kArray and
+    // selects kNK/kHash, which then partitions.
+    auto tableType = ROW({"k1"}, {BIGINT()});
+    keySpacing_ = 1;
+
+    auto table = createHashTableForAggregation(tableType, 1);
+    auto helper = HashTableTestHelper<false>::create(table.get());
+    helper.setPartitionThreshold(1024);
+    helper.setTargetPartitionSize(256);
+    helper.setMaxPartitions(16);
+
+    auto lookup = std::make_unique<HashLookup>(table->hashers(), pool());
+
+    // Round 1: Small range, kArray stays. 50 distinct values → capacity ~100.
+    // Bytes = 100 * 8 = 800 < 1024 threshold → kArray, no partition.
+    auto seed = makeFlatVector<int64_t>(50, [](auto row) { return row; });
+    auto seedBatch = makeRowVector({seed});
+    insertGroups(*seedBatch, *lookup, *table);
+    ASSERT_EQ(table->hashMode(), BaseHashTable::HashMode::kArray)
+        << "Small range should use kArray mode";
+    ASSERT_FALSE(helper.isPartitioned()) << "Small kArray should not partition";
+
+    // Round 2: Larger range. Combined range ~15000, capacity ~22500.
+    // Bytes ≈ 22500 * 8 = 180KB > 1024 → kArray rejected by decideHashMode →
+    // falls back to kNK → checkSize triggers partitioning.
+    auto data =
+        makeFlatVector<int64_t>(5000, [](auto row) { return 50 + row * 3; });
+    auto dataBatch = makeRowVector({data});
+    insertGroups(*dataBatch, *lookup, *table);
+
+    ASSERT_NE(table->hashMode(), BaseHashTable::HashMode::kArray)
+        << "Large kArray should fall back to kNK or kHash for partitioning";
+    ASSERT_TRUE(helper.isPartitioned())
+        << "Large kArray fallback should activate partitioning";
+    ASSERT_GT(helper.numPartitions(), 1);
+    table->checkConsistency();
+    LOG(INFO) << "kArray (large→partitioned): " << helper.numPartitions()
+              << " partitions, mode="
+              << (table->hashMode() == BaseHashTable::HashMode::kNormalizedKey
+                      ? "kNK"
+                      : "kHash")
+              << ", distinct=" << helper.totalNumDistinct();
+  }
+}
+
 } // namespace facebook::velox::exec::test

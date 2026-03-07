@@ -20,6 +20,8 @@
 #include "velox/exec/RowContainer.h"
 #include "velox/exec/VectorHasher.h"
 
+#include <fmt/format.h>
+
 namespace facebook::velox::exec {
 
 using PartitionBoundIndexType = int64_t;
@@ -373,6 +375,14 @@ class BaseHashTable {
   /// not freed which can be used for flushing a partial group by, for example.
   virtual void clear(bool freeTable) = 0;
 
+  /// Configures directory partitioning thresholds. When the hash directory
+  /// exceeds 'threshold' bytes, it is split into sub-directories of
+  /// approximately 'targetSize' bytes, up to 'maxPartitions' partitions.
+  virtual void setPartitionParameters(
+      int64_t threshold,
+      int64_t targetSize,
+      int32_t maxPartitions) = 0;
+
   /// Returns the capacity of the internal hash table which is number of rows
   /// it can stores in a group by or hash join build.
   virtual uint64_t capacity() const = 0;
@@ -645,9 +655,11 @@ class HashTable : public BaseHashTable {
   void clear(bool freeTable) override;
 
   int64_t allocatedBytes() const override {
-    // For each row: sizeof(char*) per table entry + memory
-    // allocated with MemoryAllocator for fixed-width rows and strings.
-    return sizeof(char*) * capacity_ + rows_->allocatedBytes();
+    int64_t dirBytes = 0;
+    for (const auto& p : partitions_) {
+      dirBytes += sizeof(char*) * p.capacity;
+    }
+    return dirBytes + rows_->allocatedBytes();
   }
 
   HashStringAllocator* stringAllocator() override {
@@ -655,11 +667,11 @@ class HashTable : public BaseHashTable {
   }
 
   uint64_t capacity() const override {
-    return capacity_;
+    return totalCapacity();
   }
 
   uint64_t numDistinct() const override {
-    return numDistinct_;
+    return totalNumDistinct();
   }
 
   int32_t numRowContainers() const override {
@@ -668,7 +680,10 @@ class HashTable : public BaseHashTable {
 
   HashTableStats stats() const override {
     return HashTableStats{
-        capacity_, numRehashes_, numDistinct_, numTombstones_};
+        totalCapacity(),
+        numRehashes_,
+        totalNumDistinct(),
+        totalNumTombstones()};
   }
 
   bool hasDuplicateKeys() const override {
@@ -720,10 +735,21 @@ class HashTable : public BaseHashTable {
       int8_t spillInputStartPartitionBit) override;
 
   uint64_t hashTableSizeIncrease(int32_t numNewDistinct) const override {
-    if (numDistinct_ + numNewDistinct > rehashSize()) {
-      // If rehashed, the table adds size_ entries (i.e. doubles),
-      // adding one pointer worth for each new position.  (16 tags, 16 6 byte
-      // pointers, 16 bytes padding).
+    if (isPartitioned()) {
+      int64_t perPartNew = numNewDistinct / numPartitions_;
+      for (int32_t p = 0; p < numPartitions_; ++p) {
+        if (partitions_[p].numDistinct + perPartNew >
+            rehashSize(partitions_[p].capacity)) {
+          int64_t totalDir = 0;
+          for (const auto& part : partitions_) {
+            totalDir += part.capacity * tableSlotSize();
+          }
+          return totalDir;
+        }
+      }
+      return 0;
+    }
+    if (totalNumDistinct() + numNewDistinct > rehashSize()) {
       return capacity_ * tableSlotSize();
     }
     return 0;
@@ -741,6 +767,15 @@ class HashTable : public BaseHashTable {
   }
 
   std::vector<RowContainer*> allRows() const override;
+
+  void setPartitionParameters(
+      int64_t threshold,
+      int64_t targetSize,
+      int32_t maxPartitions) override {
+    partitionThreshold_ = threshold;
+    targetPartitionSize_ = targetSize;
+    maxPartitions_ = maxPartitions;
+  }
 
   std::string toString() override;
 
@@ -790,6 +825,20 @@ class HashTable : public BaseHashTable {
   static constexpr bool kTrackLoads = true;
 #endif
 
+  /// Per-partition directory state. When not partitioned, partitions_[0] holds
+  /// the single directory. When partitioned, partitions_[0..N-1] hold N dirs.
+  struct PartitionDirectory {
+    char** table = nullptr;
+    memory::ContiguousAllocation allocation;
+    int64_t capacity = 0;
+    uint64_t sizeMask = 0;
+    uint64_t bucketOffsetMask = 0;
+    int64_t numBuckets = 0;
+    int32_t sizeBits = 0;
+    int64_t numDistinct = 0;
+    int64_t numTombstones = 0;
+  };
+
   // The table in non-kArray mode has a power of two number of buckets each with
   // 16 slots. Each slot has a 1 byte tag (a field of hash number) and a 48 bit
   // pointer. All the tags are in a 16 byte SIMD word followed by the 6 byte
@@ -830,6 +879,55 @@ class HashTable : public BaseHashTable {
 
   static_assert(sizeof(Bucket) == 128);
   static constexpr uint64_t kBucketSize = sizeof(Bucket);
+
+  /// Lightweight view into a partition directory for ProbeState compatibility.
+  /// ProbeState methods are templated on Table type and access table.table_
+  /// as a raw member field (not via getter), so this field MUST be named
+  /// table_ (with trailing underscore).
+  struct DirectoryView {
+    char** table_ = nullptr;
+    uint64_t sizeMask = 0;
+    uint64_t bucketOffsetMask = 0;
+    int64_t numBucketsVal = 0;
+
+    int64_t bucketOffset(uint64_t hash) const {
+      return hash & bucketOffsetMask;
+    }
+
+    int64_t nextBucketOffset(int64_t offset) const {
+      return sizeMask & (offset + sizeof(Bucket));
+    }
+
+    int64_t numBuckets() const {
+      return numBucketsVal;
+    }
+
+    Bucket* bucketAt(int64_t offset) const {
+      return reinterpret_cast<Bucket*>(
+          reinterpret_cast<char*>(table_) + offset);
+    }
+
+    char* row(int64_t offset, int32_t slotIndex) const {
+      return bucketAt(offset)->pointerAt(slotIndex);
+    }
+
+    static TagVector loadTags(uint8_t* table, int64_t offset) {
+      return BaseHashTable::loadTags(table, offset);
+    }
+
+    TagVector loadTags(int64_t offset) const {
+      return BaseHashTable::loadTags(
+          reinterpret_cast<uint8_t*>(table_), offset);
+    }
+
+    std::string toString() const {
+      return fmt::format("[DirectoryView numBuckets={}]", numBucketsVal);
+    }
+
+    void incrementTagLoads() const {}
+    void incrementRowLoads() const {}
+    void incrementHits() const {}
+  };
 
   // Returns the bucket at byte offset 'offset' from 'table_'.
   Bucket* bucketAt(int64_t offset) const {
@@ -909,7 +1007,17 @@ class HashTable : public BaseHashTable {
   void rehash(bool initNormalizedKeys, int8_t spillInputStartPartitionBit);
 
   uint64_t rehashSize() const {
-    return rehashSize(capacity_ - numTombstones_);
+    if (partitions_.empty()) {
+      return rehashSize(0);
+    }
+    if (numPartitions_ <= 1) {
+      return rehashSize(partitions_[0].capacity - partitions_[0].numTombstones);
+    }
+    int64_t totalEffective = 0;
+    for (const auto& p : partitions_) {
+      totalEffective += p.capacity - p.numTombstones;
+    }
+    return rehashSize(totalEffective);
   }
 
   void storeKeys(HashLookup& lookup, vector_size_t row);
@@ -1036,6 +1144,11 @@ class HashTable : public BaseHashTable {
   // Shortcut for probe with normalized keys.
   void joinNormalizedKeyProbe(HashLookup& lookup);
 
+  // 64-way batched join probe for kHash mode. Three-phase pipeline:
+  // preProbe (prefetch directory), firstProbe (load tags, prefetch rows),
+  // fullProbe (compare keys). Hides both directory and row data latency.
+  void joinHashProbe(HashLookup& lookup);
+
   // Returns the total size of the variable size 'columns' in 'row'.
   // NOTE: No checks are done in the method for performance considerations.
   // Caller needs to make sure only variable size columns are inside of
@@ -1153,6 +1266,76 @@ class HashTable : public BaseHashTable {
   // time and block driver threads.
   void checkHashBitsOverlap(int8_t spillInputStartPartitionBit);
 
+  // ── Directory partition functions ──
+  void initPartitionDirectories(int64_t totalCapacity);
+  void allocatePartitionDirectory(PartitionDirectory& dir, int64_t capacity);
+
+  void partitionedGroupProbe(HashLookup& lookup, int8_t spillBit);
+  char* partitionedInsertEntry(
+      HashLookup& lookup,
+      uint64_t index,
+      vector_size_t row,
+      int32_t partId);
+
+  enum class GrowthResult { NONE, REHASHED, RESTART };
+  GrowthResult preCheckPartitionGrowth(
+      const int32_t* partCounts,
+      int8_t spillBit);
+  void rehashPartitionDirectory(
+      int32_t partId,
+      int64_t newCapacity,
+      int8_t spillBit);
+  void globalDoublePartitions(const int32_t* partCounts, int8_t spillBit);
+
+  /// Splits each partition in 'srcPartitions' into two halves in
+  /// 'dstPartitions' based on the bit at position (63 - currentRadixBits).
+  /// Frees old partition allocations after splitting.
+  void splitPartitions(
+      std::vector<PartitionDirectory>& srcPartitions,
+      std::vector<PartitionDirectory>& dstPartitions,
+      int32_t currentRadixBits);
+
+  uint64_t readCachedHash(const char* row) const;
+
+  void partitionedRehashForJoin(bool initNormalizedKeys = false);
+  void partitionedInsertForJoin(
+      char** groups,
+      const uint64_t* hashes,
+      int32_t numGroups);
+  void partitionedJoinProbe(HashLookup& lookup);
+
+  bool isPartitioned() const {
+    return numPartitions_ > 1;
+  }
+
+  int64_t totalNumDistinct() const {
+    int64_t total = 0;
+    for (const auto& p : partitions_) {
+      total += p.numDistinct;
+    }
+    return total;
+  }
+
+  int64_t totalNumTombstones() const {
+    int64_t total = 0;
+    for (const auto& p : partitions_) {
+      total += p.numTombstones;
+    }
+    return total;
+  }
+
+  int64_t totalCapacity() const {
+    int64_t total = 0;
+    for (const auto& p : partitions_) {
+      total += p.capacity;
+    }
+    return total;
+  }
+
+  DirectoryView makeDirectoryView(const PartitionDirectory& dir) const {
+    return {dir.table, dir.sizeMask, dir.bucketOffsetMask, dir.numBuckets};
+  }
+
   memory::MemoryPool* const pool_;
 
   // The min table size in row to trigger parallel join table build.
@@ -1172,7 +1355,6 @@ class HashTable : public BaseHashTable {
   // Offset of next row link for join build side set from 'rows_'.
   int32_t nextOffset_{0};
   char** table_ = nullptr;
-  memory::ContiguousAllocation tableAllocation_;
 
   // Number of slots across all buckets.
   int64_t capacity_{0};
@@ -1185,9 +1367,7 @@ class HashTable : public BaseHashTable {
   // number.
   int64_t bucketOffsetMask_{0};
   int64_t numBuckets_{0};
-  int64_t numDistinct_{0};
   // Counts the number of tombstone table slots.
-  int64_t numTombstones_{0};
   // Counts the number of rehash() calls.
   int64_t numRehashes_{0};
   HashMode hashMode_ = HashMode::kArray;
@@ -1228,6 +1408,15 @@ class HashTable : public BaseHashTable {
 
   // If true, avoids using VectorHasher value ranges with kArray hash mode.
   bool disableRangeArrayHash_{false};
+
+  // ── Directory partition state ──
+  int32_t numPartitions_ = 0;
+  int32_t radixBits_ = 0;
+  int32_t partitionBitShift_ = 64;
+  std::vector<PartitionDirectory> partitions_;
+  int64_t partitionThreshold_ = 8L * 1024 * 1024; // 8MB default
+  int64_t targetPartitionSize_ = 2L * 1024 * 1024; // 2MB default
+  int32_t maxPartitions_ = 256;
 
   friend class ProbeState;
   friend test::HashTableTestHelper<ignoreNullKeys>;

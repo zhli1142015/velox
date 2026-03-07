@@ -843,6 +843,20 @@ class QueryConfig {
   static constexpr const char* kJoinBuildVectorHasherMaxNumDistinct =
       "join_build_vector_hasher_max_num_distinct";
 
+  /// Threshold in bytes for total hash directory size above which
+  /// directory partitioning is triggered. Default 16MB.
+  static constexpr const char* kHashTableDirectoryPartitionThreshold =
+      "hash_table_directory_partition_threshold";
+
+  /// Target size in bytes for each partition directory. Default 2MB,
+  /// sized to fit in L2 cache.
+  static constexpr const char* kHashTableDirectoryPartitionTargetSize =
+      "hash_table_directory_partition_target_size";
+
+  /// Maximum number of partition directories. Default 256.
+  static constexpr const char* kHashTableDirectoryPartitionMaxCount =
+      "hash_table_directory_partition_max_count";
+
   enum class RowSizeTrackingMode {
     DISABLED = 0,
     EXCLUDE_DELTA_SPLITS = 1,
@@ -1502,6 +1516,20 @@ class QueryConfig {
 
   uint32_t joinBuildVectorHasherMaxNumDistinct() const {
     return get<uint32_t>(kJoinBuildVectorHasherMaxNumDistinct, 1'000'000);
+  }
+
+  int64_t hashTableDirectoryPartitionThreshold() const {
+    return get<int64_t>(
+        kHashTableDirectoryPartitionThreshold, 8L * 1024 * 1024);
+  }
+
+  int64_t hashTableDirectoryPartitionTargetSize() const {
+    return get<int64_t>(
+        kHashTableDirectoryPartitionTargetSize, 2L * 1024 * 1024);
+  }
+
+  int32_t hashTableDirectoryPartitionMaxCount() const {
+    return get<int32_t>(kHashTableDirectoryPartitionMaxCount, 256);
   }
 
   template <typename T>

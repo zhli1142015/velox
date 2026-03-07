@@ -270,6 +270,10 @@ void HashBuild::setupTable() {
     }
   }
   analyzeKeys_ = table_->hashMode() != BaseHashTable::HashMode::kHash;
+  table_->setPartitionParameters(
+      queryConfig.hashTableDirectoryPartitionThreshold(),
+      queryConfig.hashTableDirectoryPartitionTargetSize(),
+      queryConfig.hashTableDirectoryPartitionMaxCount());
   if (abandonHashBuildDedupMinPct_ == 0) {
     // Building a HashTable without duplicates is disabled if
     // abandonBuildNoDupHashMinPct_ is 0.
