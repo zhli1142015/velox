@@ -1145,6 +1145,12 @@ class HashTable : public BaseHashTable {
   void
   insertNKForGroupBy(char** groups, const uint64_t* hashes, int32_t numGroups);
 
+  void insertNKForJoin(
+      char** groups,
+      const uint64_t* hashes,
+      int32_t numGroups,
+      TableInsertPartitionInfo* partitionInfo);
+
   void joinNKProbe(HashLookup& lookup);
   // --- end NK functions ---
 

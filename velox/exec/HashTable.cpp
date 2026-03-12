@@ -1112,7 +1112,7 @@ void HashTable<ignoreNullKeys>::parallelJoinBuild() {
     // The bounds are the closes tag/row pointer group bound, always cache
     // line aligned.
     buildPartitionBounds_[i] =
-        bits::roundUp(((sizeMask_ + 1) / numPartitions) * i, kBucketSize);
+        bits::roundUp(((sizeMask_ + 1) / numPartitions) * i, activeBucketSize_);
     // Bounds must always be positive
     VELOX_CHECK_GE(
         buildPartitionBounds_[i],
@@ -1578,8 +1578,7 @@ void HashTable<ignoreNullKeys>::insertForJoin(
     return;
   }
   if (hashMode_ == HashMode::kNormalizedKey) {
-    // Use NK-specific insert that works with NKBucket layout.
-    insertNKForGroupBy(groups, hashes, numGroups);
+    insertNKForJoin(groups, hashes, numGroups, partitionInfo);
     return;
   }
   insertForJoinWithPrefetch(groups, hashes, numGroups, partitionInfo);
@@ -2914,28 +2913,88 @@ void HashTable<ignoreNullKeys>::insertNKForGroupBy(
     char** groups,
     const uint64_t* hashes,
     int32_t numGroups) {
-  constexpr int32_t kPrefetchDistance = 10;
-  for (int32_t i = 0; i < numGroups; ++i) {
-    auto hash = hashes[i];
-    auto offset = bucketOffset(hash);
-    if (i + kPrefetchDistance < numGroups) {
-      auto futureOffset = bucketOffset(hashes[i + kPrefetchDistance]);
-      auto* futureAddr = reinterpret_cast<char*>(table_) + futureOffset;
-      // NKBucket is 128B spanning 2 cache lines. CL1 has tags + NKs[0:5],
-      // CL2 has NKs[6:7] + all pointers. Every insertion writes to CL2
-      // (setPointer), so prefetch both cache lines of the destination bucket.
-      __builtin_prefetch(futureAddr);
-      __builtin_prefetch(futureAddr + 64);
-      __builtin_prefetch(
-          &RowContainer::normalizedKey(groups[i + kPrefetchDistance]));
+  // 16-way group prefetch for rehash insertion. All rows are unique
+  // (deduplicated in old table), so only empty-slot search is needed.
+  //
+  // Phase 1: Compute offsets, prefetch buckets (CL0+CL1) and row NK.
+  // Phase 2: Find empty slot and insert (bucket already warm in L1).
+  // Phase 3: Retry overflow rows (rare at low-to-mid fill levels).
+  constexpr int32_t kBatch = 16;
+  int64_t offsets[kBatch];
+  int32_t pending[kBatch];
+  int32_t probeCount[kBatch];
+
+  int32_t i = 0;
+  for (; i + kBatch <= numGroups; i += kBatch) {
+    // Phase 1: Prefetch buckets and rows.
+    for (int32_t k = 0; k < kBatch; ++k) {
+      offsets[k] = bucketOffset(hashes[i + k]);
+      auto* addr = reinterpret_cast<char*>(table_) + offsets[k];
+      __builtin_prefetch(addr);
+      __builtin_prefetch(addr + 64);
+      __builtin_prefetch(groups[i + k]);
     }
+
+    // Phase 2: Find empty slot in first bucket for all rows.
+    int32_t numPending = 0;
+    for (int32_t k = 0; k < kBatch; ++k) {
+      auto tags = loadTags16(table_, offsets[k]);
+      uint16_t free = compareTags16(tags, _mm_setzero_si128());
+      if (free) {
+        auto freeSlot = bits::getAndClearLastSetBit(free);
+        storeNKRowPointer(offsets[k], freeSlot, hashes[i + k], groups[i + k]);
+        continue;
+      }
+      // Bucket full → prefetch next and add to retry list.
+      offsets[k] = nextBucketOffset(offsets[k]);
+      auto* nextAddr = reinterpret_cast<char*>(table_) + offsets[k];
+      __builtin_prefetch(nextAddr);
+      __builtin_prefetch(nextAddr + 64);
+      pending[numPending] = k;
+      probeCount[numPending] = 1;
+      ++numPending;
+    }
+
+    // Phase 3: Retry overflow rows.
+    while (FOLLY_UNLIKELY(numPending > 0)) {
+      int32_t newPending = 0;
+      for (int32_t p = 0; p < numPending; ++p) {
+        auto k = pending[p];
+        auto tags = loadTags16(table_, offsets[k]);
+        uint16_t free = compareTags16(tags, _mm_setzero_si128());
+        if (free) {
+          auto freeSlot = bits::getAndClearLastSetBit(free);
+          storeNKRowPointer(offsets[k], freeSlot, hashes[i + k], groups[i + k]);
+          continue;
+        }
+        offsets[k] = nextBucketOffset(offsets[k]);
+        auto newProbeCount = probeCount[p] + 1;
+        VELOX_CHECK_LT(
+            newProbeCount,
+            numBuckets(),
+            "Looped through all buckets in table: {}",
+            toString());
+        auto* nextAddr = reinterpret_cast<char*>(table_) + offsets[k];
+        __builtin_prefetch(nextAddr);
+        __builtin_prefetch(nextAddr + 64);
+        pending[newPending] = k;
+        probeCount[newPending] = newProbeCount;
+        ++newPending;
+      }
+      numPending = newPending;
+    }
+  }
+
+  // Tail: process remaining rows without batched prefetch.
+  for (; i < numGroups; ++i) {
+    auto offset = bucketOffset(hashes[i]);
     bool inserted = false;
     for (int64_t numProbed = 0; numProbed < numBuckets(); ++numProbed) {
       auto tags = loadTags16(table_, offset);
       uint16_t free = compareTags16(tags, _mm_setzero_si128());
       if (free) {
         auto freeSlot = bits::getAndClearLastSetBit(free);
-        storeNKRowPointer(offset, freeSlot, hash, groups[i]);
+        storeNKRowPointer(offset, freeSlot, hashes[i], groups[i]);
         inserted = true;
         break;
       }
@@ -2943,6 +3002,197 @@ void HashTable<ignoreNullKeys>::insertNKForGroupBy(
     }
     VELOX_CHECK(
         inserted, "Looped through all buckets in table: {}", toString());
+  }
+}
+
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::insertNKForJoin(
+    char** groups,
+    const uint64_t* hashes,
+    int32_t numGroups,
+    TableInsertPartitionInfo* partitionInfo) {
+  // 16-way batched pipeline for NKBucket join build.
+  //
+  // Phase 1: Compute hash metadata, prefetch first buckets and rows.
+  //          16 * 128B = 2KB prefetch, fits comfortably in L1 (32KB).
+  // Phase 2: Probe first bucket (warm from Phase 1).
+  //          - Tag match + NK match → pushNext (duplicate key, chain).
+  //          - Empty slot → insert new key.
+  //          - Full bucket → prefetch next bucket, add to retry list.
+  // Phase 3: Retry overflow rows with AMAC-style batched prefetch.
+  //          Bounded by numBuckets() to prevent infinite loops.
+  //
+  // Handles both high-duplicate (pushNext-heavy) and unique-key (insert-heavy)
+  // workloads efficiently: Phase 2 resolves ~85%+ of rows at load factor 0.85,
+  // and overflow prefetch is issued inline so Phase 3 probes warm buckets.
+  constexpr int32_t kBatch = 16;
+  int64_t offsets[kBatch];
+  uint16_t tag16s[kBatch];
+  uint64_t nks[kBatch];
+  int32_t pending[kBatch];
+  int32_t probeCount[kBatch];
+
+  int32_t i = 0;
+  for (; i + kBatch <= numGroups; i += kBatch) {
+    // Phase 1: Compute metadata, prefetch buckets (CL0+CL1) and row NK.
+    for (int32_t k = 0; k < kBatch; ++k) {
+      offsets[k] = bucketOffset(hashes[i + k]);
+      tag16s[k] = hashTag16(hashes[i + k]);
+      auto* addr = reinterpret_cast<char*>(table_) + offsets[k];
+      __builtin_prefetch(addr);
+      __builtin_prefetch(addr + 64);
+      __builtin_prefetch(groups[i + k]);
+    }
+    // Read NK after prefetch has had time to arrive.
+    for (int32_t k = 0; k < kBatch; ++k) {
+      nks[k] = RowContainer::normalizedKey(groups[i + k]);
+    }
+
+    // Phase 2: Probe first bucket for all rows.
+    int32_t numPending = 0;
+    for (int32_t k = 0; k < kBatch; ++k) {
+      auto idx = i + k;
+      auto tags = loadTags16(table_, offsets[k]);
+      auto wantedTags = _mm_set1_epi16(tag16s[k]);
+
+      // Check for matching NK (duplicate key → chain via pushNext).
+      uint16_t hits = compareTags16(tags, wantedTags);
+      bool handled = false;
+      while (hits) {
+        auto slot = bits::getAndClearLastSetBit(hits);
+        auto* bkt = nkBucketAt(offsets[k]);
+        if (bkt->nkAt(slot) == nks[k]) {
+          if (nextOffset_ > 0) {
+            pushNext(bkt->pointerAt(slot), groups[idx]);
+          }
+          handled = true;
+          break;
+        }
+      }
+      if (handled) {
+        continue;
+      }
+
+      // Check for empty slot (new key → insert).
+      uint16_t free = compareTags16(tags, _mm_setzero_si128());
+      if (free) {
+        auto freeSlot = bits::getAndClearLastSetBit(free);
+        storeNKRowPointer(offsets[k], freeSlot, hashes[idx], groups[idx]);
+        continue;
+      }
+
+      // Bucket full, no match → overflow. Advance to next bucket.
+      // Check inRange BEFORE advancing so we never write to another
+      // thread's partition (critical for parallel join build).
+      offsets[k] = nextBucketOffset(offsets[k]);
+      if (partitionInfo && !partitionInfo->inRange(offsets[k])) {
+        partitionInfo->addOverflow(groups[idx]);
+        continue;
+      }
+      auto* nextAddr = reinterpret_cast<char*>(table_) + offsets[k];
+      __builtin_prefetch(nextAddr);
+      __builtin_prefetch(nextAddr + 64);
+      pending[numPending] = k;
+      probeCount[numPending] = 1;
+      ++numPending;
+    }
+
+    // Phase 3: Retry overflow rows with batched prefetch. Each iteration
+    // probes one more bucket per pending row. Bounded by numBuckets().
+    while (FOLLY_UNLIKELY(numPending > 0)) {
+      int32_t newPending = 0;
+      for (int32_t p = 0; p < numPending; ++p) {
+        auto k = pending[p];
+        auto idx = i + k;
+        auto tags = loadTags16(table_, offsets[k]);
+        auto wantedTags = _mm_set1_epi16(tag16s[k]);
+
+        uint16_t hits = compareTags16(tags, wantedTags);
+        bool handled = false;
+        while (hits) {
+          auto slot = bits::getAndClearLastSetBit(hits);
+          auto* bkt = nkBucketAt(offsets[k]);
+          if (bkt->nkAt(slot) == nks[k]) {
+            if (nextOffset_ > 0) {
+              pushNext(bkt->pointerAt(slot), groups[idx]);
+            }
+            handled = true;
+            break;
+          }
+        }
+        if (handled) {
+          continue;
+        }
+
+        uint16_t free = compareTags16(tags, _mm_setzero_si128());
+        if (free) {
+          auto freeSlot = bits::getAndClearLastSetBit(free);
+          storeNKRowPointer(offsets[k], freeSlot, hashes[idx], groups[idx]);
+          continue;
+        }
+
+        // Advance to next bucket, check partition bounds first.
+        offsets[k] = nextBucketOffset(offsets[k]);
+        if (partitionInfo && !partitionInfo->inRange(offsets[k])) {
+          partitionInfo->addOverflow(groups[idx]);
+          continue;
+        }
+        auto newProbeCount = probeCount[p] + 1;
+        VELOX_CHECK_LT(
+            newProbeCount,
+            numBuckets(),
+            "Looped through all buckets in table: {}",
+            toString());
+        auto* nextAddr = reinterpret_cast<char*>(table_) + offsets[k];
+        __builtin_prefetch(nextAddr);
+        __builtin_prefetch(nextAddr + 64);
+        pending[newPending] = k;
+        probeCount[newPending] = newProbeCount;
+        ++newPending;
+      }
+      numPending = newPending;
+    }
+  }
+
+  // Tail: process remaining rows (< kBatch) without batched prefetch.
+  for (; i < numGroups; ++i) {
+    auto offset = bucketOffset(hashes[i]);
+    auto wantedTags = _mm_set1_epi16(hashTag16(hashes[i]));
+    auto nk = RowContainer::normalizedKey(groups[i]);
+    bool handled = false;
+    for (int64_t numProbed = 0; numProbed < numBuckets(); ++numProbed) {
+      // Check partition bounds before probing this bucket.
+      if (numProbed > 0 && partitionInfo && !partitionInfo->inRange(offset)) {
+        partitionInfo->addOverflow(groups[i]);
+        handled = true;
+        break;
+      }
+      auto tags = loadTags16(table_, offset);
+      uint16_t hits = compareTags16(tags, wantedTags);
+      while (hits) {
+        auto slot = bits::getAndClearLastSetBit(hits);
+        auto* bkt = nkBucketAt(offset);
+        if (bkt->nkAt(slot) == nk) {
+          if (nextOffset_ > 0) {
+            pushNext(bkt->pointerAt(slot), groups[i]);
+          }
+          handled = true;
+          break;
+        }
+      }
+      if (handled) {
+        break;
+      }
+      uint16_t free = compareTags16(tags, _mm_setzero_si128());
+      if (free) {
+        auto freeSlot = bits::getAndClearLastSetBit(free);
+        storeNKRowPointer(offset, freeSlot, hashes[i], groups[i]);
+        handled = true;
+        break;
+      }
+      offset = nextBucketOffset(offset);
+    }
+    VELOX_CHECK(handled, "Looped through all buckets in table: {}", toString());
   }
 }
 
@@ -2963,7 +3213,9 @@ void HashTable<ignoreNullKeys>::joinNKProbe(HashLookup& lookup) {
       int32_t row = rows[probeIndex + i];
       offsets[i] = bucketOffset(hashes[row]);
       wanted[i] = _mm_set1_epi16(hashTag16(hashes[row]));
-      __builtin_prefetch(reinterpret_cast<uint8_t*>(table_) + offsets[i]);
+      auto* addr = reinterpret_cast<uint8_t*>(table_) + offsets[i];
+      __builtin_prefetch(addr);
+      __builtin_prefetch(addr + 64);
     }
     for (int32_t i = 0; i < kPrefetchSize; ++i) {
       int32_t row = rows[probeIndex + i];
@@ -2984,6 +3236,8 @@ void HashTable<ignoreNullKeys>::joinNKProbe(HashLookup& lookup) {
         if (empty)
           goto join_next;
         offset = nextBucketOffset(offset);
+        __builtin_prefetch(reinterpret_cast<uint8_t*>(table_) + offset);
+        __builtin_prefetch(reinterpret_cast<uint8_t*>(table_) + offset + 64);
       }
     join_next:;
     }
@@ -3008,6 +3262,8 @@ void HashTable<ignoreNullKeys>::joinNKProbe(HashLookup& lookup) {
       if (empty)
         break;
       offset = nextBucketOffset(offset);
+      __builtin_prefetch(reinterpret_cast<uint8_t*>(table_) + offset);
+      __builtin_prefetch(reinterpret_cast<uint8_t*>(table_) + offset + 64);
     }
   join_tail_next:;
   }
