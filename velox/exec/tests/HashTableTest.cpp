@@ -995,16 +995,16 @@ TEST_P(HashTableTest, checkSizeValidation) {
   auto vector2 = makeRowVector({makeFlatVector<int64_t>(
       131'072, [&](auto row) { return 131'072 + row; })});
   // The second insertion of 128KB distinct entries triggers the table resizing.
-  // And we expect the table size bumps up to 512KB.
+  // With aggressive growth (4x for tables > 64K), this grows to 1MB.
   insertGroups(*vector2, *lookup, *table);
-  ASSERT_EQ(table->capacity(), 512 << 10);
+  ASSERT_EQ(table->capacity(), 1024 << 10);
 
   auto vector3 = makeRowVector(
       {makeFlatVector<int64_t>(1, [&](auto row) { return row; })});
   // The last insertion triggers the check size which see the table size matches
   // the number of distinct entries that it stores.
   insertGroups(*vector3, *lookup, *table);
-  ASSERT_EQ(table->capacity(), 512 << 10);
+  ASSERT_EQ(table->capacity(), 1024 << 10);
 }
 
 TEST_P(HashTableTest, listNullKeyRows) {

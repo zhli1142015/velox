@@ -139,32 +139,77 @@ class AverageAggregateBase : public exec::Aggregate {
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       bool /*mayPushdown*/) override {
+    static constexpr int32_t kPrefetchDistance = 32;
     decodedRaw_.decode(*args[0], rows);
     if (decodedRaw_.isConstantMapping()) {
       if (!decodedRaw_.isNullAt(0)) {
         auto value = decodedRaw_.valueAt<TInput>(0);
-        rows.applyToSelected([&](vector_size_t i) {
-          updateNonNullValue(groups[i], TAccumulator(value));
-        });
+        if (rows.isAllSelected()) {
+          auto end = rows.end();
+          for (auto i = 0; i < end; ++i) {
+            if (i + kPrefetchDistance < end) {
+              __builtin_prefetch(groups[i + kPrefetchDistance]);
+            }
+            updateNonNullValue(groups[i], TAccumulator(value));
+          }
+        } else {
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue(groups[i], TAccumulator(value));
+          });
+        }
       }
     } else if (decodedRaw_.mayHaveNulls()) {
-      rows.applyToSelected([&](vector_size_t i) {
-        if (decodedRaw_.isNullAt(i)) {
-          return;
+      if (rows.isAllSelected()) {
+        auto end = rows.end();
+        for (auto i = 0; i < end; ++i) {
+          if (i + kPrefetchDistance < end) {
+            __builtin_prefetch(groups[i + kPrefetchDistance]);
+          }
+          if (!decodedRaw_.isNullAt(i)) {
+            updateNonNullValue(
+                groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
+          }
         }
-        updateNonNullValue(
-            groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
-      });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (decodedRaw_.isNullAt(i)) {
+            return;
+          }
+          updateNonNullValue(
+              groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
+        });
+      }
     } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInput>();
-      rows.applyToSelected([&](vector_size_t i) {
-        updateNonNullValue<false>(groups[i], data[i]);
-      });
+      if (rows.isAllSelected()) {
+        auto end = rows.end();
+        for (auto i = 0; i < end; ++i) {
+          if (i + kPrefetchDistance < end) {
+            __builtin_prefetch(groups[i + kPrefetchDistance]);
+          }
+          updateNonNullValue<false>(groups[i], data[i]);
+        }
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<false>(groups[i], data[i]);
+        });
+      }
     } else {
-      rows.applyToSelected([&](vector_size_t i) {
-        updateNonNullValue(
-            groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
-      });
+      if (rows.isAllSelected()) {
+        auto end = rows.end();
+        for (auto i = 0; i < end; ++i) {
+          if (i + kPrefetchDistance < end) {
+            __builtin_prefetch(groups[i + kPrefetchDistance]);
+          }
+          updateNonNullValue(
+              groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
+        }
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue(
+              groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
+        });
+      }
     }
   }
 

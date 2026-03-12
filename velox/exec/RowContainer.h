@@ -187,6 +187,22 @@ class RowColumn {
       ++nonNullCount_;
     }
 
+    // Batch add for fixed-width non-null columns: all cells have same size.
+    void addFixedSizeCells(int32_t bytes, int32_t count) {
+      if (count <= 0) {
+        return;
+      }
+      if (UNLIKELY(nonNullCount_ == 0)) {
+        minBytes_ = bytes;
+        maxBytes_ = bytes;
+      } else {
+        minBytes_ = std::min(minBytes_, bytes);
+        maxBytes_ = std::max(maxBytes_, bytes);
+      }
+      sumBytes_ += static_cast<uint64_t>(bytes) * count;
+      nonNullCount_ += count;
+    }
+
     void addNullCell() {
       ++nullCount_;
     }
@@ -749,6 +765,11 @@ class RowContainer {
     normalizedKeySize_ = 0;
   }
 
+  /// Returns true if newly allocated rows include normalized key space.
+  bool normalizedKeysEnabled() const {
+    return normalizedKeySize_ > 0;
+  }
+
   RowColumn columnAt(int32_t index) const {
     return rowColumns_[index];
   }
@@ -1099,7 +1120,27 @@ class RowContainer {
     for (int32_t i = 0; i < rows.size(); ++i) {
       storeWithNulls<Kind>(
           decoded, i, isKey, rows[i], offset, nullByte, nullMask, column);
-      updateColumnStats(decoded, i, rows[i], column);
+    }
+    // Batch stats update: defer to per-row for nullable columns since
+    // we need to check each row's null status. But for fixed-width types,
+    // avoid the type dispatch overhead in the per-row path.
+    if (!rowColumnsStats_.empty() &&
+        column < static_cast<int32_t>(types_.size())) {
+      if (types_[column]->isFixedWidth()) {
+        auto fixedSize = fixedSizeAt(column);
+        auto& stats = rowColumnsStats_[column];
+        for (int32_t i = 0; i < rows.size(); ++i) {
+          if (decoded.isNullAt(i)) {
+            stats.addNullCell();
+          } else {
+            stats.addCellSize(fixedSize);
+          }
+        }
+      } else {
+        for (int32_t i = 0; i < rows.size(); ++i) {
+          updateColumnStats(decoded, i, rows[i], column);
+        }
+      }
     }
   }
 
@@ -1112,7 +1153,18 @@ class RowContainer {
       int32_t column) {
     for (int32_t i = 0; i < rows.size(); ++i) {
       storeNoNulls<Kind>(decoded, i, isKey, rows[i], offset);
-      updateColumnStats(decoded, i, rows[i], column);
+    }
+    // Batch stats update: for non-null columns, skip per-row dispatch.
+    if (!rowColumnsStats_.empty() &&
+        column < static_cast<int32_t>(types_.size())) {
+      auto& stats = rowColumnsStats_[column];
+      if (types_[column]->isFixedWidth()) {
+        stats.addFixedSizeCells(fixedSizeAt(column), rows.size());
+      } else {
+        for (int32_t i = 0; i < rows.size(); ++i) {
+          updateColumnStats(decoded, i, rows[i], column);
+        }
+      }
     }
   }
 

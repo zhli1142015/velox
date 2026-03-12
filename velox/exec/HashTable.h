@@ -459,6 +459,11 @@ class BaseHashTable {
     return static_cast<uint8_t>(hash >> 38) | 0x80;
   }
 
+  // 16-bit tag for NKBucket (8-slot). Uses 15 bits of hash + high bit set.
+  static uint16_t hashTag16(uint64_t hash) {
+    return static_cast<uint16_t>(hash >> 38) | 0x8000;
+  }
+
   /// Loads a vector of tags for bulk comparison. Disables tsan errors
   /// because with parallel join build different ranges of the table
   /// are filled by different threads, after which the main thread
@@ -645,9 +650,7 @@ class HashTable : public BaseHashTable {
   void clear(bool freeTable) override;
 
   int64_t allocatedBytes() const override {
-    // For each row: sizeof(char*) per table entry + memory
-    // allocated with MemoryAllocator for fixed-width rows and strings.
-    return sizeof(char*) * capacity_ + rows_->allocatedBytes();
+    return effectiveSlotSize() * capacity_ + rows_->allocatedBytes();
   }
 
   HashStringAllocator* stringAllocator() override {
@@ -721,22 +724,19 @@ class HashTable : public BaseHashTable {
 
   uint64_t hashTableSizeIncrease(int32_t numNewDistinct) const override {
     if (numDistinct_ + numNewDistinct > rehashSize()) {
-      // If rehashed, the table adds size_ entries (i.e. doubles),
-      // adding one pointer worth for each new position.  (16 tags, 16 6 byte
-      // pointers, 16 bytes padding).
-      return capacity_ * tableSlotSize();
+      return capacity_ * effectiveSlotSize();
     }
     return 0;
   }
 
   uint64_t estimateHashTableSize(uint64_t numDistinct) const override {
-    // Take the max of max size in array mode and estimated size in non-array
-    // mode.
+    // Use worst-case slot size (kNK=16) since mode may change.
+    constexpr size_t kMaxSlotSize = kNKBucketSize / NKBucket::kNumSlots;
     const uint64_t maxByteSizeInArrayMode = kArrayHashMaxSize * tableSlotSize();
     return bits::roundUp(
         std::max(
             maxByteSizeInArrayMode,
-            newHashTableEntries(numDistinct, 0) * tableSlotSize()),
+            newHashTableEntries(numDistinct, 0) * kMaxSlotSize),
         memory::AllocationTraits::kPageSize);
   }
 
@@ -831,10 +831,87 @@ class HashTable : public BaseHashTable {
   static_assert(sizeof(Bucket) == 128);
   static constexpr uint64_t kBucketSize = sizeof(Bucket);
 
+  // 8-slot 128B bucket for kNormalizedKey mode. Fits in exactly one ALP pair
+  // (2 cache lines), giving zero cold cache access for ALL slots from a single
+  // prefetch. Tags are 2B (16-bit fingerprint, FP rate 1/32768). NKs are 8B
+  // aligned for direct loads. Pointers use safe 6B read/write.
+  //
+  // Layout: tags[16B] + NK[64B] + ptr[48B] = 128B
+  //   CL0 (0-63):   tags[0..15] + NK[0..5]
+  //   CL1 (64-127): NK[6..7] + ptr[0..7]
+  class NKBucket {
+   public:
+    static constexpr int32_t kNumSlots = 8;
+    static constexpr int32_t kTagSize = 2; // bytes per tag
+    static constexpr int32_t kTagsSize = 16; // 8 × 2B
+    static constexpr int32_t kNKSize = 8;
+    static constexpr int32_t kNKsOffset = 16; // after tags
+    static constexpr int32_t kPtrSize = 6;
+    static constexpr int32_t kPtrsOffset = 80; // after tags(16) + NKs(64)
+    static constexpr uint64_t kPtrMask = bits::lowMask(48);
+    // Tag sentinels (2B): high bit indicates occupied.
+    static constexpr uint16_t kEmptyTag = 0x0000;
+    static constexpr uint16_t kTombstoneTag = 0x7FFF;
+    // 8-bit mask for 8 slots.
+    static constexpr int32_t kFullMask = 0xFF;
+
+    // --- Tag accessors (2B per tag) ---
+    uint16_t tagAt(int32_t slot) const {
+      return reinterpret_cast<const uint16_t*>(this)[slot];
+    }
+
+    void setTag(int32_t slot, uint16_t tag) {
+      reinterpret_cast<uint16_t*>(this)[slot] = tag;
+    }
+
+    // --- NK accessors (8B aligned at offset 16 + slot*8) ---
+    uint64_t nkAt(int32_t slot) const {
+      return reinterpret_cast<const uint64_t*>(
+          reinterpret_cast<const char*>(this) + kNKsOffset)[slot];
+    }
+
+    void setNk(int32_t slot, uint64_t nk) {
+      reinterpret_cast<uint64_t*>(
+          reinterpret_cast<char*>(this) + kNKsOffset)[slot] = nk;
+    }
+
+    // --- Pointer accessors (safe 4B+2B read, 6B write) ---
+    // ptr[i] at offset 80 + i*6. Slot 7 at 122: 8B read would reach 129
+    // (past 128B bucket), so we use safe 4B+2B for all slots.
+    char* pointerAt(int32_t slot) const {
+      const char* base =
+          reinterpret_cast<const char*>(this) + kPtrsOffset + slot * kPtrSize;
+      uint32_t lo;
+      uint16_t hi;
+      std::memcpy(&lo, base, 4);
+      std::memcpy(&hi, base + 4, 2);
+      return reinterpret_cast<char*>(
+          static_cast<uint64_t>(lo) | (static_cast<uint64_t>(hi) << 32));
+    }
+
+    void setPointer(int32_t slot, void* pointer) {
+      char* base =
+          reinterpret_cast<char*>(this) + kPtrsOffset + slot * kPtrSize;
+      std::memcpy(base, &pointer, kPtrSize); // 6B write only
+    }
+
+   private:
+    char data_[128]; // raw storage, accessed via byte offsets
+  };
+
+  static_assert(sizeof(NKBucket) == 128);
+  static constexpr uint64_t kNKBucketSize = sizeof(NKBucket);
+  static constexpr double kNKLoadFactor = 0.85;
+
   // Returns the bucket at byte offset 'offset' from 'table_'.
   Bucket* bucketAt(int64_t offset) const {
     VELOX_DCHECK_EQ(0, offset & (kBucketSize - 1));
     return reinterpret_cast<Bucket*>(reinterpret_cast<char*>(table_) + offset);
+  }
+
+  NKBucket* nkBucketAt(int64_t offset) const {
+    return reinterpret_cast<NKBucket*>(
+        reinterpret_cast<char*>(table_) + offset);
   }
 
   // Returns the number of entries after which the table gets rehashed.
@@ -909,7 +986,16 @@ class HashTable : public BaseHashTable {
   void rehash(bool initNormalizedKeys, int8_t spillInputStartPartitionBit);
 
   uint64_t rehashSize() const {
-    return rehashSize(capacity_ - numTombstones_);
+    const double lf = (hashMode_ == HashMode::kNormalizedKey)
+        ? kNKLoadFactor
+        : kHashTableLoadFactor;
+    return (capacity_ - numTombstones_) * lf;
+  }
+
+  FOLLY_ALWAYS_INLINE size_t effectiveSlotSize() const {
+    return hashMode_ == HashMode::kNormalizedKey
+        ? kNKBucketSize / NKBucket::kNumSlots
+        : sizeof(void*);
   }
 
   void storeKeys(HashLookup& lookup, vector_size_t row);
@@ -1024,17 +1110,43 @@ class HashTable : public BaseHashTable {
 
   bool compareKeys(const char* group, const char* inserted);
 
-  template <bool isJoin, bool isNormalizedKey = false>
+  template <bool isJoin>
   void fullProbe(HashLookup& lookup, ProbeState& state, bool extraCheck);
 
-  // Shortcut path for group by with normalized keys.
-  void groupNormalizedKeyProbe(HashLookup& lookup);
+  // Width-parameterized and AMAC probes for kHash mode.
+  template <int32_t kWidth>
+  void groupHashProbeWidth(HashLookup& lookup);
+  void groupHashProbeAmac(HashLookup& lookup);
 
   // Array probe with SIMD.
   void arrayJoinProbe(HashLookup& lookup);
 
   // Shortcut for probe with normalized keys.
-  void joinNormalizedKeyProbe(HashLookup& lookup);
+  // --- NK (8-slot NKBucket) functions ---
+  void groupNKProbe(HashLookup& lookup);
+
+  template <int32_t kWidth>
+  void groupNKProbeWidth(HashLookup& lookup);
+
+  void groupNKProbeAmac(HashLookup& lookup);
+
+  char* insertNKEntry(
+      HashLookup& lookup,
+      int64_t bucketOffset,
+      int32_t slot,
+      vector_size_t row);
+
+  void storeNKRowPointer(
+      int64_t bucketOffset,
+      int32_t slot,
+      uint64_t hash,
+      char* row);
+
+  void
+  insertNKForGroupBy(char** groups, const uint64_t* hashes, int32_t numGroups);
+
+  void joinNKProbe(HashLookup& lookup);
+  // --- end NK functions ---
 
   // Returns the total size of the variable size 'columns' in 'row'.
   // NOTE: No checks are done in the method for performance considerations.
@@ -1056,7 +1168,6 @@ class HashTable : public BaseHashTable {
   // Finishes inserting an entry into a join hash table. If 'partitionInfo' is
   // not null and the insert falls out-side of the partition range, then insert
   // is not made but row is instead added to 'overflow' in 'partitionInfo'
-  template <bool isNormailizedKeyMode>
   void buildFullProbe(
       ProbeState& state,
       uint64_t hash,
@@ -1064,7 +1175,6 @@ class HashTable : public BaseHashTable {
       bool extraCheck,
       TableInsertPartitionInfo* partitionInfo);
 
-  template <bool isNormailizedKeyMode>
   void insertForJoinWithPrefetch(
       char** groups,
       const uint64_t* hashes,
@@ -1101,9 +1211,8 @@ class HashTable : public BaseHashTable {
   // Returns the byte offset of the next bucket from 'offset'. Wraps around at
   // the end of the table.
   int64_t nextBucketOffset(int64_t bucketOffset) const {
-    VELOX_DCHECK_EQ(0, bucketOffset & (kBucketSize - 1));
-    VELOX_DCHECK_LT(bucketOffset, sizeMask_);
-    return sizeMask_ & (bucketOffset + kBucketSize);
+    VELOX_DCHECK_EQ(0, bucketOffset & (activeBucketSize_ - 1));
+    return sizeMask_ & (bucketOffset + activeBucketSize_);
   }
 
   int64_t numBuckets() const {
@@ -1112,6 +1221,9 @@ class HashTable : public BaseHashTable {
 
   // Return the row pointer at 'slotIndex' of bucket at 'bucketOffset'.
   char* row(int64_t bucketOffset, int32_t slotIndex) const {
+    if (hashMode_ == HashMode::kNormalizedKey) {
+      return nkBucketAt(bucketOffset)->pointerAt(slotIndex);
+    }
     return bucketAt(bucketOffset)->pointerAt(slotIndex);
   }
 
@@ -1190,6 +1302,9 @@ class HashTable : public BaseHashTable {
   int64_t numTombstones_{0};
   // Counts the number of rehash() calls.
   int64_t numRehashes_{0};
+  // Active bucket size: kBucketSize (128) for all modes.
+  // kHash uses 16-slot Bucket, kNK uses 8-slot NKBucket, both 128B.
+  int64_t activeBucketSize_{kBucketSize};
   HashMode hashMode_ = HashMode::kArray;
   // Owns the memory of multiple build side hash join tables that are
   // combined into a single probe hash table.

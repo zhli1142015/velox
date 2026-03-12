@@ -205,3 +205,15 @@ if(VELOX_ENABLE_GEO)
     Folly::follybenchmark
   )
 endif()
+
+add_executable(velox_directory_partition_benchmark DirectoryPartitionBenchmark.cpp)
+
+target_link_libraries(
+  velox_directory_partition_benchmark
+  velox_exec
+  velox_exec_test_lib
+  velox_aggregates
+  velox_functions_prestosql
+  velox_vector_test_lib
+  Folly::follybenchmark
+)
