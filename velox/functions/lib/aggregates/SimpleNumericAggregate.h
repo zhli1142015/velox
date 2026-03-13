@@ -119,33 +119,83 @@ class SimpleNumericAggregate : public exec::Aggregate {
       }
     }
 
+    static constexpr int32_t kPrefetchDistance = 32;
+
     if (decoded.isConstantMapping()) {
       if (!decoded.isNullAt(0)) {
         auto value = decoded.valueAt<TValue>(0);
-        rows.applyToSelected([&](vector_size_t i) {
-          updateNonNullValue<tableHasNulls, TData>(
-              groups[i], TData(value), updateSingleValue);
-        });
+        if (rows.isAllSelected()) {
+          auto end = rows.end();
+          for (auto i = 0; i < end; ++i) {
+            if (i + kPrefetchDistance < end) {
+              __builtin_prefetch(groups[i + kPrefetchDistance]);
+            }
+            updateNonNullValue<tableHasNulls, TData>(
+                groups[i], TData(value), updateSingleValue);
+          }
+        } else {
+          rows.applyToSelected([&](vector_size_t i) {
+            updateNonNullValue<tableHasNulls, TData>(
+                groups[i], TData(value), updateSingleValue);
+          });
+        }
       }
     } else if (decoded.mayHaveNulls()) {
-      rows.applyToSelected([&](vector_size_t i) {
-        if (decoded.isNullAt(i)) {
-          return;
+      if (rows.isAllSelected()) {
+        auto end = rows.end();
+        for (auto i = 0; i < end; ++i) {
+          if (i + kPrefetchDistance < end) {
+            __builtin_prefetch(groups[i + kPrefetchDistance]);
+          }
+          if (!decoded.isNullAt(i)) {
+            updateNonNullValue<tableHasNulls, TData>(
+                groups[i],
+                TData(decoded.valueAt<TValue>(i)),
+                updateSingleValue);
+          }
         }
-        updateNonNullValue<tableHasNulls, TData>(
-            groups[i], TData(decoded.valueAt<TValue>(i)), updateSingleValue);
-      });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (decoded.isNullAt(i)) {
+            return;
+          }
+          updateNonNullValue<tableHasNulls, TData>(
+              groups[i], TData(decoded.valueAt<TValue>(i)), updateSingleValue);
+        });
+      }
     } else if (decoded.isIdentityMapping() && !std::is_same_v<TValue, bool>) {
       auto data = decoded.data<TValue>();
-      rows.applyToSelected([&](vector_size_t i) {
-        updateNonNullValue<tableHasNulls, TData>(
-            groups[i], TData(data[i]), updateSingleValue);
-      });
+      if (rows.isAllSelected()) {
+        auto end = rows.end();
+        for (auto i = 0; i < end; ++i) {
+          if (i + kPrefetchDistance < end) {
+            __builtin_prefetch(groups[i + kPrefetchDistance]);
+          }
+          updateNonNullValue<tableHasNulls, TData>(
+              groups[i], TData(data[i]), updateSingleValue);
+        }
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<tableHasNulls, TData>(
+              groups[i], TData(data[i]), updateSingleValue);
+        });
+      }
     } else {
-      rows.applyToSelected([&](vector_size_t i) {
-        updateNonNullValue<tableHasNulls, TData>(
-            groups[i], TData(decoded.valueAt<TValue>(i)), updateSingleValue);
-      });
+      if (rows.isAllSelected()) {
+        auto end = rows.end();
+        for (auto i = 0; i < end; ++i) {
+          if (i + kPrefetchDistance < end) {
+            __builtin_prefetch(groups[i + kPrefetchDistance]);
+          }
+          updateNonNullValue<tableHasNulls, TData>(
+              groups[i], TData(decoded.valueAt<TValue>(i)), updateSingleValue);
+        }
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<tableHasNulls, TData>(
+              groups[i], TData(decoded.valueAt<TValue>(i)), updateSingleValue);
+        });
+      }
     }
   }
 

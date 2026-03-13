@@ -1030,6 +1030,18 @@ class HashTable : public BaseHashTable {
   // Shortcut path for group by with normalized keys.
   void groupNormalizedKeyProbe(HashLookup& lookup);
 
+  // Width-parameterized probe for adaptive pipeline selection.
+  template <int32_t kWidth>
+  void groupNormalizedKeyProbeWidth(HashLookup& lookup, bool fuseMix);
+
+  // AMAC state machine probe for DRAM-bound large hash tables.
+  void groupNormalizedKeyProbeAmac(HashLookup& lookup);
+
+  // Width-parameterized and AMAC probes for kHash mode.
+  template <int32_t kWidth>
+  void groupHashProbeWidth(HashLookup& lookup);
+  void groupHashProbeAmac(HashLookup& lookup);
+
   // Array probe with SIMD.
   void arrayJoinProbe(HashLookup& lookup);
 
