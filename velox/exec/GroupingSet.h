@@ -20,8 +20,10 @@
 #include "velox/exec/AggregationMasks.h"
 #include "velox/exec/DistinctAggregations.h"
 #include "velox/exec/HashTable.h"
+#include "velox/exec/KeyComparator.h"
 #include "velox/exec/SortedAggregations.h"
 #include "velox/exec/Spiller.h"
+#include "velox/exec/SwissDedup.h"
 #include "velox/exec/VectorHasher.h"
 
 namespace facebook::velox::exec {
@@ -415,6 +417,23 @@ class GroupingSet {
   std::vector<char*> firstGroup_;
 
   folly::Synchronized<common::SpillStats>* const spillStats_;
+
+  /// ── Batch Dedup ──
+
+  /// Dedup engine for finding duplicate keys within a batch.
+  SwissDedup batchDedup_;
+  /// Temp buffer: unique row indices from dedup compute.
+  raw_vector<vector_size_t> dedupUniqueRows_;
+  /// Temp buffer: result[row] = first row with same key.
+  raw_vector<vector_size_t> dedupResult_;
+  /// Saved rows buffer for swap during dedup.
+  raw_vector<vector_size_t> savedRows_;
+  /// Key comparator for SwissDedup's keysEqual callback.
+  KeyComparator keyComparator_;
+
+  /// Computes the maximum unique-row ratio (numUnique/numRows) below which
+  /// dedup is profitable, based on hash table size and hash mode.
+  double computeDedupMaxUniqueRatio() const;
 };
 
 class AggregationInputSpiller : public SpillerBase {

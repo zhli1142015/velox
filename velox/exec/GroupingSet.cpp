@@ -258,7 +258,67 @@ void GroupingSet::addInputForActiveRows(
     return;
   }
 
+  // ── Batch Dedup: probe only unique keys ──
+  bool dedupActive = false;
+
+  if (batchDedup_.state() != SwissDedup::State::kDisabled &&
+      SwissDedup::shouldAttempt(lookup_->rows.size()) && !sortedAggregations_ &&
+      // Skip dedup when HashTable is small enough to fit L1 cache —
+      // probe is already cheap, dedup overhead > savings.
+      table_->numDistinct() > static_cast<uint64_t>(lookup_->rows.size()) * 2) {
+    auto numRows = static_cast<int32_t>(lookup_->rows.size());
+    auto maxRow = lookup_->rows.back() + 1;
+    dedupResult_.resize(maxRow);
+    dedupUniqueRows_.resize(numRows);
+
+    const vector_size_t* dictIndices = nullptr;
+    int32_t dictSize = 0;
+    if (table_->hashers().size() == 1) {
+      auto& dv = table_->hashers()[0]->decodedVector();
+      if (!dv.isIdentityMapping() && !dv.isConstantMapping()) {
+        dictIndices = dv.indices();
+        dictSize = static_cast<int32_t>(dv.base()->size());
+      }
+    }
+
+    keyComparator_.prepare(table_->hashers());
+    auto [numUnique, usedDict] = batchDedup_.computeAutoDetect(
+        table_->hashMode(),
+        lookup_->hashes.data(),
+        lookup_->rows.data(),
+        numRows,
+        dedupUniqueRows_.data(),
+        dedupResult_.data(),
+        dictIndices,
+        dictSize,
+        table_->hashMode() == BaseHashTable::HashMode::kArray
+            ? static_cast<int64_t>(table_->capacity())
+            : 0,
+        SwissDedup::kEarlyStopRowAgg,
+        keyComparator_);
+
+    auto maxUniqueRatio = usedDict ? 1.0 : computeDedupMaxUniqueRatio();
+
+    if (numUnique < static_cast<int32_t>(numRows * maxUniqueRatio)) {
+      dedupActive = true;
+      std::swap(savedRows_, lookup_->rows);
+      std::swap(lookup_->rows, dedupUniqueRows_);
+      lookup_->rows.resize(numUnique);
+    }
+  }
+
   table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
+
+  // ── Expand hits for duplicate rows ──
+  if (dedupActive) {
+    std::swap(lookup_->rows, savedRows_); // restore all rows
+    for (auto row : lookup_->rows) {
+      if (dedupResult_[row] != row) {
+        lookup_->hits[row] = lookup_->hits[dedupResult_[row]];
+      }
+    }
+  }
+
   masks_.addInput(input, activeRows_);
 
   auto* groups = lookup_->hits.data();
@@ -312,6 +372,48 @@ void GroupingSet::addInputForActiveRows(
     }
     sortedAggregations_->addInput(groups, input);
   }
+}
+
+double GroupingSet::computeDedupMaxUniqueRatio() const {
+  // Cost model for per-batch dedup activation threshold.
+  //
+  // Aggregation dedup only saves probe cost (groupProbe lookup). Unlike join
+  // dedup, it does NOT save agg function calls or output extraction.
+  //
+  // Dedup is profitable when: (1 - r) × probeCost > dedupOverhead
+  //   r = numUnique / numRows
+  //   dedupOverhead depends on hash mode (SwissDedup algorithm cost + expand)
+  //   probeCost depends on hash table size (cache tier)
+  //
+  // Solving: r < 1 - dedupOverhead / probeCost
+  // With 2× safety margin: r < 1 - 2 × dedupOverhead / probeCost
+
+  // Dedup overhead per row (ns): dedup compute + hit expansion.
+  double dedupOverheadNs;
+  switch (table_->hashMode()) {
+    case BaseHashTable::HashMode::kArray:
+      dedupOverheadNs = 1.3; // DirectIndex 0.3 + expand 1.0
+      break;
+    case BaseHashTable::HashMode::kNormalizedKey:
+      dedupOverheadNs = 2.0; // PersistentSlot 1.0 + expand 1.0
+      break;
+    case BaseHashTable::HashMode::kHash:
+      dedupOverheadNs = 3.7; // SwissTable 2.7 + expand 1.0
+      break;
+    default:
+      dedupOverheadNs = 3.7;
+      break;
+  }
+
+  // Probe cost scales with hash table size (cache level proxy).
+  auto htDistinct = table_->numDistinct();
+  double probeCostNs = SwissDedup::estimateProbeCostNs(htDistinct);
+
+  constexpr double kSafetyMargin = 2.0;
+  double maxRatio = 1.0 - (dedupOverheadNs * kSafetyMargin) / probeCostNs;
+
+  // Clamp: need at least 2% dups (0.98), at least 50% dups (0.50) worst case.
+  return std::clamp(maxRatio, 0.50, 0.98);
 }
 
 void GroupingSet::addRemainingInput() {

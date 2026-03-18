@@ -207,6 +207,11 @@ class BaseHashTable {
 
     vector_size_t lastRowIndex{0};
     char* nextHit{nullptr};
+
+    // Probe dedup: when set, listJoinResults accounts for duplicate
+    // expansion when checking batch size limits. Each output row for
+    // probe row r counts as dupGroupSize[r] rows toward the limit.
+    const int32_t* dupGroupSize{nullptr};
   };
 
   struct RowsIterator {

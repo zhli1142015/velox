@@ -757,20 +757,23 @@ void HashProbe::addInput(RowVectorPtr input) {
 
   table_->prepareForJoinProbe(*lookup_.get(), input_, activeRows_, false);
 
+  // Dedup probe rows with identical keys so joinProbe() only looks up unique
+  // keys. Without filter, fillOutput() expands via DictionaryVector
+  // (zero-copy). With filter, results are expanded before evalFilter.
+  inputHasDuplicates_ = false;
+  // LEFT_SEMI_FILTER + filter excluded: tracker requires monotonic probe order.
+  const bool canProbeDedup = !joinIncludesMissesFromLeft(joinType_) &&
+      !(filter_ && isLeftSemiFilterJoin(joinType_)) &&
+      batchDedup_.state() != SwissDedup::State::kDisabled &&
+      SwissDedup::shouldAttempt(lookup_->rows.size());
+
   if (joinIncludesMissesFromLeft(joinType_)) {
-    // Make sure to allocate an entry in 'hits' for every input row to allow for
-    // including rows without a match in the output. Also, make sure to
-    // initialize all 'hits' to nullptr as HashTable::joinProbe will only
-    // process activeRows_.
     auto& hits = lookup_->hits;
     hits.resize(numInput);
     std::fill(hits.data(), hits.data() + numInput, nullptr);
     if (!lookup_->rows.empty()) {
       table_->joinProbe(*lookup_);
     }
-
-    // Update lookup_->rows to include all input rows, not just
-    // activeRows_ as we need to include all rows in the output.
     auto& rows = lookup_->rows;
     rows.resize(numInput);
     std::iota(rows.begin(), rows.end(), 0);
@@ -780,10 +783,14 @@ void HashProbe::addInput(RowVectorPtr input) {
       return;
     }
     lookup_->hits.resize(lookup_->rows.back() + 1);
-    table_->joinProbe(*lookup_);
+    probeWithDedup(canProbeDedup, lookup_->rows.back() + 1);
   }
 
   resultIter_->reset(*lookup_);
+  // With filter, we expand dedup results in expandDedupForFilter, so don't
+  // let the iterator account for duplicates in its batch counting.
+  resultIter_->dupGroupSize =
+      (inputHasDuplicates_ && !filter_) ? dupGroupSize_.data() : nullptr;
 }
 
 void HashProbe::prepareOutput(vector_size_t size) {
@@ -853,18 +860,41 @@ void HashProbe::fillLeftSemiProjectMatchColumn(vector_size_t size) {
 }
 
 void HashProbe::fillOutput(vector_size_t size) {
-  prepareOutput(size);
+  auto outputSize = size;
+
+  const bool outputHasDuplicates = inputHasDuplicates_ && !filter_;
+
+  if (outputHasDuplicates) {
+    outputSize = expandDuplicateProbeRows(size);
+  }
+
+  prepareOutput(outputSize);
 
   for (auto [in, out] : projectedInputColumns_) {
-    // Load input vector if it is being split into multiple batches. It is not
-    // safe to wrap unloaded LazyVector into two different dictionaries.
     ensureLoadedIfNotAtEnd(in);
-    auto inputChild = input_->childAt(in);
-    output_->childAt(out) = wrapChild(size, outputRowMapping_, inputChild);
+    output_->childAt(out) = wrapChild(
+        outputSize,
+        outputHasDuplicates ? expandProbe_ : outputRowMapping_,
+        input_->childAt(in));
   }
 
   if (isLeftSemiProjectJoin(joinType_)) {
-    fillLeftSemiProjectMatchColumn(size);
+    fillLeftSemiProjectMatchColumn(outputSize);
+  } else if (outputHasDuplicates) {
+    // Extract build cols for unique rows, then wrap in DictVector.
+    buildChildren_.resize(outputType_->size());
+    extractColumns(
+        table_.get(),
+        folly::Range<char* const*>(outputTableRows_->as<char*>(), size),
+        tableOutputProjections_,
+        pool(),
+        outputType_->children(),
+        buildChildren_);
+    for (auto projection : tableOutputProjections_) {
+      auto rc = projection.outputChannel;
+      output_->childAt(rc) = BaseVector::wrapInDictionary(
+          nullptr, expandBuild_, outputSize, std::move(buildChildren_[rc]));
+    }
   } else {
     extractColumns(
         table_.get(),
@@ -1200,14 +1230,21 @@ RowVectorPtr HashProbe::getOutputInternal(bool toSpillOutput) {
           operatorCtx_->driverCtx()->queryConfig().preferredOutputBatchBytes());
     }
 
-    // We are done processing the input batch if there are no more joined rows
-    // to process and the NoMatchDetector isn't carrying forward a row that
-    // still needs to be written to the output.
     if (!numOut && !noMatchDetector_.hasLastMissedRow()) {
       input_ = nullptr;
       return nullptr;
     }
     VELOX_CHECK_LE(numOut, outputBatchSize);
+
+    // Expand dedup results back to all original probe rows before filter.
+    if (inputHasDuplicates_ && filter_) {
+      numOut = expandDedupForFilter(numOut);
+      // Re-extract pointers after potential reallocation.
+      mapping = folly::Range(
+          outputRowMapping_->asMutable<vector_size_t>(),
+          static_cast<vector_size_t>(numOut));
+      outputTableRows = outputTableRows_->asMutable<char*>();
+    }
 
     numOut = evalFilter(numOut);
 
@@ -2141,6 +2178,9 @@ void HashProbe::clearBuffers() {
   output_.reset();
   nonSpillInputIndicesBuffer_.reset();
   spillInputIndicesBuffers_.clear();
+  expandBuild_.reset();
+  expandProbe_.reset();
+  buildChildren_.clear();
   if (filter_ == nullptr) {
     return;
   }
@@ -2151,6 +2191,228 @@ void HashProbe::clearBuffers() {
   filterTableResult_.resize(1);
   operatorCtx_->execCtx()->vectorPool()->clear();
   filter_->clearCache();
+}
+
+double HashProbe::computeDedupMaxUniqueRatio() const {
+  // Cost model for per-batch dedup activation threshold.
+  //
+  // Dedup is profitable when: (1 - r) × savings > overhead
+  //   r = numUnique / numRows (unique ratio)
+  //   savings = probeCost + M × (listCost + extractCost)
+  //   overhead ≈ 5ns/row (dedup compute + CSR build + expansion)
+  //
+  // Solving: r < 1 - overhead / savings
+  // With 2× safety margin: r < 1 - 2 × overhead / savings
+  constexpr double kSafetyMargin = 2.0;
+  constexpr double kListCostNs = 2.0;
+  constexpr double kExtractFixedNs = 15.0;
+  constexpr double kExtractStringNs = 25.0;
+
+  // Overhead includes dedup compute + CSR build.
+  // With filter, add expansion cost (replicating results back to all rows).
+  double overheadNs = filter_ ? 7.0 : 5.0;
+
+  // Probe cost scales with hash table size (cache level).
+  auto htDistinct = table_->numDistinct();
+  double probeCostNs = SwissDedup::estimateProbeCostNs(htDistinct);
+
+  // M: average build-side matches per key.
+  double M = 1.0;
+  if (htDistinct > 0 && table_->hasDuplicateKeys()) {
+    M = static_cast<double>(table_->rows()->numRows()) / htDistinct;
+  }
+
+  // Extract cost per output row: only saved without filter (DictVector path).
+  double extractCostNs = 0;
+  if (!filter_) {
+    for (const auto& proj : tableOutputProjections_) {
+      auto type = outputType_->childAt(proj.outputChannel);
+      extractCostNs +=
+          type->isFixedWidth() ? kExtractFixedNs : kExtractStringNs;
+    }
+  }
+
+  double savingsPerDup = probeCostNs + M * (kListCostNs + extractCostNs);
+  double maxRatio = 1.0 - (overheadNs * kSafetyMargin) / savingsPerDup;
+
+  // Clamp: require at least 2% dups (0.98), need at least 50% dups (0.50) in
+  // worst case (e.g. SEMI_FILTER with 0 build cols on tiny hash table).
+  return std::clamp(maxRatio, 0.50, 0.98);
+}
+
+vector_size_t HashProbe::expandDuplicateProbeRows(
+    vector_size_t numUniqueResults) {
+  auto* rawMapping = outputRowMapping_->as<vector_size_t>();
+
+  vector_size_t outputSize = 0;
+  for (int32_t j = 0; j < numUniqueResults; ++j) {
+    outputSize += dupGroupSize_[rawMapping[j]];
+  }
+
+  // Reuse buffers; reallocate if null, shared, or too small.
+  auto requiredBytes = outputSize * sizeof(vector_size_t);
+  if (!expandBuild_ || !expandBuild_->isMutable() ||
+      expandBuild_->size() < requiredBytes) {
+    expandBuild_ = allocateIndices(outputSize, pool());
+  }
+  if (!expandProbe_ || !expandProbe_->isMutable() ||
+      expandProbe_->size() < requiredBytes) {
+    expandProbe_ = allocateIndices(outputSize, pool());
+  }
+  auto* rawExpandBuild = expandBuild_->asMutable<vector_size_t>();
+  auto* rawExpandProbe = expandProbe_->asMutable<vector_size_t>();
+
+  int32_t pos = 0;
+  for (int32_t j = 0; j < numUniqueResults; ++j) {
+    auto uniqueRow = rawMapping[j];
+    auto start = dupGroupStart_[uniqueRow];
+    auto count = dupGroupSize_[uniqueRow];
+    // Bulk copy probe row indices (contiguous in dupGroupRows_).
+    memcpy(
+        rawExpandProbe + pos,
+        dupGroupRows_.data() + start,
+        count * sizeof(vector_size_t));
+    // Bulk fill build indices (all map to the same unique result row).
+    std::fill(rawExpandBuild + pos, rawExpandBuild + pos + count, j);
+    pos += count;
+  }
+
+  return outputSize;
+}
+
+int32_t HashProbe::expandDedupForFilter(int32_t numOut) {
+  if (numOut == 0) {
+    return 0;
+  }
+
+  auto* uniqueMapping = outputRowMapping_->as<vector_size_t>();
+  auto* uniqueTableRows = outputTableRows_->as<char*>();
+
+  int32_t expandedSize = 0;
+  for (int32_t i = 0; i < numOut; ++i) {
+    expandedSize += dupGroupSize_[uniqueMapping[i]];
+  }
+
+  // Save unique results before reallocation.
+  dedupFilterTempMapping_.resize(numOut);
+  dedupFilterTempTableRows_.resize(numOut);
+  memcpy(
+      dedupFilterTempMapping_.data(),
+      uniqueMapping,
+      numOut * sizeof(vector_size_t));
+  memcpy(
+      dedupFilterTempTableRows_.data(),
+      uniqueTableRows,
+      numOut * sizeof(char*));
+
+  if (expandedSize > outputTableRowsCapacity_) {
+    outputTableRowsCapacity_ = expandedSize;
+  }
+  auto* expandedMapping =
+      initializeRowNumberMapping(
+          outputRowMapping_, outputTableRowsCapacity_, pool())
+          .data();
+  auto* expandedTableRows =
+      initBuffer<char*>(outputTableRows_, outputTableRowsCapacity_, pool());
+
+  int32_t pos = 0;
+  for (int32_t i = 0; i < numOut; ++i) {
+    auto uniqueRow = dedupFilterTempMapping_[i];
+    auto buildPtr = dedupFilterTempTableRows_[i];
+    auto start = dupGroupStart_[uniqueRow];
+    auto count = dupGroupSize_[uniqueRow];
+    memcpy(
+        expandedMapping + pos,
+        dupGroupRows_.data() + start,
+        count * sizeof(vector_size_t));
+    std::fill(
+        expandedTableRows + pos, expandedTableRows + pos + count, buildPtr);
+    pos += count;
+  }
+
+  return expandedSize;
+}
+
+void HashProbe::probeWithDedup(bool canDedup, int32_t dedupResultSize) {
+  if (!canDedup) {
+    table_->joinProbe(*lookup_);
+    return;
+  }
+
+  auto numRows = static_cast<int32_t>(lookup_->rows.size());
+  dedupResult_.resize(dedupResultSize);
+  dedupUniqueRows_.resize(numRows);
+
+  const vector_size_t* dictIndices = nullptr;
+  int32_t dictSize = 0;
+  if (keyChannels_.size() == 1) {
+    auto& dv = lookup_->hashers[0]->decodedVector();
+    if (!dv.isIdentityMapping() && !dv.isConstantMapping()) {
+      dictIndices = dv.indices();
+      dictSize = static_cast<int32_t>(dv.base()->size());
+    }
+  }
+
+  keyComparator_.prepare(lookup_->hashers);
+  auto [numUnique, usedDict] = batchDedup_.computeAutoDetect(
+      table_->hashMode(),
+      lookup_->hashes.data(),
+      lookup_->rows.data(),
+      numRows,
+      dedupUniqueRows_.data(),
+      dedupResult_.data(),
+      dictIndices,
+      dictSize,
+      table_->hashMode() == BaseHashTable::HashMode::kArray
+          ? static_cast<int64_t>(table_->capacity())
+          : 0,
+      SwissDedup::kEarlyStopRowProbe,
+      keyComparator_);
+
+  auto maxUniqueRatio = usedDict ? 1.0 : computeDedupMaxUniqueRatio();
+
+  if (numUnique < static_cast<int32_t>(numRows * maxUniqueRatio)) {
+    inputHasDuplicates_ = true;
+    auto* rawRows = lookup_->rows.data();
+
+    // Build flat adjacency list (CSR format).
+    // Step 1: Zero only slots that will be used, then count.
+    dupGroupStart_.resize(dedupResultSize);
+    for (int32_t i = 0; i < numUnique; ++i) {
+      dupGroupStart_[dedupUniqueRows_[i]] = 0;
+    }
+    for (int32_t i = 0; i < numRows; ++i) {
+      dupGroupStart_[dedupResult_[rawRows[i]]]++;
+    }
+
+    // Step 2: Exclusive prefix sum -> start offsets. Save sizes.
+    dupGroupSize_.resize(dedupResultSize);
+    int32_t total = 0;
+    for (int32_t i = 0; i < numUnique; ++i) {
+      auto u = dedupUniqueRows_[i];
+      dupGroupSize_[u] = dupGroupStart_[u];
+      dupGroupStart_[u] = total;
+      total += dupGroupSize_[u];
+    }
+
+    // Step 3: Scatter rows into adjacency list.
+    dupGroupRows_.resize(total);
+    for (int32_t i = 0; i < numRows; ++i) {
+      auto row = rawRows[i];
+      dupGroupRows_[dupGroupStart_[dedupResult_[row]]++] = row;
+    }
+    // Restore start offsets.
+    for (int32_t i = 0; i < numUnique; ++i) {
+      auto u = dedupUniqueRows_[i];
+      dupGroupStart_[u] -= dupGroupSize_[u];
+    }
+
+    std::swap(lookup_->rows, dedupUniqueRows_);
+    lookup_->rows.resize(numUnique);
+    table_->joinProbe(*lookup_);
+  } else {
+    table_->joinProbe(*lookup_);
+  }
 }
 
 } // namespace facebook::velox::exec

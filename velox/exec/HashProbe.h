@@ -17,8 +17,10 @@
 
 #include "velox/exec/HashBuild.h"
 #include "velox/exec/HashTable.h"
+#include "velox/exec/KeyComparator.h"
 #include "velox/exec/Operator.h"
 #include "velox/exec/ProbeOperatorState.h"
+#include "velox/exec/SwissDedup.h"
 #include "velox/exec/VectorHasher.h"
 
 namespace facebook::velox::exec {
@@ -740,6 +742,48 @@ class HashProbe : public Operator {
   // The index of the row container in the current hash table that this hash
   // probe oprator is processing to output build-side rows.
   int buildSideOutputRowContainerId_{-1};
+
+  /// ── Batch Dedup ──
+
+  /// Dedup engine dispatching to DirectIndex/PersistentSlot/SwissTable.
+  SwissDedup batchDedup_;
+  /// Maps each row to the first row with the same key.
+  raw_vector<vector_size_t> dedupResult_;
+  /// Unique row indices produced by SwissDedup.
+  raw_vector<vector_size_t> dedupUniqueRows_;
+  /// True if the current input batch was deduped in addInput().
+  bool inputHasDuplicates_{false};
+  /// Flat adjacency list: dupGroupRows_[start[u]..+size[u]) = all original
+  /// rows sharing the same key as unique row u.
+  raw_vector<int32_t> dupGroupStart_;
+  raw_vector<int32_t> dupGroupSize_;
+  raw_vector<vector_size_t> dupGroupRows_;
+  /// Reusable expansion index buffers for fillOutput().
+  BufferPtr expandBuild_;
+  BufferPtr expandProbe_;
+  /// Reusable temp vectors for build-side column extraction.
+  std::vector<VectorPtr> buildChildren_;
+  /// Temp buffers for expandDedupForFilter().
+  raw_vector<vector_size_t> dedupFilterTempMapping_;
+  raw_vector<char*> dedupFilterTempTableRows_;
+  /// Key comparator for SwissDedup's keysEqual callback.
+  KeyComparator keyComparator_;
+
+  /// Expands unique probe results to include all duplicate rows.
+  vector_size_t expandDuplicateProbeRows(vector_size_t numUniqueResults);
+
+  /// Expands dedup results for filter evaluation: replicates each unique
+  /// (probeRow, buildPtr) pair for all original rows sharing the same key.
+  int32_t expandDedupForFilter(int32_t numOut);
+
+  /// Computes the maximum unique-row ratio (numUnique/numRows) below which
+  /// dedup is profitable for the current batch, based on a cost model
+  /// considering hash table size, build-side fan-out, and output columns.
+  double computeDedupMaxUniqueRatio() const;
+
+  /// Runs probe with optional dedup. If canDedup is false, directly calls
+  /// joinProbe. Otherwise, runs SwissDedup and builds CSR adjacency list.
+  void probeWithDedup(bool canDedup, int32_t dedupResultSize);
 };
 
 inline std::ostream& operator<<(std::ostream& os, ProbeOperatorState state) {

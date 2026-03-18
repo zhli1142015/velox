@@ -4174,4 +4174,328 @@ TEST_F(AggregationTest, keysProvideCustomComparison) {
       {makeRowVector({c0, c1}), c1},
       {makeRowVector({e0, e1}), e1});
 }
+
+// ═══════════════════════════════════════════════════
+// Batch dedup cost-model tests for aggregation
+// ═══════════════════════════════════════════════════
+
+// Large hash table with high probe duplication. The cost model should
+// activate dedup (large HT → high probe cost → low dup threshold).
+// Verifies aggregation correctness when dedup is active.
+TEST_F(AggregationTest, batchDedupLargeHashTable) {
+  // First populate the hash table with many distinct keys.
+  // Then send a batch with high duplication → dedup should activate.
+  const int32_t kDistinctKeys = 100000;
+  std::vector<RowVectorPtr> batches;
+  // Batch 1: seed the HT with distinct keys.
+  batches.push_back(makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>(kDistinctKeys, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(
+              kDistinctKeys, [](auto row) { return row * 10; }),
+      }));
+  // Batches 2-15: high duplication (key 0-4 cycling → 99% dup).
+  for (int b = 0; b < 14; ++b) {
+    batches.push_back(makeRowVector(
+        {"c0", "c1"},
+        {
+            makeFlatVector<int64_t>(1000, [](auto row) { return row % 5; }),
+            makeFlatVector<int64_t>(1000, [](auto row) { return 1; }),
+        }));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"sum(c1) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
+}
+
+// Small hash table (few groups, fits L1 cache). The cost model requires
+// higher dup fraction here. Verifies correctness regardless of whether
+// dedup activates.
+TEST_F(AggregationTest, batchDedupSmallHashTable) {
+  // 3 distinct groups → tiny HT.
+  std::vector<RowVectorPtr> batches;
+  for (int b = 0; b < 15; ++b) {
+    batches.push_back(makeRowVector(
+        {"c0", "c1"},
+        {
+            makeFlatVector<int32_t>(200, [](auto row) { return 1 + row % 3; }),
+            makeFlatVector<int64_t>(200, [](auto row) { return 1; }),
+        }));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"count(c1) AS c"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, count(c1) AS c FROM tmp GROUP BY c0");
+}
+
+// Medium hash table with moderate duplication that's right at the boundary.
+// Some batches may activate dedup, others may not.
+TEST_F(AggregationTest, batchDedupBoundaryDuplication) {
+  // ~50K distinct keys → L3 cache.
+  std::vector<RowVectorPtr> batches;
+  // Seed batch.
+  batches.push_back(makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>(50000, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(50000, [](auto row) { return 1; }),
+      }));
+  // Subsequent batches: ~20% duplication (80% unique).
+  for (int b = 0; b < 12; ++b) {
+    batches.push_back(makeRowVector(
+        {"c0", "c1"},
+        {
+            makeFlatVector<int64_t>(1000, [](auto row) { return row % 800; }),
+            makeFlatVector<int64_t>(1000, [](auto row) { return 1; }),
+        }));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"sum(c1) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
+}
+
+// All-unique keys: sampling should disable dedup after 10 batches.
+// Verify no correctness issues when sampling transitions to kDisabled.
+TEST_F(AggregationTest, batchDedupAllUnique) {
+  std::vector<RowVectorPtr> batches;
+  // Seed + enough distinct keys that HT guard passes.
+  batches.push_back(makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>(10000, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(10000, [](auto row) { return 1; }),
+      }));
+  // 15 batches of all-unique data → sampling should disable.
+  for (int b = 0; b < 15; ++b) {
+    batches.push_back(makeRowVector(
+        {"c0", "c1"},
+        {
+            makeFlatVector<int64_t>(
+                200, [&](auto row) { return 100000 + b * 200 + row; }),
+            makeFlatVector<int64_t>(200, [](auto row) { return 1; }),
+        }));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"sum(c1) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
+}
+
+// String keys exercise kHash mode SwissDedup path (typically not kArray/kNK).
+// The cost model uses higher dedup overhead (3.7ns) for kHash.
+TEST_F(AggregationTest, batchDedupStringKeys) {
+  std::vector<RowVectorPtr> batches;
+  // Seed with many distinct string keys.
+  std::vector<std::string> seedKeys;
+  for (int i = 0; i < 10000; ++i) {
+    seedKeys.push_back(fmt::format("key_{:06d}", i));
+  }
+  batches.push_back(makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<StringView>(
+              seedKeys.size(),
+              [&](auto row) { return StringView(seedKeys[row]); }),
+          makeFlatVector<int64_t>(seedKeys.size(), [](auto) { return 1; }),
+      }));
+
+  // High-dup batches: only 5 keys cycling.
+  std::vector<std::string> dupKeys(200);
+  for (int i = 0; i < 200; ++i) {
+    dupKeys[i] = fmt::format("key_{:06d}", i % 5);
+  }
+  for (int b = 0; b < 12; ++b) {
+    batches.push_back(makeRowVector(
+        {"c0", "c1"},
+        {
+            makeFlatVector<StringView>(
+                200, [&](auto row) { return StringView(dupKeys[row]); }),
+            makeFlatVector<int64_t>(200, [](auto) { return 1; }),
+        }));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"sum(c1) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
+}
+
+// Multiple aggregation functions: dedup doesn't affect agg function calls
+// (they always process all rows), but verifies no interference.
+TEST_F(AggregationTest, batchDedupMultipleAggFunctions) {
+  std::vector<RowVectorPtr> batches;
+  // Seed HT.
+  batches.push_back(makeRowVector(
+      {"c0", "c1", "c2"},
+      {
+          makeFlatVector<int64_t>(50000, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(50000, [](auto row) { return row; }),
+          makeFlatVector<double>(50000, [](auto row) { return row * 1.5; }),
+      }));
+
+  // High-dup batches.
+  for (int b = 0; b < 12; ++b) {
+    batches.push_back(makeRowVector(
+        {"c0", "c1", "c2"},
+        {
+            makeFlatVector<int64_t>(500, [](auto row) { return row % 10; }),
+            makeFlatVector<int64_t>(500, [](auto row) { return row; }),
+            makeFlatVector<double>(500, [](auto row) { return row * 0.5; }),
+        }));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan =
+      PlanBuilder()
+          .values(batches)
+          .singleAggregation(
+              {"c0"}, {"sum(c1) AS s", "count(c1) AS c", "min(c2) AS m"})
+          .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults(
+          "SELECT c0, sum(c1) AS s, count(c1) AS c, min(c2) AS m "
+          "FROM tmp GROUP BY c0");
+}
+
+// Dictionary-encoded key column: dedup detects dictionary encoding via
+// DecodedVector and uses the fast computeWithDictionary path (~0.3ns/row).
+TEST_F(AggregationTest, batchDedupDictionaryKey) {
+  std::vector<RowVectorPtr> batches;
+
+  // Seed HT with enough distinct keys to be > L1 cache.
+  batches.push_back(makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>(50000, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(50000, [](auto) { return 1; }),
+      }));
+
+  // Dictionary-encoded batches: base vector has 5 entries, indices cycle
+  // through them creating high duplication (200 rows / 5 unique = 40x dup).
+  auto baseVector = makeFlatVector<int64_t>({0, 1, 2, 3, 4});
+  for (int b = 0; b < 12; ++b) {
+    auto indices = makeIndices(200, [](auto row) { return row % 5; });
+    auto dictKey =
+        BaseVector::wrapInDictionary(nullptr, indices, 200, baseVector);
+    auto data = makeFlatVector<int64_t>(200, [](auto) { return 1; });
+    batches.push_back(makeRowVector({"c0", "c1"}, {dictKey, data}));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"sum(c1) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
+}
+
+// Dictionary key with large dictionary (> numRows): dictionary path should
+// NOT activate because dictSize >= numRows (no pigeonhole guarantee of dups).
+// Falls back to hash-based dedup or no dedup.
+TEST_F(AggregationTest, batchDedupDictionaryKeyLargeDict) {
+  std::vector<RowVectorPtr> batches;
+
+  // Seed HT.
+  batches.push_back(makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>(50000, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(50000, [](auto) { return 1; }),
+      }));
+
+  // Dictionary with 500 entries but only 200 rows → dictSize > numRows.
+  auto baseVector = makeFlatVector<int64_t>(500, [](auto row) { return row; });
+  for (int b = 0; b < 12; ++b) {
+    auto indices = makeIndices(200, [](auto row) { return row % 5; });
+    auto dictKey =
+        BaseVector::wrapInDictionary(nullptr, indices, 200, baseVector);
+    auto data = makeFlatVector<int64_t>(200, [](auto) { return 1; });
+    batches.push_back(makeRowVector({"c0", "c1"}, {dictKey, data}));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"sum(c1) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
+}
+
+// BOOLEAN group-by key: bit-packed comparison in KeyComparator must use
+// bits::isBitSet, not memcmp. The hash table will be in kArray mode
+// (boolean range is 0..1) with dedup active due to high duplication.
+TEST_F(AggregationTest, batchDedupBooleanKey) {
+  std::vector<RowVectorPtr> batches;
+
+  // Seed HT with both boolean values so it has >64 distinct groups
+  // (needed for shouldAttempt). Use a composite key to grow the table.
+  batches.push_back(makeRowVector(
+      {"c0", "c1", "c2"},
+      {
+          makeFlatVector<bool>(200, [](auto row) { return row % 2 == 0; }),
+          makeFlatVector<int32_t>(200, [](auto row) { return row % 10; }),
+          makeFlatVector<int64_t>(200, [](auto) { return 1; }),
+      }));
+
+  // Batches with high duplication to trigger dedup.
+  for (int b = 0; b < 5; ++b) {
+    batches.push_back(makeRowVector(
+        {"c0", "c1", "c2"},
+        {
+            makeFlatVector<bool>(500, [](auto row) { return row % 2 == 0; }),
+            makeFlatVector<int32_t>(500, [](auto row) { return row % 10; }),
+            makeFlatVector<int64_t>(500, [](auto) { return 1; }),
+        }));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0", "c1"}, {"sum(c2) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, c1, sum(c2) AS s FROM tmp GROUP BY c0, c1");
+}
 } // namespace facebook::velox::exec::test

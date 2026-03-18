@@ -2061,6 +2061,9 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
   size_t numOut = 0;
   auto maxOut = inputRows.size();
   uint64_t totalBytes{0};
+  // When probe dedup is active, track the expanded row count (after
+  // duplicate expansion) to keep expanded output within maxOut.
+  size_t expandedNumOut = 0;
   while (iter.lastRowIndex < iter.rows->size()) {
     if (!iter.nextHit) {
       const auto row = (*iter.rows)[iter.lastRowIndex];
@@ -2071,7 +2074,8 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
           inputRows[numOut] = row; // NOLINT
           hits[numOut] = nullptr;
           ++numOut;
-          if (numOut >= maxOut) {
+          expandedNumOut += iter.dupGroupSize ? iter.dupGroupSize[row] : 1;
+          if (numOut >= maxOut || expandedNumOut >= maxOut) {
             return numOut;
           }
         }
@@ -2087,19 +2091,23 @@ int32_t HashTable<ignoreNullKeys>::listJoinResults(
           __builtin_prefetch(reinterpret_cast<char*>(next) + nextOffset_);
         }
       }
-      inputRows[numOut] = (*iter.rows)[iter.lastRowIndex]; // NOLINT
+      auto probeRow = (*iter.rows)[iter.lastRowIndex];
+      inputRows[numOut] = probeRow; // NOLINT
       hits[numOut] = iter.nextHit;
-      totalBytes += iter.estimatedRowSize.has_value()
+      auto dupFactor = iter.dupGroupSize ? iter.dupGroupSize[probeRow] : 1;
+      auto rowBytes = iter.estimatedRowSize.has_value()
           ? iter.estimatedRowSize.value()
           : (joinProjectedVarColumnsSize(
                  iter.varSizeListColumns, iter.nextHit) +
              iter.fixedSizeListColumnsSizeSum);
+      totalBytes += rowBytes * dupFactor;
+      expandedNumOut += dupFactor;
       ++numOut;
       iter.nextHit = next;
       if (!iter.nextHit) {
         ++iter.lastRowIndex;
       }
-      if (numOut >= maxOut || totalBytes >= maxBytes) {
+      if (expandedNumOut >= maxOut || totalBytes >= maxBytes) {
         return numOut;
       }
     }

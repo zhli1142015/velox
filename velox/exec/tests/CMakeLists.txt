@@ -96,6 +96,7 @@ add_executable(
   SplitListenerTest.cpp
   SplitTest.cpp
   SqlTest.cpp
+  SwissDedupTest.cpp
   StreamingAggregationTest.cpp
   TableScanTest.cpp
   TableWriterTest.cpp
