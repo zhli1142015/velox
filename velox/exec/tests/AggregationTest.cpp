@@ -4498,4 +4498,43 @@ TEST_F(AggregationTest, batchDedupBooleanKey) {
   AssertQueryBuilder(plan, duckDbQueryRunner_)
       .assertResults("SELECT c0, c1, sum(c2) AS s FROM tmp GROUP BY c0, c1");
 }
+
+// Regression test: dictionary-encoded key with nulls triggers ignoreNullKeys
+// partial decode in prepareForGroupProbe. KeyComparator::prepare must not call
+// DecodedVector::nulls() without the SelectivityVector, or it crashes with
+// "DecodedVector::nulls() must be called with the same rows as decode()".
+TEST_F(AggregationTest, batchDedupNullKeyPartialDecode) {
+  std::vector<RowVectorPtr> batches;
+
+  // Seed HT with enough distinct keys to pass the L1 cache guard.
+  batches.push_back(makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>(5000, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(5000, [](auto) { return 1; }),
+      }));
+
+  // Dictionary-encoded key with nulls. The dictionary wrapping means
+  // DecodedVector is not identity-mapped, so nulls() must copy nulls
+  // from base indices — requiring the SelectivityVector.
+  auto baseVector = makeNullableFlatVector<int64_t>({1, 2, std::nullopt, 3, 4});
+  for (int b = 0; b < 12; ++b) {
+    // 200 rows cycling through 5 dict entries (including one null).
+    auto indices = makeIndices(200, [](auto row) { return row % 5; });
+    auto dictKey =
+        BaseVector::wrapInDictionary(nullptr, indices, 200, baseVector);
+    auto data = makeFlatVector<int64_t>(200, [](auto) { return 1; });
+    batches.push_back(makeRowVector({"c0", "c1"}, {dictKey, data}));
+  }
+
+  createDuckDbTable(batches);
+
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .singleAggregation({"c0"}, {"sum(c1) AS s"})
+                  .planNode();
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
+}
 } // namespace facebook::velox::exec::test

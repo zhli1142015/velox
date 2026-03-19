@@ -25,8 +25,8 @@ namespace facebook::velox::exec {
 
 /// Per-column cached pointers for batch-level key comparison.
 struct KeyCompareColumn {
+  const DecodedVector* decoded{nullptr};
   const void* rawData{nullptr};
-  const uint64_t* rawNulls{nullptr};
   TypeKind typeKind{TypeKind::INVALID};
   int32_t typeSize{0}; // Sizeof(element) for fixed-width, 0 for VARCHAR/BOOL.
   const vector_size_t* indices{nullptr}; // Null if flat (identity mapping).
@@ -47,8 +47,8 @@ class KeyComparator {
     for (size_t i = 0; i < hashers.size(); ++i) {
       auto& dv = hashers[i]->decodedVector();
       auto& col = cols_[i];
+      col.decoded = &dv;
       col.typeKind = hashers[i]->typeKind();
-      col.rawNulls = dv.nulls();
       col.isConstant = dv.isConstantMapping();
       col.constantIndex = col.isConstant ? dv.index(0) : 0;
       col.indices =
@@ -77,17 +77,17 @@ class KeyComparator {
         continue;
       }
 
-      auto idxA = col.indices ? col.indices[rowA] : rowA;
-      auto idxB = col.indices ? col.indices[rowB] : rowB;
-
-      if (col.rawNulls) {
-        bool nullA = bits::isBitNull(col.rawNulls, idxA);
-        bool nullB = bits::isBitNull(col.rawNulls, idxB);
+      if (col.decoded->mayHaveNulls()) {
+        bool nullA = col.decoded->isNullAt(rowA);
+        bool nullB = col.decoded->isNullAt(rowB);
         if (nullA != nullB)
           return false;
         if (nullA)
           continue; // Both null, equal for grouping.
       }
+
+      auto idxA = col.indices ? col.indices[rowA] : rowA;
+      auto idxB = col.indices ? col.indices[rowB] : rowB;
 
       if (col.typeKind == TypeKind::BOOLEAN) {
         auto* base = reinterpret_cast<const uint64_t*>(col.rawData);
