@@ -781,9 +781,9 @@ class HashProbe : public Operator {
   /// considering hash table size, build-side fan-out, and output columns.
   double computeDedupMaxUniqueRatio() const;
 
-  /// Runs probe with optional dedup. If canDedup is false, directly calls
-  /// joinProbe. Otherwise, runs SwissDedup and builds CSR adjacency list.
-  void probeWithDedup(bool canDedup, int32_t dedupResultSize);
+  /// Runs probe with optional dedup. Determines internally whether dedup
+  /// is beneficial based on join type, state, and dictionary availability.
+  void probeWithDedup(int32_t dedupResultSize);
 };
 
 inline std::ostream& operator<<(std::ostream& os, ProbeOperatorState state) {

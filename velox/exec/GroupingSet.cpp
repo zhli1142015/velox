@@ -258,66 +258,7 @@ void GroupingSet::addInputForActiveRows(
     return;
   }
 
-  // ── Batch Dedup: probe only unique keys ──
-  bool dedupActive = false;
-
-  if (batchDedup_.state() != SwissDedup::State::kDisabled &&
-      SwissDedup::shouldAttempt(lookup_->rows.size()) && !sortedAggregations_ &&
-      // Skip dedup when HashTable is small enough to fit L1 cache —
-      // probe is already cheap, dedup overhead > savings.
-      table_->numDistinct() > static_cast<uint64_t>(lookup_->rows.size()) * 2) {
-    auto numRows = static_cast<int32_t>(lookup_->rows.size());
-    auto maxRow = lookup_->rows.back() + 1;
-    dedupResult_.resize(maxRow);
-    dedupUniqueRows_.resize(numRows);
-
-    const vector_size_t* dictIndices = nullptr;
-    int32_t dictSize = 0;
-    if (table_->hashers().size() == 1) {
-      auto& dv = table_->hashers()[0]->decodedVector();
-      if (!dv.isIdentityMapping() && !dv.isConstantMapping()) {
-        dictIndices = dv.indices();
-        dictSize = static_cast<int32_t>(dv.base()->size());
-      }
-    }
-
-    keyComparator_.prepare(table_->hashers());
-    auto [numUnique, usedDict] = batchDedup_.computeAutoDetect(
-        table_->hashMode(),
-        lookup_->hashes.data(),
-        lookup_->rows.data(),
-        numRows,
-        dedupUniqueRows_.data(),
-        dedupResult_.data(),
-        dictIndices,
-        dictSize,
-        table_->hashMode() == BaseHashTable::HashMode::kArray
-            ? static_cast<int64_t>(table_->capacity())
-            : 0,
-        SwissDedup::kEarlyStopRowAgg,
-        keyComparator_);
-
-    auto maxUniqueRatio = usedDict ? 1.0 : computeDedupMaxUniqueRatio();
-
-    if (numUnique < static_cast<int32_t>(numRows * maxUniqueRatio)) {
-      dedupActive = true;
-      std::swap(savedRows_, lookup_->rows);
-      std::swap(lookup_->rows, dedupUniqueRows_);
-      lookup_->rows.resize(numUnique);
-    }
-  }
-
-  table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
-
-  // ── Expand hits for duplicate rows ──
-  if (dedupActive) {
-    std::swap(lookup_->rows, savedRows_); // restore all rows
-    for (auto row : lookup_->rows) {
-      if (dedupResult_[row] != row) {
-        lookup_->hits[row] = lookup_->hits[dedupResult_[row]];
-      }
-    }
-  }
+  probeWithDedup();
 
   masks_.addInput(input, activeRows_);
 
@@ -372,6 +313,77 @@ void GroupingSet::addInputForActiveRows(
     }
     sortedAggregations_->addInput(groups, input);
   }
+}
+
+void GroupingSet::probeWithDedup() {
+  if (sortedAggregations_) {
+    table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
+    return;
+  }
+
+  // Detect dictionary key — dict path is nearly free (~0.3ns/row)
+  // and bypasses all profitability guards including EMA auto-disable.
+  auto [dictIndices, dictSize] =
+      KeyComparator::detectDictKey(table_->hashers());
+  const bool hasDictPath = dictIndices && dictSize > 0 &&
+      dictSize <= static_cast<int32_t>(lookup_->rows.size()) * 9 / 10 &&
+      dictSize <= SwissDedup::kDirectIndexMaxRange;
+
+  // Skip hash-based dedup when not profitable:
+  // - kHash mode: always attempt (probe is expensive even on small HT).
+  // - kArray/kNK with small HT (≤4K distinct): probe ~5ns ≈ dedup overhead.
+  if (!hasDictPath &&
+      (batchDedup_.state() == SwissDedup::State::kDisabled ||
+       !SwissDedup::shouldAttempt(lookup_->rows.size()) ||
+       (table_->hashMode() != BaseHashTable::HashMode::kHash &&
+        table_->numDistinct() <= 4096))) {
+    table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
+    return;
+  }
+
+  auto numRows = static_cast<int32_t>(lookup_->rows.size());
+  auto maxRow = lookup_->rows.back() + 1;
+  dedupResult_.resize(maxRow);
+  dedupUniqueRows_.resize(numRows);
+
+  keyComparator_.prepare(table_->hashers());
+  auto [numUnique, usedDict] = batchDedup_.computeAutoDetect(
+      table_->hashMode(),
+      lookup_->hashes.data(),
+      lookup_->rows.data(),
+      numRows,
+      dedupUniqueRows_.data(),
+      dedupResult_.data(),
+      dictIndices,
+      dictSize,
+      table_->hashMode() == BaseHashTable::HashMode::kArray
+          ? static_cast<int64_t>(table_->capacity())
+          : 0,
+      SwissDedup::kEarlyStopRowAgg,
+      keyComparator_);
+
+  auto maxUniqueRatio = usedDict ? 1.0 : computeDedupMaxUniqueRatio();
+
+  if (numUnique < static_cast<int32_t>(numRows * maxUniqueRatio)) {
+    batchDedup_.trackDedupOutcome(true);
+    std::swap(savedRows_, lookup_->rows);
+    std::swap(lookup_->rows, dedupUniqueRows_);
+    lookup_->rows.resize(numUnique);
+
+    table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
+
+    // Expand hits for duplicate rows.
+    std::swap(lookup_->rows, savedRows_);
+    for (auto row : lookup_->rows) {
+      if (dedupResult_[row] != row) {
+        lookup_->hits[row] = lookup_->hits[dedupResult_[row]];
+      }
+    }
+    return;
+  }
+
+  batchDedup_.trackDedupOutcome(false);
+  table_->groupProbe(*lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
 }
 
 double GroupingSet::computeDedupMaxUniqueRatio() const {

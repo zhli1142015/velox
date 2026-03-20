@@ -376,6 +376,9 @@ if(VELOX_ENABLE_BENCHMARKS)
     velox_exec_test_lib
     velox_spiller_aggregate_benchmark_base
   )
+
+  add_executable(velox_swiss_dedup_benchmark SwissDedupBenchmark.cpp)
+  target_link_libraries(velox_swiss_dedup_benchmark velox_exec Folly::folly Folly::follybenchmark)
 endif()
 
 add_executable(velox_driver_test OperatorReplacementTest.cpp Main.cpp)

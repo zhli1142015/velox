@@ -4275,19 +4275,19 @@ TEST_F(AggregationTest, batchDedupBoundaryDuplication) {
       .assertResults("SELECT c0, sum(c1) AS s FROM tmp GROUP BY c0");
 }
 
-// All-unique keys: sampling should disable dedup after 10 batches.
-// Verify no correctness issues when sampling transitions to kDisabled.
+// All-unique keys: consecutive-failure tracking should auto-disable dedup.
+// Verify no correctness issues when state transitions to kDisabled.
 TEST_F(AggregationTest, batchDedupAllUnique) {
   std::vector<RowVectorPtr> batches;
-  // Seed + enough distinct keys that HT guard passes.
+  // Seed with enough distinct keys that HT guard passes.
   batches.push_back(makeRowVector(
       {"c0", "c1"},
       {
           makeFlatVector<int64_t>(10000, [](auto row) { return row; }),
           makeFlatVector<int64_t>(10000, [](auto row) { return 1; }),
       }));
-  // 15 batches of all-unique data → sampling should disable.
-  for (int b = 0; b < 15; ++b) {
+  // All-unique batches → should auto-disable once EMA success rate drops.
+  for (int b = 0; b < 55; ++b) {
     batches.push_back(makeRowVector(
         {"c0", "c1"},
         {

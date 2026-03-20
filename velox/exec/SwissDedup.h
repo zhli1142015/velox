@@ -36,12 +36,14 @@ class SwissDedup {
   static constexpr int32_t kEarlyStopRowAgg = 63;
   static constexpr int32_t kEarlyStopRowProbe = 127;
   static constexpr int64_t kDirectIndexMaxRange = 32768;
-  /// Number of batches to sample before deciding to enable/disable.
-  static constexpr int32_t kSamplingBatches = 10;
-  /// Minimum duplicate fraction to keep dedup active after sampling.
-  static constexpr double kMinDupFraction = 0.1;
+  /// EMA decay factor for success rate tracking.
+  static constexpr double kDecayFactor = 0.95;
+  /// Minimum success rate (EMA) to keep dedup active.
+  static constexpr double kMinSuccessRate = 0.10;
+  /// Minimum batches before auto-disable can trigger.
+  static constexpr int32_t kMinBatchesBeforeDisable = 20;
 
-  enum class State { kSampling, kActive, kDisabled };
+  enum class State { kActive, kDisabled };
 
   static bool shouldAttempt(int32_t numRows) {
     return numRows >= kMinRows;
@@ -64,20 +66,19 @@ class SwissDedup {
     return state_;
   }
 
-  /// Update adaptive sampling statistics after a compute() call.
-  /// Returns current state after update.
-  State updateSampling(int32_t numRows, int32_t numUnique) {
-    if (state_ != State::kSampling) {
-      return state_;
+  /// Called after each batch where dedup was attempted. Updates the
+  /// exponential moving average of the success rate. Disables dedup when
+  /// the rate drops below kMinSuccessRate after kMinBatchesBeforeDisable.
+  void trackDedupOutcome(bool used) {
+    if (state_ != State::kActive) {
+      return;
     }
-    sampledTotalRows_ += numRows;
-    sampledUniqueRows_ += numUnique;
-    if (++sampledBatches_ >= kSamplingBatches) {
-      double dupFrac =
-          1.0 - static_cast<double>(sampledUniqueRows_) / sampledTotalRows_;
-      state_ = dupFrac >= kMinDupFraction ? State::kActive : State::kDisabled;
+    successRate_ =
+        successRate_ * kDecayFactor + (used ? (1.0 - kDecayFactor) : 0.0);
+    if (++totalBatches_ >= kMinBatchesBeforeDisable &&
+        successRate_ < kMinSuccessRate) {
+      state_ = State::kDisabled;
     }
-    return state_;
   }
 
   /// Main entry point. Template on KeysEqual for zero-overhead comparison.
@@ -166,10 +167,14 @@ class SwissDedup {
       int32_t dictSize) {
     // Reuse DirectIndex infrastructure (directSeq_ / directFirstRow_).
     ensureDirectIndexCapacity(dictSize);
-    directBatch_++;
+    directBatch_ = nextBatch(directBatch_, directSeq_.data(), directCapacity_);
 
     int32_t numUnique = 0;
     for (int32_t i = 0; i < numRows; ++i) {
+      if (i + kPrefetchAhead < numRows) {
+        auto futureIdx = dictIndices[rows[i + kPrefetchAhead]];
+        __builtin_prefetch(directSeq_.data() + futureIdx, 0, 1);
+      }
       auto row = rows[i];
       auto dictIdx = dictIndices[row];
       if (directSeq_[dictIdx] != directBatch_) {
@@ -192,10 +197,8 @@ class SwissDedup {
   };
 
   /// Unified entry point: tries dictionary path first (if dictIndices given
-  /// and dictSize is small enough), falls back to hash-based compute(),
-  /// then calls updateSampling(). Caller only needs to extract dictIndices
-  /// from DecodedVector and prepare KeysEqual (both depend on VectorHasher
-  /// which SwissDedup shouldn't depend on).
+  /// and dictSize is small enough), falls back to hash-based compute().
+  /// Caller should call trackDedupOutcome() after checking profitability.
   template <typename KeysEqual = std::nullptr_t>
   DedupResult computeAutoDetect(
       BaseHashTable::HashMode mode,
@@ -216,7 +219,6 @@ class SwissDedup {
         dictSize <= kDirectIndexMaxRange) {
       auto numUnique = computeWithDictionary(
           dictIndices, rows, numRows, uniqueRows, result, dictSize);
-      updateSampling(numRows, numUnique);
       return {numUnique, true};
     }
 
@@ -231,7 +233,6 @@ class SwissDedup {
         arrayRangeSize,
         earlyStopRow,
         keysEqual);
-    updateSampling(numRows, numUnique);
     return {numUnique, false};
   }
 
@@ -248,10 +249,14 @@ class SwissDedup {
       vector_size_t* result,
       int32_t rangeSize) {
     ensureDirectIndexCapacity(rangeSize);
-    directBatch_++;
+    directBatch_ = nextBatch(directBatch_, directSeq_.data(), directCapacity_);
 
     int32_t numUnique = 0;
     for (int32_t i = 0; i < numRows; ++i) {
+      if (i + kPrefetchAhead < numRows) {
+        auto futureId = static_cast<uint32_t>(hashes[rows[i + kPrefetchAhead]]);
+        __builtin_prefetch(directSeq_.data() + futureId, 0, 1);
+      }
       auto row = rows[i];
       auto id = static_cast<uint32_t>(hashes[row]);
       if (directSeq_[id] != directBatch_) {
@@ -279,6 +284,12 @@ class SwissDedup {
       vector_size_t* result,
       int32_t earlyStopRow) {
     ensureSlotCapacity(numRows);
+    if (FOLLY_UNLIKELY(currentBatch_ == std::numeric_limits<uint32_t>::max())) {
+      for (int32_t i = 0; i < slotCapacity_; ++i) {
+        slots_[i].batchSeq = 0;
+      }
+      currentBatch_ = 0;
+    }
     currentBatch_++;
 
     int32_t numUnique = 0;
@@ -288,6 +299,11 @@ class SwissDedup {
                                                               : numRows;
 
     for (int32_t i = 0; i < limit; ++i) {
+      if (i + kPrefetchAhead < numRows) {
+        auto futureIdx =
+            static_cast<int32_t>(hashes[rows[i + kPrefetchAhead]]) & slotMask_;
+        __builtin_prefetch(slots + futureIdx, 1, 1);
+      }
       auto row = rows[i];
       auto h = hashes[row];
       auto idx = static_cast<int32_t>(h) & slotMask_;
@@ -326,6 +342,11 @@ class SwissDedup {
     }
 
     for (int32_t i = limit; i < numRows; ++i) {
+      if (i + kPrefetchAhead < numRows) {
+        auto futureIdx =
+            static_cast<int32_t>(hashes[rows[i + kPrefetchAhead]]) & slotMask_;
+        __builtin_prefetch(slots + futureIdx, 1, 1);
+      }
       auto row = rows[i];
       auto h = hashes[row];
       auto idx = static_cast<int32_t>(h) & slotMask_;
@@ -372,7 +393,10 @@ class SwissDedup {
       int32_t earlyStopRow,
       const KeysEqual& keysEqual) {
     ensureTagCapacity(numRows);
-    tagBatch_++;
+    tagBatch_ = nextBatch(
+        tagBatch_,
+        tagSeq_.data(),
+        (tagCapacity_ + kGroupWidth - 1) / kGroupWidth);
     auto batch = tagBatch_;
 
     int32_t numUnique = 0;
@@ -380,6 +404,12 @@ class SwissDedup {
                                                               : numRows;
 
     for (int32_t i = 0; i < numRows; ++i) {
+      if (i + kPrefetchAhead < numRows) {
+        auto futureHash = hashes[rows[i + kPrefetchAhead]];
+        auto futureGroup = makeGroup(futureHash);
+        __builtin_prefetch(tags_.data() + futureGroup * kGroupWidth, 1, 1);
+        __builtin_prefetch(tagSeq_.data() + futureGroup, 0, 1);
+      }
       auto row = rows[i];
       auto hash = hashes[row];
       auto tag = makeTag(hash);
@@ -474,6 +504,19 @@ class SwissDedup {
   // ═══════════════════════════════════════════════════
   // Helpers
   // ═══════════════════════════════════════════════════
+
+  /// Increments a batch counter, resetting the sequence array on wrap-around.
+  /// Wrap-around at UINT32_MAX happens once every ~4B batches (~50 days at
+  /// 1000 batches/sec). The cost is one memset for the affected path.
+  static uint32_t
+  nextBatch(uint32_t current, uint32_t* seqArray, int32_t seqCount) {
+    if (FOLLY_UNLIKELY(current == std::numeric_limits<uint32_t>::max())) {
+      memset(seqArray, 0, seqCount * sizeof(uint32_t));
+      return 1;
+    }
+    return current + 1;
+  }
+
   static uint8_t makeTag(uint64_t hash) {
     return static_cast<uint8_t>(hash >> 57) | 0x80;
   }
@@ -500,7 +543,7 @@ class SwissDedup {
       directCapacity_ = rangeSize;
       directFirstRow_.resize(rangeSize);
       directSeq_.resize(rangeSize);
-      memset(directSeq_.data(), 0, rangeSize * sizeof(uint64_t));
+      memset(directSeq_.data(), 0, rangeSize * sizeof(uint32_t));
     }
   }
 
@@ -517,42 +560,43 @@ class SwissDedup {
       tags_.resize(needed);
       tagFirstRow_.resize(needed);
       tagSeq_.resize(numGroups);
-      memset(tagSeq_.data(), 0, numGroups * sizeof(uint64_t));
+      memset(tagSeq_.data(), 0, numGroups * sizeof(uint32_t));
     }
   }
 
   // PersistentSlot AoS layout (kArray large + kNK).
+  // 16 bytes per slot — 2048 slots = 32KB fits L1 cache.
   struct Slot {
     uint64_t key;
     vector_size_t firstRow;
-    uint64_t batchSeq;
+    uint32_t batchSeq;
   };
   int32_t slotCapacity_ = 0;
   int32_t slotMask_ = 0;
-  uint64_t currentBatch_ = 0;
+  uint32_t currentBatch_ = 0;
   raw_vector<Slot> slots_;
 
   // Swiss Table members (kHash).
   int32_t tagCapacity_ = 0;
   int32_t tagGroupMask_ = 0;
-  uint64_t tagBatch_ = 0;
+  uint32_t tagBatch_ = 0;
   raw_vector<uint8_t> tags_;
   raw_vector<vector_size_t> tagFirstRow_;
-  raw_vector<uint64_t> tagSeq_; // Per-group batch sequence.
+  raw_vector<uint32_t> tagSeq_; // Per-group batch sequence.
 
   // DirectIndex members (kArray small range).
   int32_t directCapacity_{0};
-  uint64_t directBatch_{0};
+  uint32_t directBatch_{0};
   raw_vector<vector_size_t> directFirstRow_;
-  raw_vector<uint64_t> directSeq_;
+  raw_vector<uint32_t> directSeq_;
 
-  // Adaptive sampling state.
-  State state_{State::kSampling};
-  int32_t sampledBatches_{0};
-  int64_t sampledTotalRows_{0};
-  int64_t sampledUniqueRows_{0};
+  // Adaptive state.
+  State state_{State::kActive};
+  double successRate_{1.0};
+  int32_t totalBatches_{0};
 
   static constexpr int32_t kMaxProbe = 8;
+  static constexpr int32_t kPrefetchAhead = 4;
 };
 
 } // namespace facebook::velox::exec

@@ -40,6 +40,20 @@ struct KeyCompareColumn {
 /// Used by SwissDedup's keysEqual callback in both HashProbe and GroupingSet.
 class KeyComparator {
  public:
+  /// Detects if a single-column key is dictionary-encoded. Returns
+  /// {indices, dictSize} if suitable for dict dedup, {nullptr, 0} otherwise.
+  static std::pair<const vector_size_t*, int32_t> detectDictKey(
+      const std::vector<std::unique_ptr<VectorHasher>>& hashers) {
+    if (hashers.size() != 1) {
+      return {nullptr, 0};
+    }
+    auto& dv = hashers[0]->decodedVector();
+    if (dv.isIdentityMapping() || dv.isConstantMapping()) {
+      return {nullptr, 0};
+    }
+    return {dv.indices(), static_cast<int32_t>(dv.base()->size())};
+  }
+
   /// Prepare the comparator from a set of VectorHashers (already decoded
   /// for the current batch).
   void prepare(const std::vector<std::unique_ptr<VectorHasher>>& hashers) {

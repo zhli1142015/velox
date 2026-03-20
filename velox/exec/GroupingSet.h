@@ -434,6 +434,10 @@ class GroupingSet {
   /// Computes the maximum unique-row ratio (numUnique/numRows) below which
   /// dedup is profitable, based on hash table size and hash mode.
   double computeDedupMaxUniqueRatio() const;
+
+  /// Runs groupProbe with optional batch dedup. Determines internally
+  /// whether dedup is beneficial based on state and dictionary availability.
+  void probeWithDedup();
 };
 
 class AggregationInputSpiller : public SpillerBase {

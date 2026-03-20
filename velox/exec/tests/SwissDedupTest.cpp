@@ -498,125 +498,75 @@ TEST_F(SwissDedupTest, autoDetectDictTooLarge) {
   EXPECT_FALSE(usedDict);
 }
 
-TEST_F(SwissDedupTest, autoDetectUpdatesSampling) {
+TEST_F(SwissDedupTest, autoDetectStartsActive) {
   SwissDedup dedup;
-  EXPECT_EQ(dedup.state(), SwissDedup::State::kSampling);
-
-  const int32_t N = 100;
-  std::vector<uint64_t> hashes(N);
-  std::vector<vector_size_t> rows(N);
-  for (int i = 0; i < N; ++i) {
-    hashes[i] = i % 5;
-    rows[i] = i;
-  }
-  std::vector<vector_size_t> uniqueRows(N);
-  std::vector<vector_size_t> result(N);
-
-  // Run 10 batches via computeAutoDetect.
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
-    dedup.computeAutoDetect(
-        BaseHashTable::HashMode::kNormalizedKey,
-        hashes.data(),
-        rows.data(),
-        N,
-        uniqueRows.data(),
-        result.data(),
-        nullptr,
-        0,
-        0,
-        -1);
-  }
-  // 95% dup → should be kActive.
   EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
 }
 
 // ═══════════════════════════════════════════════════
-// Sampling state transition tests
+// EMA success-rate auto-disable tests
 // ═══════════════════════════════════════════════════
 
-TEST_F(SwissDedupTest, samplingInitialState) {
+TEST_F(SwissDedupTest, allFailuresAutoDisable) {
   SwissDedup dedup;
-  EXPECT_EQ(dedup.state(), SwissDedup::State::kSampling);
+  EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
+
+  // Continuous failures: EMA decays toward 0. Should disable after enough
+  // batches (once rate drops below kMinSuccessRate after
+  // kMinBatchesBeforeDisable).
+  int batches = 0;
+  while (dedup.state() == SwissDedup::State::kActive) {
+    dedup.trackDedupOutcome(false);
+    ++batches;
+    // Safety: should not take more than 200 batches.
+    ASSERT_LT(batches, 200);
+  }
+  EXPECT_EQ(dedup.state(), SwissDedup::State::kDisabled);
+  // Should disable in roughly 50-80 batches (EMA decay).
+  EXPECT_GE(batches, SwissDedup::kMinBatchesBeforeDisable);
 }
 
-TEST_F(SwissDedupTest, samplingTransitionToActive) {
+TEST_F(SwissDedupTest, steadySuccessStaysActive) {
   SwissDedup dedup;
-  // Feed 10 batches with high duplication (90% dup → 10% unique).
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
-    auto state = dedup.updateSampling(/*numRows=*/1000, /*numUnique=*/100);
-    if (b < SwissDedup::kSamplingBatches - 1) {
-      EXPECT_EQ(state, SwissDedup::State::kSampling);
-    }
+
+  // 100 batches of continuous success → should stay active.
+  for (int i = 0; i < 100; ++i) {
+    dedup.trackDedupOutcome(true);
   }
   EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
 }
 
-TEST_F(SwissDedupTest, samplingTransitionToDisabled) {
+TEST_F(SwissDedupTest, lowSuccessRateDisables) {
   SwissDedup dedup;
-  // Feed 10 batches with almost no duplication (1% dup).
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
-    dedup.updateSampling(/*numRows=*/1000, /*numUnique=*/990);
+
+  // 1-in-50 success rate (2%). Should eventually disable since 2% < 10%.
+  for (int i = 0; i < 200; ++i) {
+    dedup.trackDedupOutcome(i % 50 == 0);
   }
   EXPECT_EQ(dedup.state(), SwissDedup::State::kDisabled);
 }
 
-TEST_F(SwissDedupTest, samplingBoundaryAtMinDupFraction) {
+TEST_F(SwissDedupTest, moderateSuccessRateStaysActive) {
   SwissDedup dedup;
-  // Feed just above the kMinDupFraction boundary.
-  // Use one fewer unique than the exact boundary to avoid floating-point
-  // precision issues with >= comparison.
-  int32_t numRows = 1000;
-  int32_t numUnique =
-      static_cast<int32_t>(numRows * (1.0 - SwissDedup::kMinDupFraction)) - 1;
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
-    dedup.updateSampling(numRows, numUnique);
-  }
-  // Above boundary should activate.
-  EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
 
-  // Clearly below boundary (only 1% dup).
-  SwissDedup dedup2;
-  int32_t numUniqueHigh = numRows * 99 / 100;
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
-    dedup2.updateSampling(numRows, numUniqueHigh);
+  // 1-in-5 success rate (20%). Should stay active since 20% > 10%.
+  for (int i = 0; i < 200; ++i) {
+    dedup.trackDedupOutcome(i % 5 == 0);
   }
-  EXPECT_EQ(dedup2.state(), SwissDedup::State::kDisabled);
+  EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
 }
 
-TEST_F(SwissDedupTest, samplingNoUpdateAfterTransition) {
+TEST_F(SwissDedupTest, trackDedupOutcomeIgnoredAfterDisable) {
   SwissDedup dedup;
-  // Transition to kActive.
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
-    dedup.updateSampling(1000, 100);
+  // Force disable.
+  for (int i = 0; i < 200; ++i) {
+    dedup.trackDedupOutcome(false);
   }
-  EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
+  EXPECT_EQ(dedup.state(), SwissDedup::State::kDisabled);
 
   // Further calls should not change state.
-  dedup.updateSampling(1000, 1000); // all unique
-  EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
-
-  // Same for kDisabled.
-  SwissDedup dedup2;
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
-    dedup2.updateSampling(1000, 999);
-  }
-  EXPECT_EQ(dedup2.state(), SwissDedup::State::kDisabled);
-  dedup2.updateSampling(1000, 100); // high dup
-  EXPECT_EQ(dedup2.state(), SwissDedup::State::kDisabled);
-}
-
-TEST_F(SwissDedupTest, samplingMixedBatches) {
-  SwissDedup dedup;
-  // 5 batches with high dup, 5 batches with no dup.
-  // Total: 5000 rows with 500 unique + 5000 rows with 5000 unique = 5500/10000
-  // = 55% unique → 45% dup → should activate.
-  for (int b = 0; b < 5; ++b) {
-    dedup.updateSampling(1000, 100);
-  }
-  for (int b = 5; b < SwissDedup::kSamplingBatches; ++b) {
-    dedup.updateSampling(1000, 1000);
-  }
-  EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
+  dedup.trackDedupOutcome(true);
+  EXPECT_EQ(dedup.state(), SwissDedup::State::kDisabled);
 }
 
 // ═══════════════════════════════════════════════════
@@ -721,10 +671,10 @@ TEST_F(SwissDedupTest, earlyStopProbeVsAgg) {
 }
 
 // ═══════════════════════════════════════════════════
-// Interaction: sampling + early stop + compute
+// Interaction: early stop + EMA auto-disable
 // ═══════════════════════════════════════════════════
 
-TEST_F(SwissDedupTest, samplingWithEarlyStopBatches) {
+TEST_F(SwissDedupTest, allUniqueBatchesAutoDisable) {
   SwissDedup dedup;
   const int32_t N = 200;
   std::vector<uint64_t> hashes(N);
@@ -732,11 +682,12 @@ TEST_F(SwissDedupTest, samplingWithEarlyStopBatches) {
   std::vector<vector_size_t> uniqueRows(N);
   std::vector<vector_size_t> result(N);
 
-  // 10 batches of all-unique data. Early stop triggers each time.
-  // updateSampling gets (N, N) each time → 0% dup → should disable.
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
+  // Run batches of all-unique data. Early stop triggers each time.
+  // Each batch tracked as failure → EMA decays → eventually disables.
+  int batch = 0;
+  while (dedup.state() == SwissDedup::State::kActive && batch < 200) {
     for (int i = 0; i < N; ++i) {
-      hashes[i] = b * 1000 + i + 1;
+      hashes[i] = batch * 1000 + i + 1;
       rows[i] = i;
     }
     auto numUnique = dedup.compute(
@@ -749,12 +700,13 @@ TEST_F(SwissDedupTest, samplingWithEarlyStopBatches) {
         0,
         SwissDedup::kEarlyStopRowAgg);
     EXPECT_EQ(numUnique, N);
-    dedup.updateSampling(N, numUnique);
+    dedup.trackDedupOutcome(false);
+    ++batch;
   }
   EXPECT_EQ(dedup.state(), SwissDedup::State::kDisabled);
 }
 
-TEST_F(SwissDedupTest, samplingWithHighDupBatches) {
+TEST_F(SwissDedupTest, highDupBatchesStayActive) {
   SwissDedup dedup;
   const int32_t N = 200;
   std::vector<uint64_t> hashes(N);
@@ -762,8 +714,8 @@ TEST_F(SwissDedupTest, samplingWithHighDupBatches) {
   std::vector<vector_size_t> uniqueRows(N);
   std::vector<vector_size_t> result(N);
 
-  // 10 batches with 5 unique keys → 97.5% dup.
-  for (int b = 0; b < SwissDedup::kSamplingBatches; ++b) {
+  // 10 batches with 5 unique keys → 97.5% dup. All tracked as success.
+  for (int b = 0; b < 10; ++b) {
     for (int i = 0; i < N; ++i) {
       hashes[i] = i % 5;
       rows[i] = i;
@@ -778,7 +730,7 @@ TEST_F(SwissDedupTest, samplingWithHighDupBatches) {
         0,
         SwissDedup::kEarlyStopRowAgg);
     EXPECT_EQ(numUnique, 5);
-    dedup.updateSampling(N, numUnique);
+    dedup.trackDedupOutcome(true);
   }
   EXPECT_EQ(dedup.state(), SwissDedup::State::kActive);
 }

@@ -761,11 +761,6 @@ void HashProbe::addInput(RowVectorPtr input) {
   // keys. Without filter, fillOutput() expands via DictionaryVector
   // (zero-copy). With filter, results are expanded before evalFilter.
   inputHasDuplicates_ = false;
-  // LEFT_SEMI_FILTER + filter excluded: tracker requires monotonic probe order.
-  const bool canProbeDedup = !joinIncludesMissesFromLeft(joinType_) &&
-      !(filter_ && isLeftSemiFilterJoin(joinType_)) &&
-      batchDedup_.state() != SwissDedup::State::kDisabled &&
-      SwissDedup::shouldAttempt(lookup_->rows.size());
 
   if (joinIncludesMissesFromLeft(joinType_)) {
     auto& hits = lookup_->hits;
@@ -783,7 +778,7 @@ void HashProbe::addInput(RowVectorPtr input) {
       return;
     }
     lookup_->hits.resize(lookup_->rows.back() + 1);
-    probeWithDedup(canProbeDedup, lookup_->rows.back() + 1);
+    probeWithDedup(lookup_->rows.back() + 1);
   }
 
   resultIter_->reset(*lookup_);
@@ -2202,8 +2197,8 @@ double HashProbe::computeDedupMaxUniqueRatio() const {
   //   overhead ≈ 5ns/row (dedup compute + CSR build + expansion)
   //
   // Solving: r < 1 - overhead / savings
-  // With 2× safety margin: r < 1 - 2 × overhead / savings
-  constexpr double kSafetyMargin = 2.0;
+  // With 1.5× safety margin: r < 1 - 1.5 × overhead / savings
+  constexpr double kSafetyMargin = 1.5;
   constexpr double kListCostNs = 2.0;
   constexpr double kExtractFixedNs = 15.0;
   constexpr double kExtractStringNs = 25.0;
@@ -2333,7 +2328,19 @@ int32_t HashProbe::expandDedupForFilter(int32_t numOut) {
   return expandedSize;
 }
 
-void HashProbe::probeWithDedup(bool canDedup, int32_t dedupResultSize) {
+void HashProbe::probeWithDedup(int32_t dedupResultSize) {
+  // Detect dictionary key — dict path is nearly free (~0.3ns/row)
+  // and bypasses the shouldAttempt (kMinRows) guard.
+  auto [dictIndices, dictSize] = KeyComparator::detectDictKey(lookup_->hashers);
+  const bool hasDictPath = dictIndices && dictSize > 0 &&
+      dictSize <= static_cast<int32_t>(lookup_->rows.size()) * 9 / 10 &&
+      dictSize <= SwissDedup::kDirectIndexMaxRange;
+
+  // LEFT_SEMI_FILTER + filter excluded: tracker requires monotonic probe order.
+  const bool canDedup = !(filter_ && isLeftSemiFilterJoin(joinType_)) &&
+      batchDedup_.state() != SwissDedup::State::kDisabled &&
+      (hasDictPath || SwissDedup::shouldAttempt(lookup_->rows.size()));
+
   if (!canDedup) {
     table_->joinProbe(*lookup_);
     return;
@@ -2342,16 +2349,6 @@ void HashProbe::probeWithDedup(bool canDedup, int32_t dedupResultSize) {
   auto numRows = static_cast<int32_t>(lookup_->rows.size());
   dedupResult_.resize(dedupResultSize);
   dedupUniqueRows_.resize(numRows);
-
-  const vector_size_t* dictIndices = nullptr;
-  int32_t dictSize = 0;
-  if (keyChannels_.size() == 1) {
-    auto& dv = lookup_->hashers[0]->decodedVector();
-    if (!dv.isIdentityMapping() && !dv.isConstantMapping()) {
-      dictIndices = dv.indices();
-      dictSize = static_cast<int32_t>(dv.base()->size());
-    }
-  }
 
   keyComparator_.prepare(lookup_->hashers);
   auto [numUnique, usedDict] = batchDedup_.computeAutoDetect(
@@ -2372,6 +2369,7 @@ void HashProbe::probeWithDedup(bool canDedup, int32_t dedupResultSize) {
   auto maxUniqueRatio = usedDict ? 1.0 : computeDedupMaxUniqueRatio();
 
   if (numUnique < static_cast<int32_t>(numRows * maxUniqueRatio)) {
+    batchDedup_.trackDedupOutcome(true);
     inputHasDuplicates_ = true;
     auto* rawRows = lookup_->rows.data();
 
@@ -2411,6 +2409,7 @@ void HashProbe::probeWithDedup(bool canDedup, int32_t dedupResultSize) {
     lookup_->rows.resize(numUnique);
     table_->joinProbe(*lookup_);
   } else {
+    batchDedup_.trackDedupOutcome(false);
     table_->joinProbe(*lookup_);
   }
 }

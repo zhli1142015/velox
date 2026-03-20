@@ -5726,10 +5726,8 @@ TEST_P(HashJoinTest, probeDedupUniqueBuildKeys) {
       .run();
 }
 
-// Multiple probe batches: SwissDedup adaptive sampling spans across batches.
-// After 10 batches, it decides whether to stay active or disable. This test
-// uses multiple small probe batches to exercise the sampling → active
-// transition and ensures correctness across the state change boundary.
+// Multiple probe batches: exercises batch dedup across many small batches.
+// Verifies correctness with the consecutive-failure tracking mechanism.
 TEST_P(HashJoinTest, probeDedupMultipleBatches) {
   const int32_t kBuildRowsPerKey = 10;
   auto buildVectors = makeRowVector(
@@ -6299,9 +6297,10 @@ TEST_P(HashJoinTest, probeDedupRightJoinWithFilter) {
 // without filter (since no expansion is needed).
 // TODO: Fix by sorting expanded results by probe row index before evalFilter.
 
-// Test that dedup is disabled by adaptive sampling when data has no dups.
-// Uses a flat-vector probe with all unique keys for 12 batches.
-TEST_P(HashJoinTest, probeDedupDisabledBySampling) {
+// Test that dedup is auto-disabled when data has no dups.
+// Uses a flat-vector probe with all unique keys. After enough batches
+// with no profitable dedup, the EMA success rate drops and dedup is disabled.
+TEST_P(HashJoinTest, probeDedupAutoDisabled) {
   auto buildVectors = makeRowVector(
       {"u_k0", "u_data"},
       {
@@ -6309,7 +6308,7 @@ TEST_P(HashJoinTest, probeDedupDisabledBySampling) {
           makeFlatVector<int32_t>(50000, [](auto row) { return row * 10; }),
       });
 
-  // 12 unique-key batches: sampling should disable dedup after 10 batches.
+  // Enough unique-key batches to trigger auto-disable.
   std::vector<RowVectorPtr> probeBatches;
   for (int b = 0; b < 12; ++b) {
     probeBatches.push_back(makeRowVector(
