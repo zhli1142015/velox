@@ -120,6 +120,16 @@ class PageReader {
   // Returns the current string dictionary as a FlatVector<StringView>.
   const VectorPtr& dictionaryValues(const TypePtr& type);
 
+  /// Returns a typed FlatVector<T> wrapping the current dictionary for
+  /// non-string types.
+  template <typename T>
+  VectorPtr typedDictionaryValues(const TypePtr& type);
+
+  /// Returns the number of entries in the current dictionary.
+  int32_t dictionaryNumValues() const {
+    return dictionary_.numValues;
+  }
+
   // True if the current page holds dictionary indices.
   bool isDictionary() const {
     return encoding_ == thrift::Encoding::PLAIN_DICTIONARY ||
@@ -151,6 +161,22 @@ class PageReader {
 
   const tz::TimeZone* sessionTimezone() const {
     return sessionTimezone_;
+  }
+
+  /// Sets whether to use index-preserving dictionary visitor for non-string
+  /// types. When true, dictionary indices are stored instead of resolved
+  /// values, enabling DictionaryVector output. The actual decision is also
+  /// gated by dictionary cardinality in callDecoder().
+  void setUseIndexPreservingDict(bool value, int32_t maxDictEntries = 1000) {
+    useIndexPreservingDict_ = value;
+    maxDictEntriesForDictVector_ = maxDictEntries;
+    indexPreservingDictUsed_ = false;
+  }
+
+  /// Returns true if callDecoder actually used the index-preserving visitor
+  /// (i.e., the cardinality gate passed). Only valid after callDecoder runs.
+  bool indexPreservingDictUsed() const {
+    return indexPreservingDictUsed_;
   }
 
  private:
@@ -273,14 +299,25 @@ class PageReader {
           int>::type = 0>
   void
   callDecoder(const uint64_t* nulls, bool& nullsFromFastPath, Visitor visitor) {
+    // Gate index-preserving mode on dictionary cardinality. If the dictionary
+    // has more entries than the threshold, fall back to the normal resolving
+    // visitor to prevent data corruption (int32_t indices vs typed values).
+    const bool useIndexPreserving = useIndexPreservingDict_ &&
+        dictionaryNumValues() <= maxDictEntriesForDictVector_;
+    indexPreservingDictUsed_ = useIndexPreserving && isDictionary();
     if (nulls) {
       nullsFromFastPath = dwio::common::useFastPath<Visitor, true>(visitor) &&
           (!this->type_->type()->isLongDecimal()) &&
           (this->type_->type()->isShortDecimal() ? isDictionary() : true);
 
       if (isDictionary()) {
-        auto dictVisitor = visitor.toDictionaryColumnVisitor();
-        dictionaryIdDecoder_->readWithVisitor<true>(nulls, dictVisitor);
+        if (useIndexPreserving) {
+          auto dictVisitor = visitor.toIndexPreservingDictColumnVisitor();
+          dictionaryIdDecoder_->readWithVisitor<true>(nulls, dictVisitor);
+        } else {
+          auto dictVisitor = visitor.toDictionaryColumnVisitor();
+          dictionaryIdDecoder_->readWithVisitor<true>(nulls, dictVisitor);
+        }
       } else if (encoding_ == thrift::Encoding::DELTA_BINARY_PACKED) {
         nullsFromFastPath = false;
         deltaBpDecoder_->readWithVisitor<true>(nulls, visitor);
@@ -290,8 +327,13 @@ class PageReader {
       }
     } else {
       if (isDictionary()) {
-        auto dictVisitor = visitor.toDictionaryColumnVisitor();
-        dictionaryIdDecoder_->readWithVisitor<false>(nullptr, dictVisitor);
+        if (useIndexPreserving) {
+          auto dictVisitor = visitor.toIndexPreservingDictColumnVisitor();
+          dictionaryIdDecoder_->readWithVisitor<false>(nullptr, dictVisitor);
+        } else {
+          auto dictVisitor = visitor.toDictionaryColumnVisitor();
+          dictionaryIdDecoder_->readWithVisitor<false>(nullptr, dictVisitor);
+        }
       } else if (encoding_ == thrift::Encoding::DELTA_BINARY_PACKED) {
         deltaBpDecoder_->readWithVisitor<false>(nulls, visitor);
       } else {
@@ -512,6 +554,19 @@ class PageReader {
   dwio::common::ColumnReaderStatistics& stats_;
 
   const tz::TimeZone* sessionTimezone_{nullptr};
+
+  // When true, callDecoder uses IndexPreservingDictionaryColumnVisitor to
+  // store dictionary indices instead of resolved values, provided the
+  // dictionary cardinality is within maxDictEntriesForDictVector_.
+  bool useIndexPreservingDict_{false};
+
+  // Set to true by callDecoder when the index-preserving visitor was
+  // actually used (cardinality gate passed). Reset by
+  // setUseIndexPreservingDict.
+  bool indexPreservingDictUsed_{false};
+
+  // Maximum dictionary entries to allow index-preserving mode.
+  int32_t maxDictEntriesForDictVector_{1000};
 
   // Decoders. Only one will be set at a time.
   std::unique_ptr<dwio::common::DirectDecoder<true>> directDecoder_;

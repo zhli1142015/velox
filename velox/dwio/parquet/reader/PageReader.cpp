@@ -1037,4 +1037,25 @@ const VectorPtr& PageReader::dictionaryValues(const TypePtr& type) {
   return dictionaryValues_;
 }
 
+template <typename T>
+VectorPtr PageReader::typedDictionaryValues(const TypePtr& type) {
+  return std::make_shared<FlatVector<T>>(
+      &pool_,
+      type,
+      /*nulls=*/nullptr,
+      dictionary_.numValues,
+      dictionary_.values,
+      std::vector<BufferPtr>{});
+}
+
+// Explicit instantiations for the types we support.
+template VectorPtr PageReader::typedDictionaryValues<int32_t>(
+    const TypePtr& type);
+template VectorPtr PageReader::typedDictionaryValues<int64_t>(
+    const TypePtr& type);
+template VectorPtr PageReader::typedDictionaryValues<float>(
+    const TypePtr& type);
+template VectorPtr PageReader::typedDictionaryValues<double>(
+    const TypePtr& type);
+
 } // namespace facebook::velox::parquet

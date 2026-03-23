@@ -37,11 +37,15 @@ class ParquetParams : public dwio::common::FormatParams {
       dwio::common::ColumnReaderStatistics& stats,
       const FileMetaDataPtr metaData,
       const tz::TimeZone* sessionTimezone,
-      TimestampPrecision timestampPrecision)
+      TimestampPrecision timestampPrecision,
+      bool outputDictVector = true,
+      int32_t maxDictEntriesForDictVector = 1000)
       : FormatParams(pool, stats),
         metaData_(metaData),
         sessionTimezone_(sessionTimezone),
-        timestampPrecision_(timestampPrecision) {}
+        timestampPrecision_(timestampPrecision),
+        outputDictVector_(outputDictVector),
+        maxDictEntriesForDictVector_(maxDictEntriesForDictVector) {}
   std::unique_ptr<dwio::common::FormatData> toFormatData(
       const std::shared_ptr<const dwio::common::TypeWithId>& type,
       const common::ScanSpec& scanSpec) override;
@@ -50,10 +54,20 @@ class ParquetParams : public dwio::common::FormatParams {
     return timestampPrecision_;
   }
 
+  bool outputDictVector() const {
+    return outputDictVector_;
+  }
+
+  int32_t maxDictEntriesForDictVector() const {
+    return maxDictEntriesForDictVector_;
+  }
+
  private:
   const FileMetaDataPtr metaData_;
   const tz::TimeZone* sessionTimezone_;
   const TimestampPrecision timestampPrecision_;
+  const bool outputDictVector_;
+  const int32_t maxDictEntriesForDictVector_;
 };
 
 /// Format-specific data created for each leaf column of a Parquet rowgroup.
@@ -64,7 +78,9 @@ class ParquetData : public dwio::common::FormatData {
       const FileMetaDataPtr fileMetadataPtr,
       memory::MemoryPool& pool,
       dwio::common::ColumnReaderStatistics& stats,
-      const tz::TimeZone* sessionTimezone)
+      const tz::TimeZone* sessionTimezone,
+      bool outputDictVector = true,
+      int32_t maxDictEntriesForDictVector = 1000)
       : pool_(pool),
         type_(std::static_pointer_cast<const ParquetTypeWithId>(type)),
         fileMetaDataPtr_(fileMetadataPtr),
@@ -72,7 +88,9 @@ class ParquetData : public dwio::common::FormatData {
         maxRepeat_(type_->maxRepeat_),
         rowsInRowGroup_(-1),
         stats_(stats),
-        sessionTimezone_(sessionTimezone) {}
+        sessionTimezone_(sessionTimezone),
+        outputDictVector_(outputDictVector),
+        maxDictEntriesForDictVector_(maxDictEntriesForDictVector) {}
 
   /// Prepares to read data for 'index'th row group.
   void enqueueRowGroup(uint32_t index, dwio::common::BufferedInput& input);
@@ -184,6 +202,50 @@ class ParquetData : public dwio::common::FormatData {
     return reader_->dictionaryValues(type);
   }
 
+  /// Returns a typed FlatVector wrapping the current dictionary for non-string
+  /// types.
+  template <typename T>
+  VectorPtr typedDictionaryValues(const TypePtr& type) {
+    return reader_->typedDictionaryValues<T>(type);
+  }
+
+  bool outputDictVector() const {
+    return outputDictVector_;
+  }
+
+  int32_t maxDictEntriesForDictVector() const {
+    return maxDictEntriesForDictVector_;
+  }
+
+  /// Returns true if the current column should output DictionaryVector.
+  /// Checks: config enabled, has dictionary, type size >= 4, cardinality
+  /// <= threshold.
+  /// Note: must be called after the first page is loaded (i.e., after
+  /// seekToPage/rowsForPage), because isDictionary() and
+  /// dictionaryNumValues() depend on the current page state.
+  template <typename T>
+  bool shouldOutputDictVector() const {
+    return outputDictVector_ && reader_ && reader_->isDictionary() &&
+        sizeof(T) >= 4 &&
+        reader_->dictionaryNumValues() <= maxDictEntriesForDictVector_;
+  }
+
+  int32_t dictionaryNumValues() const {
+    return reader_ ? reader_->dictionaryNumValues() : 0;
+  }
+
+  void setUseIndexPreservingDict(bool value) {
+    if (reader_) {
+      reader_->setUseIndexPreservingDict(value, maxDictEntriesForDictVector_);
+    }
+  }
+
+  /// Returns true if callDecoder actually used the index-preserving visitor
+  /// on the current page.
+  bool indexPreservingDictUsed() const {
+    return reader_ && reader_->indexPreservingDictUsed();
+  }
+
   void clearDictionary() {
     reader_->clearDictionary();
   }
@@ -226,6 +288,8 @@ class ParquetData : public dwio::common::FormatData {
   dwio::common::ColumnReaderStatistics& stats_;
   const tz::TimeZone* sessionTimezone_;
   std::unique_ptr<PageReader> reader_;
+  const bool outputDictVector_;
+  const int32_t maxDictEntriesForDictVector_;
 
   // Nulls derived from leaf repdefs for non-leaf readers.
   BufferPtr presetNulls_;

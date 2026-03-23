@@ -634,6 +634,10 @@ void configureRowReaderOptions(
         hiveConfig->preserveFlatMapsInMemory(sessionProperties));
     rowReaderOptions.setParallelUnitLoadCount(
         hiveConfig->parallelUnitLoadCount(sessionProperties));
+    rowReaderOptions.setOutputDictVector(
+        hiveConfig->isParquetOutputDictVector(sessionProperties));
+    rowReaderOptions.setMaxDictEntriesForDictVector(
+        hiveConfig->parquetMaxDictEntriesForDictVector(sessionProperties));
   }
   rowReaderOptions.setSerdeParameters(hiveSplit->serdeParameters);
 }

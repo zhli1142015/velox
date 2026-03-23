@@ -142,6 +142,9 @@ class DictionaryColumnVisitor;
 template <typename TFilter, typename ExtractValues, bool isDense>
 class StringDictionaryColumnVisitor;
 
+template <typename T, typename TFilter, typename ExtractValues, bool isDense>
+class IndexPreservingDictionaryColumnVisitor;
+
 // Template parameter for controlling filtering and action on a set of rows.
 template <
     typename T,
@@ -481,6 +484,9 @@ class ColumnVisitor {
 
   StringDictionaryColumnVisitor<TFilter, ExtractValues, isDense>
   toStringDictionaryColumnVisitor();
+
+  IndexPreservingDictionaryColumnVisitor<T, TFilter, ExtractValues, isDense>
+  toIndexPreservingDictColumnVisitor();
 
   // Use for replacing all rows with non-null rows for fast path with processRun
   // and processRle.
@@ -1200,6 +1206,27 @@ ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::
   return result;
 }
 
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath>
+IndexPreservingDictionaryColumnVisitor<T, TFilter, ExtractValues, isDense>
+ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::
+    toIndexPreservingDictColumnVisitor() {
+  if constexpr (!kHasBulkPath) {
+    VELOX_UNREACHABLE();
+  }
+  auto result = IndexPreservingDictionaryColumnVisitor<
+      T,
+      TFilter,
+      ExtractValues,
+      isDense>(filter_, reader_, RowSet(rows_ + rowIndex_, numRows_), values_);
+  result.setNumValuesBias(numValuesBias_);
+  return result;
+}
+
 template <typename TFilter, typename ExtractValues, bool isDense>
 class StringDictionaryColumnVisitor
     : public DictionaryColumnVisitor<int32_t, TFilter, ExtractValues, isDense> {
@@ -1430,6 +1457,234 @@ class StringDictionaryColumnVisitor
     return reinterpret_cast<const StringView*>(
         DictSuper::state_.dictionary2.values)[index - stripeDictSize];
   }
+};
+
+/// A dictionary column visitor for non-string types that stores dictionary
+/// indices (int32_t) instead of resolved values. This enables the column
+/// reader to output DictionaryVector for integer/float types, similar to
+/// how StringDictionaryColumnVisitor works for strings.
+///
+/// Template parameter T is the actual value type (int32_t, int64_t, float,
+/// double). The visitor inherits DictionaryColumnVisitor<int32_t, ...> so
+/// that filterPassed() stores int32_t indices. Filters are still evaluated
+/// against the actual typed dictionary values via typedDict().
+template <typename T, typename TFilter, typename ExtractValues, bool isDense>
+class IndexPreservingDictionaryColumnVisitor
+    : public DictionaryColumnVisitor<int32_t, TFilter, ExtractValues, isDense> {
+  using super = ColumnVisitor<int32_t, TFilter, ExtractValues, isDense>;
+  using DictSuper =
+      DictionaryColumnVisitor<int32_t, TFilter, ExtractValues, isDense>;
+
+ public:
+  IndexPreservingDictionaryColumnVisitor(
+      const TFilter& filter,
+      SelectiveColumnReader* reader,
+      RowSet rows,
+      ExtractValues values)
+      : DictionaryColumnVisitor<int32_t, TFilter, ExtractValues, isDense>(
+            filter,
+            reader,
+            rows,
+            values) {}
+
+  FOLLY_ALWAYS_INLINE vector_size_t process(int32_t value, bool& atEnd) {
+    auto index = value;
+    vector_size_t previous =
+        isDense && TFilter::deterministic ? 0 : super::currentRow();
+    if constexpr (!DictSuper::hasFilter()) {
+      if constexpr (super::kHasHook) {
+        // Hooks need the actual decoded value.
+        super::values_.addValue(
+            super::rowIndex_ + super::numValuesBias_, typedDict()[index]);
+      } else {
+        super::filterPassed(index);
+      }
+    } else {
+      // check the dictionary cache
+      if (TFilter::deterministic &&
+          DictSuper::filterCache()[index] == FilterResult::kSuccess) {
+        super::filterPassed(index);
+      } else if (
+          TFilter::deterministic &&
+          DictSuper::filterCache()[index] == FilterResult::kFailure) {
+        super::filterFailed();
+      } else {
+        if (velox::common::applyFilter(super::filter_, typedDict()[index])) {
+          super::filterPassed(index);
+          if (TFilter::deterministic) {
+            DictSuper::filterCache()[index] = FilterResult::kSuccess;
+          }
+        } else {
+          super::filterFailed();
+          if (TFilter::deterministic) {
+            DictSuper::filterCache()[index] = FilterResult::kFailure;
+          }
+        }
+      }
+    }
+    if (++super::rowIndex_ >= super::numRows_) {
+      atEnd = true;
+      return (TFilter::deterministic && isDense)
+          ? 0
+          : super::rows_[super::numRows_ - 1] - previous;
+    }
+    if (isDense && TFilter::deterministic) {
+      return 0;
+    }
+    return super::currentRow() - previous - 1;
+  }
+
+  template <bool hasFilter, bool hasHook, bool scatter>
+  void processRun(
+      const int32_t* input,
+      int32_t numInput,
+      const int32_t* scatterRows,
+      int32_t* filterHits,
+      int32_t* values,
+      int32_t& numValues) {
+    DCHECK(input == values + numValues);
+    // No inDict handling needed for Parquet (no stride dictionary).
+    if constexpr (!DictSuper::hasFilter()) {
+      if (hasHook) {
+        for (auto i = 0; i < numInput; ++i) {
+          super::values_.addValue(
+              scatterRows ? scatterRows[super::rowIndex_ + i]
+                          : super::rowIndex_ + i,
+              typedDict()[input[i]]);
+        }
+      }
+      if constexpr (std::is_same_v<TFilter, velox::common::IsNotNull>) {
+        auto* begin = (scatter ? scatterRows : super::rows_) + super::rowIndex_;
+        std::copy(begin, begin + numInput, filterHits + numValues);
+        numValues += numInput;
+      } else if constexpr (scatter) {
+        dwio::common::scatterDense(
+            input, scatterRows + super::rowIndex_, numInput, values);
+        numValues = scatterRows[super::rowIndex_ + numInput - 1] + 1;
+      } else {
+        numValues += numInput;
+      }
+      super::rowIndex_ += numInput;
+      return;
+    } else {
+      static_assert(hasFilter);
+    }
+    // Filter path: check filter cache, evaluate filter on dict values.
+    constexpr bool filterOnly =
+        std::is_same_v<typename super::Extract, DropValues>;
+    constexpr int32_t kWidth = xsimd::batch<int32_t>::size;
+    for (auto i = 0; i < numInput; i += kWidth) {
+      auto indices = xsimd::load_unaligned(input + i);
+      auto base =
+          reinterpret_cast<const int32_t*>(DictSuper::filterCache() - 3);
+      xsimd::batch<int32_t> cache;
+      if (i + kWidth > numInput) {
+        cache = simd::maskGather<int32_t, int32_t, 1>(
+            xsimd::broadcast<int32_t>(0),
+            simd::leadingMask<int32_t>(numInput - i),
+            base,
+            indices);
+      } else {
+        cache = simd::gather<int32_t, int32_t, 1>(base, indices);
+      }
+#ifdef SVE_BITS
+      auto unknowns = simd::toBitMask(
+          simd::reinterpretBatch<uint32_t>((cache & (kUnknown << 24)) << 1) !=
+          xsimd::batch<uint32_t>(0));
+      auto passed = simd::toBitMask(
+          (simd::reinterpretBatch<uint32_t>(cache) &
+           xsimd::batch<uint32_t>(1)) != xsimd::batch<uint32_t>(0));
+#else
+      auto unknowns = simd::toBitMask(
+          xsimd::batch_bool<int32_t>(simd::reinterpretBatch<uint32_t>(
+              (cache & (kUnknown << 24)) << 1)));
+      auto passed = simd::toBitMask(
+          xsimd::batch_bool<int32_t>(simd::reinterpretBatch<uint32_t>(cache)));
+#endif
+      if (UNLIKELY(unknowns)) {
+        uint16_t bits = unknowns;
+        while (bits) {
+          int index = bits::getAndClearLastSetBit(bits);
+          int32_t idx = input[i + index];
+          if (velox::common::applyFilter(super::filter_, typedDict()[idx])) {
+            DictSuper::filterCache()[idx] = FilterResult::kSuccess;
+            passed |= 1 << index;
+          } else {
+            DictSuper::filterCache()[idx] = FilterResult::kFailure;
+          }
+        }
+      }
+      if (!passed) {
+        continue;
+      } else if (passed == (1 << kWidth) - 1) {
+        xsimd::load_unaligned(
+            (scatter ? scatterRows : super::rows_) + super::rowIndex_ + i)
+            .store_unaligned(filterHits + numValues);
+        if (!filterOnly) {
+          indices.store_unaligned(values + numValues);
+        }
+        numValues += kWidth;
+      } else {
+        int8_t numBits = __builtin_popcount(passed);
+        simd::filter(
+            xsimd::load_unaligned(
+                (scatter ? scatterRows : super::rows_) + super::rowIndex_ + i),
+            passed)
+            .store_unaligned(filterHits + numValues);
+        if (!filterOnly) {
+          simd::filter(indices, passed).store_unaligned(values + numValues);
+        }
+        numValues += numBits;
+      }
+    }
+    super::rowIndex_ += numInput;
+  }
+
+  /// Override processRle because DictionaryColumnVisitor::processRle calls
+  /// processRun with an unqualified call, which resolves to the base class's
+  /// processRun (resolving dict values) instead of ours (preserving indices).
+  /// We reproduce the index-generation logic and call our own processRun.
+  template <bool hasFilter, bool hasHook, bool scatter>
+  void processRle(
+      typename dwio::common::make_index<int32_t>::type value,
+      typename dwio::common::make_index<int32_t>::type delta,
+      int32_t numRows,
+      int32_t currentRow,
+      const int32_t* scatterRows,
+      int32_t* filterHits,
+      int32_t* values,
+      int32_t& numValues) {
+    auto indices =
+        reinterpret_cast<typename dwio::common::make_index<int32_t>::type*>(
+            values);
+    // int32_t: sizeof == 4
+    constexpr int32_t kWidth = xsimd::batch<int32_t>::size;
+    for (auto i = 0; i < numRows; i += kWidth) {
+      auto numbers =
+          (xsimd::load_unaligned(super::rows_ + super::rowIndex_ + i) -
+           currentRow) *
+              static_cast<int32_t>(delta) +
+          static_cast<int32_t>(value);
+      numbers.store_unaligned(indices + numValues + i);
+    }
+
+    // Call OUR processRun (not the base class's).
+    this->template processRun<hasFilter, hasHook, scatter>(
+        values + numValues,
+        numRows,
+        scatterRows,
+        filterHits,
+        values,
+        numValues);
+  }
+
+ private:
+  const T* typedDict() const {
+    return reinterpret_cast<const T*>(DictSuper::state_.dictionary.values);
+  }
+
+  static constexpr int32_t kUnknown =
+      static_cast<int32_t>(dwio::common::FilterResult::kUnknown);
 };
 
 template <typename T, typename TFilter, typename ExtractValues, bool isDense>
