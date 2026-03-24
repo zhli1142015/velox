@@ -259,18 +259,21 @@ RowVectorPtr Operator::fillOutput(
   }
 
   std::vector<VectorPtr> projectedChildren(outputType_->size());
+  WrapState wrapState;
   projectChildren(
       projectedChildren,
       input_,
       identityProjections_,
       size,
-      wrapResults ? mapping : nullptr);
+      wrapResults ? mapping : nullptr,
+      &wrapState);
   projectChildren(
       projectedChildren,
       results,
       resultProjections_,
       size,
-      wrapResults ? mapping : nullptr);
+      wrapResults ? mapping : nullptr,
+      &wrapState);
 
   return std::make_shared<RowVector>(
       operatorCtx_->pool(),

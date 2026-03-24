@@ -1364,7 +1364,31 @@ void BaseVector::flattenVector(VectorPtr& vector) {
 }
 
 void BaseVector::prepareForReuse(VectorPtr& vector, vector_size_t size) {
-  if (vector.use_count() != 1 || !reusableEncoding(vector->encoding())) {
+  if (vector.use_count() != 1) {
+    vector = BaseVector::create(vector->type(), size, vector->pool());
+    return;
+  }
+
+  if (!reusableEncoding(vector->encoding())) {
+    // For dictionary vectors, try to unwrap and reuse the inner flat vector
+    // instead of allocating a brand new one. This avoids an extra pool
+    // allocation when scan outputs DictionaryVector.
+    if (vector->encoding() == VectorEncoding::Simple::DICTIONARY) {
+      auto type = vector->type();
+      auto* pool = vector->pool();
+      auto inner = vector->valueVector();
+      // Drop the dictionary wrapper so inner's refcount may drop to 1.
+      vector.reset();
+      if (inner && inner.use_count() == 1 &&
+          reusableEncoding(inner->encoding())) {
+        vector = std::move(inner);
+        vector->prepareForReuse();
+        vector->resize(size);
+        return;
+      }
+      vector = BaseVector::create(type, size, pool);
+      return;
+    }
     vector = BaseVector::create(vector->type(), size, vector->pool());
     return;
   }

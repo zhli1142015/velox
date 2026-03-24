@@ -17,6 +17,7 @@
 #pragma once
 
 #include "velox/dwio/common/SelectiveFloatingPointColumnReader.h"
+#include "velox/vector/DictionaryVector.h"
 
 namespace facebook::velox::parquet {
 
@@ -52,15 +53,96 @@ class FloatingPointColumnReader
 
   uint64_t skip(uint64_t numValues) override;
 
+  void getValues(const RowSet& rows, VectorPtr* result) override {
+    auto& parquetData = this->formatData_->template as<ParquetData>();
+    // Check if we should output DictionaryVector.
+    if (this->scanState_.dictionary.values && isDictOutputEnabled_) {
+      auto dictionaryValues =
+          parquetData.template typedDictionaryValues<TRequested>(
+              this->requestedType_);
+      this->template compactScalarValues<int32_t, int32_t>(rows, false);
+      *result = std::make_shared<DictionaryVector<TRequested>>(
+          this->memoryPool_,
+          this->resultNulls(),
+          this->numValues_,
+          dictionaryValues,
+          this->values_);
+      return;
+    }
+    this->template getFlatValues<TData, TRequested>(
+        rows, result, this->requestedType_);
+  }
+
+  void dedictionarize() override {
+    if (!this->scanSpec_->keepValues() || !isDictOutputEnabled_) {
+      this->scanState_.clear();
+      return;
+    }
+    auto& parquetData = this->formatData_->template as<ParquetData>();
+    // Check if the index-preserving visitor was actually used for the
+    // previous dict pages. If not (cardinality exceeded threshold), the
+    // buffer contains resolved values, not indices — just clear state.
+    if (!parquetData.indexPreservingDictUsed()) {
+      isDictOutputEnabled_ = false;
+      parquetData.setUseIndexPreservingDict(false);
+      this->scanState_.clear();
+      return;
+    }
+    // Use raw dictionary pointer directly — avoids allocating a temporary
+    // FlatVector wrapper just to read values.
+    auto* dict = reinterpret_cast<const TRequested*>(
+        this->scanState_.rawState.dictionary.values);
+    auto* indices = this->values_->template asMutable<int32_t>();
+    auto numVals = this->numValues_;
+    // int32 indices → TRequested values: expand from end to avoid overwrite
+    // since sizeof(TRequested) >= sizeof(int32_t).
+    for (auto i = numVals - 1; i >= 0; --i) {
+      if (this->anyNulls_ && bits::isBitNull(this->rawResultNulls_, i)) {
+        reinterpret_cast<TRequested*>(this->rawValues_)[i] = TRequested();
+        continue;
+      }
+      reinterpret_cast<TRequested*>(this->rawValues_)[i] = dict[indices[i]];
+    }
+    this->valueSize_ = sizeof(TRequested);
+    isDictOutputEnabled_ = false;
+    parquetData.setUseIndexPreservingDict(false);
+    this->scanState_.clear();
+    parquetData.clearDictionary();
+  }
+
   void read(int64_t offset, const RowSet& rows, const uint64_t* incomingNulls)
       override {
     using T = FloatingPointColumnReader<TData, TRequested>;
+    auto& parquetData = this->formatData_->template as<ParquetData>();
+
+    // Enable index-preserving dict mode speculatively based on config.
+    // Only for sizeof(TRequested) >= 4 (float and double both qualify).
+    // Disable for type evolution cases where TData != TRequested (e.g.,
+    // float→double) since the dict buffer holds TData values, not TRequested.
+    isDictOutputEnabled_ =
+        std::is_same_v<TData, TRequested> && parquetData.outputDictVector();
+    parquetData.setUseIndexPreservingDict(isDictOutputEnabled_);
+
     this->template readCommon<T, true>(offset, rows, incomingNulls);
     this->readOffset_ += rows.back() + 1;
+
+    // After readCommon, check if the index-preserving visitor was actually
+    // used. If not (e.g., plain page, or cardinality exceeded threshold in
+    // callDecoder), the buffer contains resolved values, not indices.
+    if (isDictOutputEnabled_) {
+      if (!this->scanState_.dictionary.values ||
+          !parquetData.indexPreservingDictUsed()) {
+        isDictOutputEnabled_ = false;
+      }
+    }
+    parquetData.setUseIndexPreservingDict(false);
   }
 
   template <typename TVisitor>
   void readWithVisitor(const RowSet& rows, TVisitor visitor);
+
+ private:
+  bool isDictOutputEnabled_{false};
 };
 
 template <typename TData, typename TRequested>

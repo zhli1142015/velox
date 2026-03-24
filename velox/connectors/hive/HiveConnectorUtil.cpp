@@ -686,6 +686,10 @@ void configureRowReaderOptions(
         hiveConfig->parallelUnitLoadCount(sessionProperties));
     rowReaderOptions.setIndexEnabled(
         hiveConfig->indexEnabled(sessionProperties));
+    rowReaderOptions.setOutputDictVector(
+        hiveConfig->isParquetOutputDictVector(sessionProperties));
+    rowReaderOptions.setMaxDictEntriesForDictVector(
+        hiveConfig->parquetMaxDictEntriesForDictVector(sessionProperties));
   }
   rowReaderOptions.setSerdeParameters(hiveSplit->serdeParameters);
 }

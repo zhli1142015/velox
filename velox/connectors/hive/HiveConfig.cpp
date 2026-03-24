@@ -110,6 +110,20 @@ bool HiveConfig::isParquetUseColumnNames(
       config_->get<bool>(kParquetUseColumnNames, false));
 }
 
+bool HiveConfig::isParquetOutputDictVector(
+    const config::ConfigBase* session) const {
+  return session->get<bool>(
+      kParquetOutputDictVectorSession,
+      config_->get<bool>(kParquetOutputDictVector, true));
+}
+
+int32_t HiveConfig::parquetMaxDictEntriesForDictVector(
+    const config::ConfigBase* session) const {
+  return session->get<int32_t>(
+      kParquetMaxDictEntriesSession,
+      config_->get<int32_t>(kParquetMaxDictEntries, 1000));
+}
+
 bool HiveConfig::isFileColumnNamesReadAsLowerCase(
     const config::ConfigBase* session) const {
   return session->get<bool>(

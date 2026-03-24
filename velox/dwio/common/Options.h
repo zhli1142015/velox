@@ -475,6 +475,22 @@ class RowReaderOptions {
     passStringBuffersFromDecoder_ = passStringBuffersFromDecoder;
   }
 
+  bool outputDictVector() const {
+    return outputDictVector_;
+  }
+
+  void setOutputDictVector(bool outputDictVector) {
+    outputDictVector_ = outputDictVector;
+  }
+
+  int32_t maxDictEntriesForDictVector() const {
+    return maxDictEntriesForDictVector_;
+  }
+
+  void setMaxDictEntriesForDictVector(int32_t maxEntries) {
+    maxDictEntriesForDictVector_ = maxEntries;
+  }
+
  private:
   uint64_t dataStart_;
   uint64_t dataLength_;
@@ -539,6 +555,11 @@ class RowReaderOptions {
   // NOTE: we will control this option with a session property
   // for prod. Tests are parameterized on both branches.
   bool passStringBuffersFromDecoder_{false};
+  // When true, Parquet dict-encoded columns with value type size >= 4 bytes
+  // and dict cardinality <= maxDictEntriesForDictVector_ output
+  // DictionaryVector instead of FlatVector.
+  bool outputDictVector_{true};
+  int32_t maxDictEntriesForDictVector_{1000};
 };
 
 /// Options for creating a Reader.

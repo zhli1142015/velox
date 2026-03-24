@@ -1208,7 +1208,9 @@ class ParquetRowReader::Impl {
         columnReaderStats_,
         readerBase_->fileMetaData(),
         readerBase->sessionTimezone(),
-        options_.timestampPrecision());
+        options_.timestampPrecision(),
+        options_.outputDictVector(),
+        options_.maxDictEntriesForDictVector());
     requestedType_ = options_.requestedType() ? options_.requestedType()
                                               : readerBase_->schema();
     columnReader_ = ParquetColumnReader::build(

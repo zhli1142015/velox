@@ -2111,3 +2111,616 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<FloatToDoubleTestParam>& info) {
       return info.param.toString();
     });
+
+// ======================================================================
+// Dictionary Vector Output Tests
+//
+// Tests for the DictionaryVector output path in Parquet reader.
+// Uses pre-generated Parquet files with guaranteed dict encoding
+// (created by pyarrow) in velox/dwio/parquet/tests/examples/dict_*.parquet.
+// ======================================================================
+
+namespace {
+
+// Helper: create a row reader from a file path with dict vector output config.
+std::unique_ptr<dwio::common::RowReader> createDictRowReader(
+    const std::string& filePath,
+    const RowTypePtr& schema,
+    bool outputDictVector,
+    int32_t maxDictEntries,
+    memory::MemoryPool* pool,
+    std::unique_ptr<ParquetReader>& readerOut,
+    std::shared_ptr<common::ScanSpec> scanSpec = nullptr) {
+  dwio::common::ReaderOptions readerOpts{pool};
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<LocalReadFile>(filePath), readerOpts.memoryPool());
+  readerOut = std::make_unique<ParquetReader>(std::move(input), readerOpts);
+
+  dwio::common::RowReaderOptions rowReaderOpts;
+  rowReaderOpts.select(
+      std::make_shared<dwio::common::ColumnSelector>(
+          schema, schema->names(), nullptr, false));
+  if (!scanSpec) {
+    scanSpec = std::make_shared<common::ScanSpec>("");
+    scanSpec->addAllChildFields(*schema);
+  }
+  rowReaderOpts.setScanSpec(scanSpec);
+  rowReaderOpts.setOutputDictVector(outputDictVector);
+  rowReaderOpts.setMaxDictEntriesForDictVector(maxDictEntries);
+  return readerOut->createRowReader(rowReaderOpts);
+}
+
+} // namespace
+
+// --- Basic type coverage tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputInt32) {
+  auto schema = ROW({"c0"}, {INTEGER()});
+  auto filePath = getExampleFilePath("dict_int32_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY for INT32 at batch offset " << totalRead;
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_EQ(
+          col->as<SimpleVector<int32_t>>()->valueAt(i),
+          static_cast<int32_t>((totalRead + i) % 10));
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputInt64) {
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY for INT64 at batch offset " << totalRead;
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_EQ(
+          col->as<SimpleVector<int64_t>>()->valueAt(i),
+          static_cast<int64_t>((totalRead + i) % 5) * 100000L);
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputFloat) {
+  auto schema = ROW({"c0"}, {REAL()});
+  auto filePath = getExampleFilePath("dict_float_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY for FLOAT at batch offset " << totalRead;
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_FLOAT_EQ(
+          col->as<SimpleVector<float>>()->valueAt(i),
+          static_cast<float>((totalRead + i) % 6) * 0.5f);
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputDouble) {
+  auto schema = ROW({"c0"}, {DOUBLE()});
+  auto filePath = getExampleFilePath("dict_double_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY for DOUBLE at batch offset " << totalRead;
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_DOUBLE_EQ(
+          col->as<SimpleVector<double>>()->valueAt(i),
+          static_cast<double>((totalRead + i) % 8) * 1.5);
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+// --- Null handling tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputWithNulls) {
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_with_nulls.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY with nulls at batch offset " << totalRead;
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      auto origIdx = totalRead + i;
+      if (origIdx % 5 == 1 || origIdx % 7 == 3) {
+        ASSERT_TRUE(col->isNullAt(i)) << "Expected null at row " << origIdx;
+      } else {
+        ASSERT_FALSE(col->isNullAt(i))
+            << "Expected non-null at row " << origIdx;
+        ASSERT_EQ(
+            col->as<SimpleVector<int64_t>>()->valueAt(i),
+            static_cast<int64_t>(origIdx % 3));
+      }
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputAllNulls) {
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_all_nulls.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    // All-null column: encoding depends on reader implementation.
+    // We just verify all values are null and no crash occurs.
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_TRUE(col->isNullAt(i)) << "Expected null at row " << totalRead + i;
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+// --- Config control tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputDisabledByConfig) {
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  // Disable dict vector output.
+  auto rowReader = createDictRowReader(
+      filePath,
+      schema,
+      /*outputDictVector=*/false,
+      1000,
+      leafPool_.get(),
+      reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  auto numRead = rowReader->next(1000, result);
+  ASSERT_GT(numRead, 0);
+  auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+  ASSERT_EQ(col->encoding(), VectorEncoding::Simple::FLAT)
+      << "Expected FLAT when dict vector output is disabled";
+  // Verify values are still correct.
+  for (vector_size_t i = 0; i < result->size(); ++i) {
+    ASSERT_EQ(
+        col->as<SimpleVector<int64_t>>()->valueAt(i),
+        static_cast<int64_t>(i % 5) * 100000L);
+  }
+}
+
+// --- Cardinality threshold tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputHighCardinality) {
+  // 2000 distinct values > 1000 threshold → must produce FlatVector.
+  // Values are 0-1999 repeating across 10000 rows.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_high_cardinality.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  auto numRead = rowReader->next(1000, result);
+  ASSERT_GT(numRead, 0);
+  auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+  ASSERT_EQ(col->encoding(), VectorEncoding::Simple::FLAT)
+      << "Expected FLAT for high-cardinality (2000 entries > 1000 threshold)";
+  // Verify actual values are correct (not raw dictionary indices).
+  auto* flatCol = col->asFlatVector<int64_t>();
+  for (vector_size_t i = 0; i < result->size(); ++i) {
+    auto val = flatCol->valueAt(i);
+    ASSERT_GE(val, 0) << "Value should be >= 0 at row " << i;
+    ASSERT_LT(val, 2000) << "Value should be < 2000 at row " << i;
+    ASSERT_EQ(val, i % 2000) << "Unexpected value at row " << i;
+  }
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputBoundary1Entry) {
+  // Exactly 1 distinct value → should be DICTIONARY.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_boundary_1_entry.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY for 1-entry dictionary";
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_EQ(col->as<SimpleVector<int64_t>>()->valueAt(i), 42);
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputBoundaryAtThreshold) {
+  // Exactly 1000 distinct values == threshold → should be DICTIONARY.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_boundary_1000_entries.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  auto numRead = rowReader->next(1000, result);
+  ASSERT_GT(numRead, 0);
+  auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+  ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+      << "Expected DICTIONARY for exactly 1000 entries (== threshold)";
+  for (vector_size_t i = 0; i < result->size(); ++i) {
+    ASSERT_EQ(
+        col->as<SimpleVector<int64_t>>()->valueAt(i),
+        static_cast<int64_t>(i % 1000));
+  }
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputBoundaryOverThreshold) {
+  // 1001 distinct values > threshold → should be FLAT.
+  // Values are 0-1000 repeating across 10010 rows.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_boundary_1001_entries.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  auto numRead = rowReader->next(1000, result);
+  ASSERT_GT(numRead, 0);
+  auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+  ASSERT_EQ(col->encoding(), VectorEncoding::Simple::FLAT)
+      << "Expected FLAT for 1001 entries (> 1000 threshold)";
+  // Verify actual values are correct (not raw dictionary indices).
+  auto* flatCol = col->asFlatVector<int64_t>();
+  for (vector_size_t i = 0; i < result->size(); ++i) {
+    auto val = flatCol->valueAt(i);
+    ASSERT_GE(val, 0) << "Value should be >= 0 at row " << i;
+    ASSERT_LE(val, 1000) << "Value should be <= 1000 at row " << i;
+    ASSERT_EQ(val, i % 1001) << "Unexpected value at row " << i;
+  }
+}
+
+// --- Filter tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputWithFilter) {
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_with_filter_data.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto scanSpec = makeScanSpec(schema);
+  // Filter: c0 >= 5 (values are 0-9 repeated).
+  scanSpec->getOrCreateChild(common::Subfield("c0"))
+      ->setFilter(exec::greaterThanOrEqual(5));
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader, scanSpec);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalOutput = 0;
+  while (rowReader->next(1000, result)) {
+    if (result->size() == 0) {
+      break;
+    }
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY with filter at batch offset " << totalOutput;
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      auto val = col->as<SimpleVector<int64_t>>()->valueAt(i);
+      ASSERT_GE(val, 5) << "Filtered value should be >= 5 at row " << i;
+      ASSERT_LE(val, 9) << "Value should be <= 9 at row " << i;
+    }
+    totalOutput += result->size();
+  }
+  // 10000 rows, values 0-9 repeated, filter >= 5 keeps 5-9 = 50%.
+  ASSERT_EQ(totalOutput, 5000);
+}
+
+// --- Multi-column tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputMultiColumn) {
+  // File has 4 columns: int32_col (10 distinct), int64_col (5 distinct),
+  // double_col (8 distinct), plain_col (10000 distinct).
+  auto schema =
+      ROW({"int32_col", "int64_col", "double_col", "plain_col"},
+          {INTEGER(), BIGINT(), DOUBLE(), INTEGER()});
+  auto filePath = getExampleFilePath("dict_multi_column.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  auto numRead = rowReader->next(1000, result);
+  ASSERT_GT(numRead, 0);
+  auto row = result->asUnchecked<RowVector>();
+
+  // int32_col: 10 distinct → DICTIONARY
+  auto int32Col = row->childAt(0)->loadedVector();
+  ASSERT_EQ(int32Col->encoding(), VectorEncoding::Simple::DICTIONARY)
+      << "Expected DICTIONARY for int32_col (10 distinct)";
+
+  // int64_col: 5 distinct → DICTIONARY
+  auto int64Col = row->childAt(1)->loadedVector();
+  ASSERT_EQ(int64Col->encoding(), VectorEncoding::Simple::DICTIONARY)
+      << "Expected DICTIONARY for int64_col (5 distinct)";
+
+  // double_col: 8 distinct → DICTIONARY
+  auto doubleCol = row->childAt(2)->loadedVector();
+  ASSERT_EQ(doubleCol->encoding(), VectorEncoding::Simple::DICTIONARY)
+      << "Expected DICTIONARY for double_col (8 distinct)";
+
+  // plain_col: 10000 distinct → FLAT (exceeds 1000 threshold)
+  auto plainCol = row->childAt(3)->loadedVector();
+  ASSERT_EQ(plainCol->encoding(), VectorEncoding::Simple::FLAT)
+      << "Expected FLAT for plain_col (10000 distinct > 1000 threshold)";
+
+  // Verify values for first batch.
+  for (vector_size_t i = 0; i < result->size(); ++i) {
+    ASSERT_EQ(
+        int32Col->as<SimpleVector<int32_t>>()->valueAt(i),
+        static_cast<int32_t>(i % 10));
+    ASSERT_EQ(
+        int64Col->as<SimpleVector<int64_t>>()->valueAt(i),
+        static_cast<int64_t>(i % 5) * 1000L);
+    ASSERT_DOUBLE_EQ(
+        doubleCol->as<SimpleVector<double>>()->valueAt(i),
+        static_cast<double>(i % 8) * 1.5);
+    ASSERT_EQ(
+        plainCol->as<SimpleVector<int32_t>>()->valueAt(i),
+        static_cast<int32_t>(i));
+  }
+}
+
+// --- Multiple row groups tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputMultipleRowGroups) {
+  // File has 3 row groups, each with 5000 rows, 10 distinct values.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_multiple_row_groups.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  int batchCount = 0;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY at batch " << batchCount << " (offset "
+        << totalRead << ")";
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_EQ(
+          col->as<SimpleVector<int64_t>>()->valueAt(i),
+          static_cast<int64_t>((totalRead + i) % 10));
+    }
+    totalRead += numRead;
+    batchCount++;
+  }
+  ASSERT_EQ(totalRead, 15000);
+  ASSERT_GE(batchCount, 3)
+      << "Should have read at least 3 batches (one per RG)";
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputMixedRowGroups) {
+  // File has RG1 (5 distinct → DICTIONARY) and RG2 (2000 distinct → FLAT).
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_mixed_encoding.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  bool seenDict = false;
+  bool seenFlat = false;
+  while (auto numRead = rowReader->next(1000, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    auto enc = col->encoding();
+    if (enc == VectorEncoding::Simple::DICTIONARY) {
+      seenDict = true;
+    } else if (enc == VectorEncoding::Simple::FLAT) {
+      seenFlat = true;
+    }
+    totalRead += numRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+  // RG1 has 5 distinct → DICTIONARY; RG2 has 2000 distinct → FLAT.
+  ASSERT_TRUE(seenDict)
+      << "Should see DICTIONARY batches from low-cardinality RG";
+  ASSERT_TRUE(seenFlat) << "Should see FLAT batches from high-cardinality RG";
+}
+
+// --- Edge case tests ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputSingleRow) {
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_single_row.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  auto numRead = rowReader->next(1000, result);
+  ASSERT_EQ(numRead, 1);
+  auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+  ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+      << "Expected DICTIONARY for single-row file";
+  ASSERT_EQ(col->as<SimpleVector<int64_t>>()->valueAt(0), 42);
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputSmallBatches) {
+  // Read in very small batches (100 rows) to verify dict vector is preserved
+  // across many batch boundaries.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  uint64_t totalRead = 0;
+  int batchCount = 0;
+  while (auto numRead = rowReader->next(100, result)) {
+    auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Expected DICTIONARY at small batch " << batchCount;
+    for (vector_size_t i = 0; i < result->size(); ++i) {
+      ASSERT_EQ(
+          col->as<SimpleVector<int64_t>>()->valueAt(i),
+          static_cast<int64_t>((totalRead + i) % 5) * 100000L);
+    }
+    totalRead += numRead;
+    batchCount++;
+  }
+  ASSERT_EQ(totalRead, 10000);
+  ASSERT_GE(batchCount, 10) << "Should have many small batches";
+}
+
+TEST_F(ParquetReaderTest, dictVectorOutputCustomThreshold) {
+  // Use a custom threshold of 3. File has 5 distinct values → exceeds 3.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, /*maxDictEntries=*/3, leafPool_.get(), reader);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  auto numRead = rowReader->next(1000, result);
+  ASSERT_GT(numRead, 0);
+  auto col = result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+  ASSERT_EQ(col->encoding(), VectorEncoding::Simple::FLAT)
+      << "Expected FLAT when 5 entries > threshold 3";
+}
+
+// --- Data correctness deep-validation test ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputDataIntegrity) {
+  // Read the entire file and compare with known expected values.
+  // Ensures DictionaryVector semantics (indices + dict) produce correct
+  // values end-to-end for all rows.
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_with_nulls.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  // Also read the same file without dict output for comparison.
+  std::unique_ptr<ParquetReader> flatReader;
+  auto flatRowReader = createDictRowReader(
+      filePath, schema, false, 1000, leafPool_.get(), flatReader);
+
+  VectorPtr dictResult = BaseVector::create(schema, 0, leafPool_.get());
+  VectorPtr flatResult = BaseVector::create(schema, 0, leafPool_.get());
+
+  uint64_t totalRead = 0;
+  while (true) {
+    auto dictRead = rowReader->next(1000, dictResult);
+    auto flatRead = flatRowReader->next(1000, flatResult);
+    ASSERT_EQ(dictRead, flatRead)
+        << "Batch size mismatch at offset " << totalRead;
+    if (dictRead == 0) {
+      break;
+    }
+    auto dictCol =
+        dictResult->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    auto flatCol =
+        flatResult->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+
+    ASSERT_EQ(dictCol->size(), flatCol->size());
+    for (vector_size_t i = 0; i < dictCol->size(); ++i) {
+      ASSERT_EQ(dictCol->isNullAt(i), flatCol->isNullAt(i))
+          << "Null mismatch at row " << (totalRead + i);
+      if (!dictCol->isNullAt(i)) {
+        ASSERT_EQ(
+            dictCol->as<SimpleVector<int64_t>>()->valueAt(i),
+            flatCol->as<SimpleVector<int64_t>>()->valueAt(i))
+            << "Value mismatch at row " << (totalRead + i);
+      }
+    }
+    totalRead += dictRead;
+  }
+  ASSERT_EQ(totalRead, 10000);
+}
+
+// --- DictionaryVector buffer sharing test ---
+
+TEST_F(ParquetReaderTest, dictVectorOutputBatchLifetime) {
+  // Read multiple batches, keep references to all of them, then validate
+  // all values. This tests that DictionaryVector buffers (dict + indices)
+  // remain valid across batch lifetimes (no use-after-free).
+  auto schema = ROW({"c0"}, {BIGINT()});
+  auto filePath = getExampleFilePath("dict_int64_10k.parquet");
+  std::unique_ptr<ParquetReader> reader;
+  auto rowReader = createDictRowReader(
+      filePath, schema, true, 1000, leafPool_.get(), reader);
+
+  std::vector<VectorPtr> savedBatches;
+  while (true) {
+    VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+    auto numRead = rowReader->next(1000, result);
+    if (numRead == 0) {
+      break;
+    }
+    // Force load of lazy vector and save a reference.
+    result->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    savedBatches.push_back(result);
+  }
+  ASSERT_GE(savedBatches.size(), 2) << "Should have saved at least 2 batches";
+
+  // Now validate ALL saved batches (reader is still alive but done reading).
+  uint64_t totalRead = 0;
+  for (const auto& batch : savedBatches) {
+    auto col = batch->asUnchecked<RowVector>()->childAt(0)->loadedVector();
+    ASSERT_EQ(col->encoding(), VectorEncoding::Simple::DICTIONARY)
+        << "Saved batch should still be DICTIONARY";
+    for (vector_size_t i = 0; i < batch->size(); ++i) {
+      ASSERT_EQ(
+          col->as<SimpleVector<int64_t>>()->valueAt(i),
+          static_cast<int64_t>((totalRead + i) % 5) * 100000L)
+          << "Value mismatch in saved batch at row " << (totalRead + i);
+    }
+    totalRead += batch->size();
+  }
+  ASSERT_EQ(totalRead, 10000);
+}

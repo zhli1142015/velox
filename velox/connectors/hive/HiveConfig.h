@@ -85,6 +85,25 @@ class HiveConfig {
   static constexpr const char* kParquetUseColumnNamesSession =
       "parquet_use_column_names";
 
+  /// When true, Parquet dictionary-encoded columns with value type size >= 4
+  /// bytes and dictionary cardinality <= the max-dictionary-entries threshold
+  /// will output DictionaryVector instead of FlatVector. This benefits
+  /// downstream operators like HashJoin and Aggregation that optimize for
+  /// dictionary-encoded inputs.
+  static constexpr const char* kParquetOutputDictVector =
+      "hive.parquet.output-dict-vector";
+  static constexpr const char* kParquetOutputDictVectorSession =
+      "parquet_output_dict_vector";
+
+  /// Maximum number of distinct dictionary entries for a Parquet column to
+  /// output DictionaryVector. Columns with more entries than this threshold
+  /// will be flattened as before. Only effective when output-dict-vector is
+  /// enabled.
+  static constexpr const char* kParquetMaxDictEntries =
+      "hive.parquet.max-dict-entries-for-dict-vector";
+  static constexpr const char* kParquetMaxDictEntriesSession =
+      "parquet_max_dict_entries_for_dict_vector";
+
   /// Reads the source file column name as lower case.
   static constexpr const char* kFileColumnNamesReadAsLowerCase =
       "file-column-names-read-as-lower-case";
@@ -248,6 +267,11 @@ class HiveConfig {
   bool isOrcUseColumnNames(const config::ConfigBase* session) const;
 
   bool isParquetUseColumnNames(const config::ConfigBase* session) const;
+
+  bool isParquetOutputDictVector(const config::ConfigBase* session) const;
+
+  int32_t parquetMaxDictEntriesForDictVector(
+      const config::ConfigBase* session) const;
 
   bool isFileColumnNamesReadAsLowerCase(
       const config::ConfigBase* session) const;

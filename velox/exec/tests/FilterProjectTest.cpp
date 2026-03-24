@@ -481,3 +481,180 @@ TEST_F(FilterProjectTest, lazyDereference) {
 
 } // namespace
 } // namespace facebook::velox::exec
+
+namespace facebook::velox::exec {
+namespace {
+
+// Tests for FilterProject with dictionary-encoded input columns.
+// These verify that the WrapState optimization in fillOutput() correctly
+// composes dictionary indices instead of creating double-wrapped
+// Dict(Dict(Flat)) vectors.
+
+class FilterProjectDictTest : public test::HiveConnectorTestBase {
+ protected:
+  void SetUp() override {
+    HiveConnectorTestBase::SetUp();
+  }
+};
+
+// Filter+project where ALL input columns are dictionary-encoded.
+// Verifies correctness and that output has at most one level of dict wrapping.
+TEST_F(FilterProjectDictTest, filterProjectAllDict) {
+  const vector_size_t size = 200;
+  // Create base flat vectors.
+  auto flat0 = makeFlatVector<int64_t>(size, [](auto row) { return row; });
+  auto flat1 = makeFlatVector<int32_t>(size, [](auto row) { return row * 10; });
+
+  // Dictionary indices: reverse order for variety.
+  auto indices = makeIndices(size, [&](auto row) { return size - 1 - row; });
+
+  // Wrap both columns in dictionaries.
+  auto dict0 = BaseVector::wrapInDictionary(nullptr, indices, size, flat0);
+  auto dict1 = BaseVector::wrapInDictionary(nullptr, indices, size, flat1);
+
+  auto input = makeRowVector({"c0", "c1"}, {dict0, dict1});
+  createDuckDbTable({input});
+
+  // Filter + identity projection of a dict column.
+  auto plan = test::PlanBuilder()
+                  .values({input})
+                  .filter("c0 > 50")
+                  .project({"c0", "c1", "c0 + c1"})
+                  .planNode();
+  assertQuery(plan, "SELECT c0, c1, c0 + c1 FROM tmp WHERE c0 > 50");
+}
+
+// Filter+project with a mix of dict and flat columns.
+TEST_F(FilterProjectDictTest, filterProjectMixedDictAndFlat) {
+  const vector_size_t size = 150;
+  auto flatCol = makeFlatVector<int64_t>(size, [](auto row) { return row; });
+  auto dictBase =
+      makeFlatVector<int32_t>(size, [](auto row) { return row * 3; });
+  auto indices = makeIndices(size, [&](auto row) { return row % 100; });
+  auto dictCol = BaseVector::wrapInDictionary(nullptr, indices, size, dictBase);
+
+  auto input = makeRowVector({"c0", "c1"}, {flatCol, dictCol});
+  createDuckDbTable({input});
+
+  auto plan = test::PlanBuilder()
+                  .values({input})
+                  .filter("c0 > 30")
+                  .project({"c0", "c1", "c0 + c1"})
+                  .planNode();
+  assertQuery(plan, "SELECT c0, c1, c0 + c1 FROM tmp WHERE c0 > 30");
+}
+
+// Filter+project with dict columns that have nulls.
+TEST_F(FilterProjectDictTest, filterProjectDictWithNulls) {
+  const vector_size_t size = 200;
+  auto flat0 = makeFlatVector<int64_t>(size, [](auto row) { return row; });
+
+  // Create a nullable dict: every 5th row is null.
+  auto indices = makeIndices(size, [](auto row) { return row % 100; });
+  auto nulls = AlignedBuffer::allocate<bool>(size, pool(), bits::kNotNull);
+  auto* rawNulls = nulls->asMutable<uint64_t>();
+  for (int i = 0; i < size; i += 5) {
+    bits::setNull(rawNulls, i, true);
+  }
+  auto dict0 = BaseVector::wrapInDictionary(nulls, indices, size, flat0);
+
+  auto flat1 = makeFlatVector<int32_t>(size, [](auto row) { return row * 2; });
+
+  auto input = makeRowVector({"c0", "c1"}, {dict0, flat1});
+  createDuckDbTable({input});
+
+  // Filter on the non-null column, project both.
+  auto plan = test::PlanBuilder()
+                  .values({input})
+                  .filter("c1 > 100")
+                  .project({"c0", "c1"})
+                  .planNode();
+  assertQuery(plan, "SELECT c0, c1 FROM tmp WHERE c1 > 100");
+}
+
+// Verify that identity-projected dict columns get single-level wrapping.
+TEST_F(FilterProjectDictTest, filterIdentityProjectSingleLayerDict) {
+  const vector_size_t size = 100;
+  auto flat0 = makeFlatVector<int64_t>(size, [](auto row) { return row; });
+  auto indices = makeIndices(size, [](auto row) { return row % 50; });
+  auto dict0 = BaseVector::wrapInDictionary(nullptr, indices, size, flat0);
+
+  auto flat1 = makeFlatVector<int32_t>(size, [](auto row) { return row * 2; });
+
+  auto input = makeRowVector({"c0", "c1"}, {dict0, flat1});
+
+  // Use AssertQueryBuilder to get at the actual output vectors.
+  auto plan = test::PlanBuilder()
+                  .values({input})
+                  .filter("c1 % 3 = 0")
+                  .project({"c0", "c1"})
+                  .planNode();
+
+  auto result = test::AssertQueryBuilder(plan).copyResults(pool());
+
+  // c0 was dict input, after filter it should still be dict but with only
+  // one level of wrapping (not Dict(Dict(Flat))).
+  auto& c0 = result->childAt(0);
+  if (c0->encoding() == VectorEncoding::Simple::DICTIONARY) {
+    // The inner should be flat, not another dictionary.
+    ASSERT_EQ(c0->valueVector()->encoding(), VectorEncoding::Simple::FLAT)
+        << "Expected Dict(Flat), got Dict(Dict(...))";
+  }
+
+  // Verify correctness by comparing with DuckDB.
+  createDuckDbTable({input});
+  auto plan2 = test::PlanBuilder()
+                   .values({input})
+                   .filter("c1 % 3 = 0")
+                   .project({"c0", "c1"})
+                   .planNode();
+  assertQuery(plan2, "SELECT c0, c1 FROM tmp WHERE c1 % 3 = 0");
+}
+
+// Multiple batches with dict input to exercise vector reuse across batches.
+TEST_F(FilterProjectDictTest, filterProjectDictMultipleBatches) {
+  const vector_size_t size = 100;
+  std::vector<RowVectorPtr> batches;
+  for (int b = 0; b < 5; ++b) {
+    auto flat =
+        makeFlatVector<int64_t>(size, [b](auto row) { return row + b * 100; });
+    auto indices = makeIndices(size, [](auto row) { return row % 50; });
+    auto dict = BaseVector::wrapInDictionary(nullptr, indices, size, flat);
+    auto flat1 =
+        makeFlatVector<int32_t>(size, [b](auto row) { return row * (b + 1); });
+    batches.push_back(makeRowVector({"c0", "c1"}, {dict, flat1}));
+  }
+  createDuckDbTable(batches);
+
+  auto plan = test::PlanBuilder()
+                  .values(batches)
+                  .filter("c1 > 50")
+                  .project({"c0", "c1", "c0 + c1"})
+                  .planNode();
+  assertQuery(plan, "SELECT c0, c1, c0 + c1 FROM tmp WHERE c1 > 50");
+}
+
+// Dict columns sharing the same indices buffer — WrapState should deduplicate
+// the transposed indices.
+TEST_F(FilterProjectDictTest, filterProjectSharedDictIndices) {
+  const vector_size_t size = 100;
+  auto flat0 = makeFlatVector<int64_t>(size, [](auto row) { return row; });
+  auto flat1 = makeFlatVector<int32_t>(size, [](auto row) { return row * 5; });
+  // Both columns share the same indices buffer.
+  auto indices = makeIndices(size, [](auto row) { return row % 50; });
+  auto dict0 = BaseVector::wrapInDictionary(nullptr, indices, size, flat0);
+  auto dict1 = BaseVector::wrapInDictionary(nullptr, indices, size, flat1);
+
+  auto input = makeRowVector({"c0", "c1"}, {dict0, dict1});
+  createDuckDbTable({input});
+
+  auto plan = test::PlanBuilder()
+                  .values({input})
+                  .filter("c0 > 10")
+                  .project({"c0", "c1"})
+                  .planNode();
+  assertQuery(plan, "SELECT c0, c1 FROM tmp WHERE c0 > 10");
+}
+
+} // namespace
+} // namespace facebook::velox::exec

@@ -467,3 +467,199 @@ TEST_F(VectorPrepareForReuseTest, recursivelyReusableDictionaryVector) {
   indices.reset();
   ASSERT_FALSE(BaseVector::recursivelyReusable(dictionary));
 }
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseDictionaryUnwrap) {
+  // prepareForReuse on a uniquely-owned DictionaryVector should unwrap to
+  // the inner FlatVector instead of allocating a brand new one.
+  auto flat = makeFlatVector<int64_t>(100, [](auto row) { return row * 10; });
+  auto indices = makeIndices(100, [](auto row) { return row % 50; });
+  VectorPtr dict = BaseVector::wrapInDictionary(nullptr, indices, 100, flat);
+
+  // Drop external refs so only dict holds inner flat.
+  auto* innerRawPtr = flat.get();
+  flat.reset();
+  indices.reset();
+
+  // dict is the sole owner.
+  ASSERT_EQ(dict.use_count(), 1);
+  ASSERT_EQ(dict->encoding(), VectorEncoding::Simple::DICTIONARY);
+
+  // prepareForReuse should unwrap to the inner flat vector.
+  BaseVector::prepareForReuse(dict, 200);
+  ASSERT_EQ(dict->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(dict->size(), 200);
+  ASSERT_EQ(dict.get(), innerRawPtr);
+}
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseDictionarySharedInner) {
+  // When the inner FlatVector of a DictionaryVector has extra references,
+  // prepareForReuse should fall back to creating a new FlatVector.
+  auto flat = makeFlatVector<int32_t>(100, [](auto row) { return row; });
+  auto indices = makeIndices(100, [](auto row) { return row; });
+  VectorPtr dict = BaseVector::wrapInDictionary(nullptr, indices, 100, flat);
+  indices.reset();
+
+  // flat still holds an external reference to the inner vector.
+  ASSERT_EQ(dict.use_count(), 1);
+
+  BaseVector::prepareForReuse(dict, 50);
+  ASSERT_EQ(dict->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(dict->size(), 50);
+  // Should be a brand new vector, not the original flat.
+  ASSERT_NE(dict.get(), flat.get());
+}
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseDictionaryWithNulls) {
+  // DictionaryVector with nulls — unwrap should still work.
+  auto flat = makeFlatVector<int32_t>(50, [](auto row) { return row; });
+  auto indices = makeIndices(100, [](auto row) { return row % 50; });
+  auto nulls = AlignedBuffer::allocate<bool>(100, pool(), bits::kNotNull);
+  // Set every 10th row as null.
+  auto* rawNulls = nulls->asMutable<uint64_t>();
+  for (int i = 0; i < 100; i += 10) {
+    bits::setNull(rawNulls, i, true);
+  }
+  VectorPtr dict = BaseVector::wrapInDictionary(nulls, indices, 100, flat);
+
+  auto* innerRawPtr = flat.get();
+  flat.reset();
+  indices.reset();
+  nulls.reset();
+
+  ASSERT_EQ(dict.use_count(), 1);
+  BaseVector::prepareForReuse(dict, 80);
+  ASSERT_EQ(dict->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(dict->size(), 80);
+  ASSERT_EQ(dict.get(), innerRawPtr);
+}
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseRowWithDictionaryChild) {
+  // A RowVector whose child is a DictionaryVector — the child should be
+  // unwrapped to FlatVector, not recreated from scratch.
+  auto flat = makeFlatVector<int64_t>(100, [](auto row) { return row; });
+  auto indices = makeIndices(100, [](auto row) { return row % 50; });
+  VectorPtr dictChild =
+      BaseVector::wrapInDictionary(nullptr, indices, 100, flat);
+  auto* innerFlatPtr = flat.get();
+  flat.reset();
+  indices.reset();
+
+  auto rowType = ROW({"c0"}, {BIGINT()});
+  // Use std::move to ensure the RowVector has use_count == 1.
+  auto row = std::make_shared<RowVector>(
+      pool(), rowType, nullptr, 100, std::vector<VectorPtr>{dictChild});
+  dictChild.reset();
+  VectorPtr rowVec = std::move(row);
+
+  ASSERT_EQ(rowVec.use_count(), 1);
+  ASSERT_EQ(
+      rowVec->asUnchecked<RowVector>()->childAt(0)->encoding(),
+      VectorEncoding::Simple::DICTIONARY);
+
+  BaseVector::prepareForReuse(rowVec, 200);
+
+  // Row should be reused, and its child should be unwrapped from dict to flat.
+  ASSERT_EQ(rowVec->encoding(), VectorEncoding::Simple::ROW);
+  auto* resultRow = rowVec->asUnchecked<RowVector>();
+  ASSERT_EQ(resultRow->childAt(0)->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(resultRow->childAt(0).get(), innerFlatPtr);
+}
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseDictionaryOfDictionary) {
+  // DICTIONARY(DICTIONARY(FLAT)) — inner is also dict, not reusable.
+  // Should fall back to BaseVector::create().
+  auto flat = makeFlatVector<int32_t>(50, [](auto row) { return row; });
+  auto innerIndices = makeIndices(100, [](auto row) { return row % 50; });
+  auto innerDict =
+      BaseVector::wrapInDictionary(nullptr, innerIndices, 100, flat);
+  auto outerIndices = makeIndices(100, [](auto row) { return row; });
+  VectorPtr outerDict =
+      BaseVector::wrapInDictionary(nullptr, outerIndices, 100, innerDict);
+  flat.reset();
+  innerIndices.reset();
+  innerDict.reset();
+  outerIndices.reset();
+
+  ASSERT_EQ(outerDict.use_count(), 1);
+  ASSERT_EQ(outerDict->encoding(), VectorEncoding::Simple::DICTIONARY);
+
+  BaseVector::prepareForReuse(outerDict, 80);
+  // Inner is DICTIONARY, which is not reusable — should create a new flat.
+  ASSERT_EQ(outerDict->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(outerDict->size(), 80);
+}
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseDictionaryOfConstant) {
+  // DICTIONARY wrapping CONSTANT — inner is not reusable encoding.
+  auto constant = BaseVector::createConstant(INTEGER(), 42, 50, pool());
+  auto indices = makeIndices(100, [](auto row) { return row % 50; });
+  VectorPtr dict =
+      BaseVector::wrapInDictionary(nullptr, indices, 100, constant);
+  constant.reset();
+  indices.reset();
+
+  ASSERT_EQ(dict.use_count(), 1);
+  BaseVector::prepareForReuse(dict, 60);
+  // CONSTANT is not reusable — should create a brand new flat.
+  ASSERT_EQ(dict->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(dict->size(), 60);
+}
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseDictionaryUnwrapIsUsable) {
+  // After unwrapping a dict to its inner flat, the vector should be fully
+  // usable: we can write data to it and read it back.
+  auto flat = makeFlatVector<int64_t>(100, [](auto row) { return row * 3; });
+  auto indices = makeIndices(80, [](auto row) { return row % 100; });
+  VectorPtr dict = BaseVector::wrapInDictionary(nullptr, indices, 80, flat);
+  flat.reset();
+  indices.reset();
+
+  ASSERT_EQ(dict.use_count(), 1);
+  BaseVector::prepareForReuse(dict, 50);
+  ASSERT_EQ(dict->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(dict->size(), 50);
+
+  // Write new data into the reused vector.
+  auto* flatResult = dict->asFlatVector<int64_t>();
+  ASSERT_NE(flatResult, nullptr);
+  for (int i = 0; i < 50; ++i) {
+    flatResult->set(i, i * 7);
+  }
+  // Read it back.
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_EQ(flatResult->valueAt(i), i * 7);
+  }
+}
+
+TEST_F(VectorPrepareForReuseTest, prepareForReuseRowMultipleDictChildren) {
+  // RowVector with multiple dict children: one with uniquely-owned inner
+  // (should unwrap) and one with shared inner (should create new).
+  auto flat1 = makeFlatVector<int32_t>(50, [](auto row) { return row; });
+  auto flat2 = makeFlatVector<int32_t>(50, [](auto row) { return row * 2; });
+  auto indices = makeIndices(100, [](auto row) { return row % 50; });
+
+  VectorPtr dict1 = BaseVector::wrapInDictionary(nullptr, indices, 100, flat1);
+  VectorPtr dict2 = BaseVector::wrapInDictionary(nullptr, indices, 100, flat2);
+
+  auto* flat1Ptr = flat1.get();
+  flat1.reset();
+  // flat2 retains an extra reference — dict2's inner will have use_count > 1.
+  indices.reset();
+
+  auto rowType = ROW({"c0", "c1"}, {INTEGER(), INTEGER()});
+  auto row = std::make_shared<RowVector>(
+      pool(), rowType, nullptr, 100, std::vector<VectorPtr>{dict1, dict2});
+  dict1.reset();
+  dict2.reset();
+  VectorPtr rowVec = std::move(row);
+
+  BaseVector::prepareForReuse(rowVec, 80);
+
+  auto* resultRow = rowVec->asUnchecked<RowVector>();
+  // First child: inner was uniquely owned → unwrapped to original flat.
+  ASSERT_EQ(resultRow->childAt(0)->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(resultRow->childAt(0).get(), flat1Ptr);
+  // Second child: inner had extra ref (flat2) → created new flat.
+  ASSERT_EQ(resultRow->childAt(1)->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_NE(resultRow->childAt(1).get(), flat2.get());
+}
