@@ -147,13 +147,23 @@ void SelectiveColumnReader::getFlatValues(
     }
     *result = flatMapValueFlatValues_;
   } else {
-    *result = std::make_shared<FlatVector<TVector>>(
-        memoryPool_,
-        type,
-        resultNulls(),
-        numValues_,
-        values_,
-        std::move(stringBuffers_));
+    if (cachedFlatValues_ && cachedFlatValues_.use_count() == 1 &&
+        cachedFlatValues_->isFlatEncoding()) {
+      auto* flat = cachedFlatValues_->asUnchecked<FlatVector<TVector>>();
+      flat->unsafeSetSize(numValues_);
+      flat->setNulls(resultNulls());
+      flat->unsafeSetValues(values_);
+      flat->setStringBuffers(std::move(stringBuffers_));
+    } else {
+      cachedFlatValues_ = std::make_shared<FlatVector<TVector>>(
+          memoryPool_,
+          type,
+          resultNulls(),
+          numValues_,
+          values_,
+          std::move(stringBuffers_));
+    }
+    *result = cachedFlatValues_;
   }
 }
 

@@ -742,6 +742,11 @@ class SelectiveColumnReader {
   BufferPtr flatMapValueNullsInReadRange_;
   VectorPtr flatMapValueFlatValues_;
   VectorPtr flatMapValueConstantNullValues_;
+
+  // Cached FlatVector shell for non-flatmap leaf readers. Reused across
+  // batches when use_count == 1 (downstream has released its reference),
+  // avoiding std::make_shared<FlatVector> heap allocation per batch.
+  VectorPtr cachedFlatValues_;
 };
 
 template <>

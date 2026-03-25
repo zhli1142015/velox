@@ -362,13 +362,23 @@ void SelectiveColumnReader::getFlatValues<int8_t, bool>(
           ~simd::toBitMask(zero == xsimd::load_unaligned(rawBytes + i));
     }
   }
-  *result = std::make_shared<FlatVector<bool>>(
-      memoryPool_,
-      type,
-      resultNulls(),
-      numValues_,
-      std::move(boolValues),
-      std::move(stringBuffers_));
+  if (cachedFlatValues_ && cachedFlatValues_.use_count() == 1 &&
+      cachedFlatValues_->isFlatEncoding()) {
+    auto* flat = cachedFlatValues_->asUnchecked<FlatVector<bool>>();
+    flat->unsafeSetSize(numValues_);
+    flat->setNulls(resultNulls());
+    flat->unsafeSetValues(std::move(boolValues));
+    flat->setStringBuffers(std::move(stringBuffers_));
+  } else {
+    cachedFlatValues_ = std::make_shared<FlatVector<bool>>(
+        memoryPool_,
+        type,
+        resultNulls(),
+        numValues_,
+        std::move(boolValues),
+        std::move(stringBuffers_));
+  }
+  *result = cachedFlatValues_;
 }
 
 template <>

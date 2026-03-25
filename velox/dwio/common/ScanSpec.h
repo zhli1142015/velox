@@ -298,6 +298,17 @@ class ScanSpec {
 
   std::string toString() const;
 
+  /// When enabled, top-level projected columns without filters are loaded
+  /// eagerly instead of wrapped in LazyVector. This enables buffer reuse
+  /// across batches in leaf column readers but disables agg pushdown hooks.
+  void setEnableEagerLoading(bool value) {
+    enableEagerLoading_ = value;
+  }
+
+  bool enableEagerLoading() const {
+    return enableEagerLoading_;
+  }
+
   /// Add a field to this ScanSpec, with content projected out.
   ScanSpec* addField(const std::string& name, column_index_t channel);
 
@@ -457,6 +468,14 @@ class ScanSpec {
 
   mutable std::optional<bool> hasFilter_;
   ValueHook* valueHook_ = nullptr;
+
+  // When true, columns without filters or hooks that are top-level and
+  // projected will be produced as eager FlatVectors instead of LazyVectors.
+  // This enables buffer reuse across batches in the leaf column readers.
+  // Only columns that benefit from lazy loading (e.g., agg pushdown via
+  // ValueHook) should remain lazy.  Set to true by connectors that want
+  // to reduce memory allocations for projected columns.
+  bool enableEagerLoading_{false};
 
   // If this node is map key/value or array element, filter will not be
   // propagated to parent.

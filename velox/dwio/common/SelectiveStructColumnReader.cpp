@@ -317,6 +317,48 @@ void SelectiveStructColumnReaderBase::fillOutputRowsFromMutation(
   }
 }
 
+void SelectiveStructColumnReaderBase::releaseEagerChildren(VectorPtr& result) {
+  if (!result || result.use_count() != 1) {
+    return;
+  }
+  auto* row = dynamic_cast<RowVector*>(result.get());
+  if (!row) {
+    return;
+  }
+  for (const auto& childSpec : scanSpec_->children()) {
+    if (!childSpec->keepValues()) {
+      continue;
+    }
+    const auto channel = childSpec->channel();
+    const auto index = childSpec->subscript();
+    // Only release children that will be eagerly filled by leaf getValues().
+    // Skip constants, row-index, composite, missing, lazy, and delta-update.
+    if (childSpec->isConstant() || childSpec->deltaUpdate() ||
+        index == kConstantChildSpecSubscript ||
+        childSpec->columnType() !=
+            velox::common::ScanSpec::ColumnType::kRegular) {
+      continue;
+    }
+    // Eager path: hasFilter, non-top-level, lazy generation disabled,
+    // or eager loading enabled.
+    if (childSpec->hasFilter() || !children_[index]->isTopLevel() ||
+        !generateLazyChildren_ || scanSpec_->enableEagerLoading()) {
+      if (channel < row->childrenSize()) {
+        auto& child = row->childAt(channel);
+        // Only release flat/dictionary leaf vectors, not struct/array/map
+        // children (which are needed as the result parameter for recursive
+        // getValues calls on nested struct readers).
+        if (child && child.use_count() == 1 &&
+            (child->isFlatEncoding() ||
+             child->encoding() == VectorEncoding::Simple::DICTIONARY ||
+             child->encoding() == VectorEncoding::Simple::CONSTANT)) {
+          child.reset();
+        }
+      }
+    }
+  }
+}
+
 void SelectiveStructColumnReaderBase::next(
     uint64_t numValues,
     VectorPtr& result,
@@ -327,6 +369,12 @@ void SelectiveStructColumnReaderBase::next(
   const RowSet rows(iota(numValues, rows_), numValues);
 
   if (!children_.empty()) {
+    // Release eagerly-read child vectors from the previous batch so that
+    // the leaf readers' internal buffers (values_, resultNulls_) become
+    // uniquely owned, enabling in-place reuse in ensureValuesCapacity()
+    // during read().  Without this, the old FlatVector in the RowVector's
+    // children slot shares the buffer (refcount=2), forcing a re-allocation.
+    releaseEagerChildren(result);
     read(readOffset_, rows, nullptr);
     getValues(outputRows(), &result);
     return;
@@ -450,7 +498,8 @@ void SelectiveStructColumnReaderBase::read(
     const auto fieldIndex = childSpec->subscript();
     auto* reader = children_.at(fieldIndex);
     if (reader->isTopLevel() && childSpec->projectOut() &&
-        !childSpec->hasFilter() && generateLazyChildren_) {
+        !childSpec->hasFilter() && generateLazyChildren_ &&
+        !scanSpec_->enableEagerLoading()) {
       // Will make a LazyVector.
       continue;
     }
@@ -611,7 +660,7 @@ void SelectiveStructColumnReaderBase::getValues(
     }
 
     if (childSpec->hasFilter() || !children_[index]->isTopLevel() ||
-        !generateLazyChildren_) {
+        !generateLazyChildren_ || scanSpec_->enableEagerLoading()) {
       children_[index]->getValues(rows, &childResult);
       continue;
     }

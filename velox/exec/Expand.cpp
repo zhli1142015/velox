@@ -106,10 +106,26 @@ RowVectorPtr Expand::getOutput() {
   const auto& constantProjection = constantOutputs_[rowIndex_];
   const auto numColumns = rowProjection.size();
 
+  // Lazily initialize the constant wrapper cache.
+  if (cachedConstantWrappers_.empty()) {
+    cachedConstantWrappers_.resize(fieldProjections_.size());
+    for (auto& row : cachedConstantWrappers_) {
+      row.resize(numColumns);
+    }
+  }
+  auto& cachedRow = cachedConstantWrappers_[rowIndex_];
+
   for (auto i = 0; i < numColumns; ++i) {
     if (rowProjection[i] == kConstantChannel) {
-      outputColumns[i] =
-          BaseVector::wrapInConstant(numInput, 0, constantProjection[i]);
+      if (cachedRow[i] && cachedRow[i].use_count() == 1) {
+        // Reuse the cached ConstantVector wrapper, just update size.
+        cachedRow[i]->resize(numInput);
+        outputColumns[i] = cachedRow[i];
+      } else {
+        cachedRow[i] =
+            BaseVector::wrapInConstant(numInput, 0, constantProjection[i]);
+        outputColumns[i] = cachedRow[i];
+      }
     } else {
       outputColumns[i] = input_->childAt(rowProjection[i]);
     }

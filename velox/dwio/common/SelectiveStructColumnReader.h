@@ -134,6 +134,11 @@ class SelectiveStructColumnReaderBase : public SelectiveColumnReader {
   // treated as null).
   bool isChildMissing(const velox::common::ScanSpec& childSpec) const;
 
+  // Releases eagerly-read child vectors from the previous batch so that
+  // leaf readers' internal buffers become uniquely owned, enabling
+  // in-place reuse during ensureValuesCapacity().
+  void releaseEagerChildren(VectorPtr& result);
+
   bool isChildConstant(const velox::common::ScanSpec& childSpec) const {
     return childSpec.isConstant() ||
         childSpec.subscript() == kConstantChildSpecSubscript ||

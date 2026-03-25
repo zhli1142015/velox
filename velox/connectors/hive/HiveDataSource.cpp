@@ -192,6 +192,11 @@ HiveDataSource::HiveDataSource(
       hiveConfig_->readStatsBasedFilterReorderDisabled(
           connectorQueryCtx_->sessionProperties()),
       pool_);
+  // Enable eager loading for projected columns to allow buffer reuse across
+  // batches in leaf column readers. This disables lazy loading (and thus
+  // agg pushdown hooks) but avoids per-batch allocation overhead for columns
+  // that would be fully loaded anyway.
+  scanSpec_->setEnableEagerLoading(true);
   if (remainingFilter) {
     metadataFilter_ = std::make_shared<common::MetadataFilter>(
         *scanSpec_, *remainingFilter, expressionEvaluator_);
