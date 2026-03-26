@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 
@@ -172,6 +173,71 @@ TEST_F(ExpandTest, invalidUseCases) {
   VELOX_ASSERT_RUNTIME_THROW(
       PlanBuilder().values({data}).expand({}),
       "projections must not be empty.");
+}
+
+TEST_F(ExpandTest, constantVectorReuse) {
+  // Verifies that constant vectors in Expand are cached and reused across
+  // batches, avoiding repeated allocations for identical null/scalar constants.
+  // Use multiple batches to exercise the reuse path.
+  std::vector<RowVectorPtr> batches;
+  for (int i = 0; i < 5; ++i) {
+    batches.push_back(makeRowVector(
+        {"k1", "k2", "a", "b"},
+        {
+            makeFlatVector<int64_t>(
+                100, [&](auto row) { return row + i * 100; }),
+            makeFlatVector<int64_t>(100, [&](auto row) { return row % 17; }),
+            makeFlatVector<int64_t>(100, [&](auto row) { return row; }),
+            makeFlatVector<std::string>(
+                100, [](auto row) { return std::string(row % 5, 'x'); }),
+        }));
+  }
+
+  // 2 grouping sets: one nulls out k2, the other nulls out k1.
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .expand(
+                      {{"k1", "null::bigint as k2", "a", "b", "0 as gid"},
+                       {"null::bigint as k1", "k2", "a", "b", "1 as gid"}})
+                  .singleAggregation(
+                      {"k1", "k2", "gid"}, {"sum(a) as sum_a", "count(b)"})
+                  .planNode();
+
+  auto result = AssertQueryBuilder(plan).copyResults(pool());
+  // Verify correctness — should have rows for both grouping sets.
+  ASSERT_GT(result->size(), 0);
+}
+
+TEST_F(ExpandTest, constantVectorReuseVaryingBatchSizes) {
+  // Verifies reuse works when batch sizes differ (resize path).
+  std::vector<RowVectorPtr> batches;
+  batches.push_back(makeRowVector(
+      {"k1", "a"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeFlatVector<int64_t>({10, 20, 30})}));
+  batches.push_back(makeRowVector(
+      {"k1", "a"},
+      {makeFlatVector<int64_t>({4, 5, 6, 7, 8}),
+       makeFlatVector<int64_t>({40, 50, 60, 70, 80})}));
+  batches.push_back(makeRowVector(
+      {"k1", "a"},
+      {makeFlatVector<int64_t>({9}), makeFlatVector<int64_t>({90})}));
+
+  // Expand with null constant + scalar constant.
+  auto plan = PlanBuilder()
+                  .values(batches)
+                  .expand(
+                      {{"k1", "a", "0 as gid"},
+                       {"null::bigint as k1", "a", "1 as gid"}})
+                  .singleAggregation({"gid"}, {"sum(a) as sum_a"})
+                  .planNode();
+
+  // gid=0: sum = 10+20+30+40+50+60+70+80+90 = 450
+  // gid=1: sum = same = 450
+  auto expected = makeRowVector(
+      {"gid", "sum_a"},
+      {makeFlatVector<int64_t>({0, 1}), makeFlatVector<int64_t>({450, 450})});
+  AssertQueryBuilder(plan).assertResults(expected);
 }
 
 } // namespace

@@ -49,14 +49,7 @@ std::vector<IdentityProjection> extractProjections(
 void SpatialJoinOutputBuilder::initializeOutput(
     const RowVectorPtr& input,
     memory::MemoryPool* pool) {
-  if (output_ == nullptr) {
-    output_ =
-        BaseVector::create<RowVector>(outputType_, outputBatchSize_, pool);
-  } else {
-    VectorPtr outputVector = std::move(output_);
-    BaseVector::prepareForReuse(outputVector, outputBatchSize_);
-    output_ = std::static_pointer_cast<RowVector>(outputVector);
-  }
+  output_ = outputPool_.checkoutRowVector(outputType_, outputBatchSize_, pool);
   probeOutputIndices_ = allocateIndices(outputBatchSize_, pool);
   rawProbeOutputIndices_ = probeOutputIndices_->asMutable<vector_size_t>();
 

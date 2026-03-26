@@ -190,6 +190,9 @@ void SortBuffer::spill() {
   }
   updateEstimatedOutputRowSize();
 
+  // Release pooled output vectors to free memory for spilling.
+  output_.reset();
+
   if (sortedRows_.empty()) {
     spillInput();
   } else {
@@ -381,14 +384,15 @@ void SortBuffer::spillOutput() {
 }
 
 void SortBuffer::prepareOutput(vector_size_t batchSize) {
-  if (output_ != nullptr) {
-    VectorPtr output = std::move(output_);
-    BaseVector::prepareForReuse(output, batchSize);
-    output_ = std::static_pointer_cast<RowVector>(output);
+  auto& entry = outputPool_.checkout();
+  if (entry && entry.use_count() == 1) {
+    VectorPtr vec = std::move(entry);
+    BaseVector::prepareForReuse(vec, batchSize);
+    entry = std::move(vec);
   } else {
-    output_ = std::static_pointer_cast<RowVector>(
-        BaseVector::create(input_, batchSize, pool_));
+    entry = BaseVector::create(input_, batchSize, pool_);
   }
+  output_ = std::static_pointer_cast<RowVector>(entry);
 
   if (hasSpilled()) {
     spillSources_.resize(batchSize);

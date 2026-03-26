@@ -959,7 +959,7 @@ void IndexLookupJoin::finishInput(InputBatchState& batch) {
 }
 
 void IndexLookupJoin::prepareOutput(vector_size_t numOutputRows) {
-  output_ = createRowVector(pool(), outputType_, numOutputRows);
+  output_ = checkoutOutput(numOutputRows);
 }
 
 RowVectorPtr IndexLookupJoin::produceOutputForInnerJoin(
@@ -1270,13 +1270,12 @@ void IndexLookupJoin::prepareOutputRowMappings(size_t outputBatchSize) {
 
 void IndexLookupJoin::close() {
   recordConnectorStats();
-  // TODO: add close method for index source if needed to free up resource
-  // or shutdown index source gracefully.
   indexSource_.reset();
   inputBatches_.clear();
   probeOutputRowMapping_ = nullptr;
   lookupOutputRowMapping_ = nullptr;
   lookupOutputNulls_ = nullptr;
+  output_.reset();
 
   Operator::close();
 }

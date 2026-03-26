@@ -35,6 +35,11 @@ template <typename T>
 void SelectiveColumnReader::ensureValuesCapacity(
     vector_size_t numRows,
     bool preserveData) {
+  // Detach values/nulls buffers from pool entries with use_count==1 so that
+  // the reader's values_ buffer becomes uniquely owned for in-place reuse.
+  if (!isFlatMapValue_ && values_ && !values_->unique()) {
+    flatValuePool_.detachFlatBuffers<T>();
+  }
   if (values_ && (isFlatMapValue_ || values_->unique()) &&
       values_->capacity() >=
           BaseVector::byteSize<T>(numRows) + simd::kPadding) {
@@ -147,13 +152,23 @@ void SelectiveColumnReader::getFlatValues(
     }
     *result = flatMapValueFlatValues_;
   } else {
-    *result = std::make_shared<FlatVector<TVector>>(
-        memoryPool_,
-        type,
-        resultNulls(),
-        numValues_,
-        values_,
-        std::move(stringBuffers_));
+    auto& cached = flatValuePool_.checkout();
+    if (cached && cached.use_count() == 1 && cached->isFlatEncoding()) {
+      auto* flat = cached->asUnchecked<FlatVector<TVector>>();
+      flat->unsafeSetSize(numValues_);
+      flat->setNulls(resultNulls());
+      flat->unsafeSetValues(values_);
+      flat->setStringBuffers(std::move(stringBuffers_));
+    } else {
+      cached = std::make_shared<FlatVector<TVector>>(
+          memoryPool_,
+          type,
+          resultNulls(),
+          numValues_,
+          values_,
+          std::move(stringBuffers_));
+    }
+    *result = cached;
   }
 }
 

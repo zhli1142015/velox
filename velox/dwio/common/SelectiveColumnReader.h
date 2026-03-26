@@ -24,6 +24,7 @@
 #include "velox/dwio/common/Mutation.h"
 #include "velox/dwio/common/ScanSpec.h"
 #include "velox/type/Filter.h"
+#include "velox/vector/VectorReusePool.h"
 
 namespace facebook::velox::dwio::common {
 
@@ -742,6 +743,11 @@ class SelectiveColumnReader {
   BufferPtr flatMapValueNullsInReadRange_;
   VectorPtr flatMapValueFlatValues_;
   VectorPtr flatMapValueConstantNullValues_;
+
+  // Pool of FlatVector shells for non-flatmap leaf readers. Auto-grows to
+  // pipeline depth so at least one slot is always free (use_count==1) for
+  // reuse, even when downstream operators hold previous batch references.
+  VectorReusePool flatValuePool_;
 };
 
 template <>

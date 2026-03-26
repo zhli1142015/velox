@@ -22,6 +22,7 @@
 #include "velox/exec/PrefixSort.h"
 #include "velox/exec/RowContainer.h"
 #include "velox/vector/BaseVector.h"
+#include "velox/vector/VectorReusePool.h"
 
 namespace facebook::velox::exec {
 class SortInputSpiller;
@@ -163,6 +164,7 @@ class SortBuffer {
 
   // Reusable output vector.
   RowVectorPtr output_;
+  VectorReusePool outputPool_;
 
   // Estimated size of a single output row by using the max
   // 'data_->estimateRowSize()' across all accumulated data set.

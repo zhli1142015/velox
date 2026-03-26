@@ -119,8 +119,10 @@ RowVectorPtr GroupId::getOutput() {
     input_ = nullptr;
   }
 
-  return std::make_shared<RowVector>(
-      pool(), outputType_, nullptr, numInput, std::move(outputColumns));
+  auto result = checkoutOutput(numInput);
+  for (auto i = 0; i < outputType_->size(); ++i) {
+    result->childAt(i) = std::move(outputColumns[i]);
+  }
+  return result;
 }
-
 } // namespace facebook::velox::exec

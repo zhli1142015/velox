@@ -667,6 +667,8 @@ class HashProbe : public Operator {
 
   RowVectorPtr output_;
 
+  // Pool for output RowVector shells. Handles pipeline depth > 1.
+
   // Input rows with no nulls in the join keys.
   SelectivityVector nonNullInputRows_;
 

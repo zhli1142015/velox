@@ -789,17 +789,7 @@ void HashProbe::addInput(RowVectorPtr input) {
 }
 
 void HashProbe::prepareOutput(vector_size_t size) {
-  // Try to re-use memory for the output vectors that contain build-side data.
-  // We expect output vectors containing probe-side data to be null (reset in
-  // clearIdentityProjectedOutput). BaseVector::prepareForReuse keeps null
-  // children unmodified and makes non-null (build side) children reusable.
-  if (output_) {
-    VectorPtr output = std::move(output_);
-    BaseVector::prepareForReuse(output, size);
-    output_ = std::static_pointer_cast<RowVector>(output);
-  } else {
-    output_ = BaseVector::create<RowVector>(outputType_, size, pool());
-  }
+  output_ = checkoutOutput(size);
 }
 
 namespace {
@@ -963,11 +953,18 @@ RowVectorPtr HashProbe::getBuildSideOutput() {
 }
 
 void HashProbe::clearProjectedOutput() {
-  if (!output_ || output_.use_count() != 1) {
+  if (!output_) {
     return;
   }
+  // Clear probe-side children (P1: don't retain upstream references).
+  // Only clear children that are singly referenced by this RowVector.
   for (auto& [_, out] : projectedInputColumns_) {
-    output_->childAt(out) = nullptr;
+    auto& child = output_->childAt(out);
+    if (child && child.use_count() <= 2) {
+      // use_count <= 2: one from output_->children_[out], possibly one from
+      // a pool entry. Safe to clear.
+      child = nullptr;
+    }
   }
 }
 

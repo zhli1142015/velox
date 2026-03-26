@@ -19,6 +19,7 @@
 #include "velox/exec/Operator.h"
 #include "velox/exec/ProbeOperatorState.h"
 #include "velox/exec/SpatialIndex.h"
+#include "velox/vector/VectorReusePool.h"
 
 namespace facebook::velox::exec {
 
@@ -65,6 +66,7 @@ class SpatialJoinOutputBuilder {
 
   // Output state
   RowVectorPtr output_;
+  VectorReusePool outputPool_; // For SpatialJoinOutputBuilder (not an Operator)
   vector_size_t outputRow_{0};
   // Dictionary indices for probe columns for output vector.
   BufferPtr probeOutputIndices_;

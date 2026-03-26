@@ -244,10 +244,18 @@ RowVectorPtr FilterProject::getOutput() {
 
   if (!hasFilter_) {
     VELOX_CHECK(!isIdentityProjection_);
-    auto results = project(*rows, evalCtx);
-    auto output = fillOutput(size, nullptr, results);
-    loadReusedLazyVectors(output);
-    return output;
+    project(*rows, evalCtx);
+    prepareOutput(size);
+    projectChildren(
+        output_->children(), input_, identityProjections_, size, nullptr);
+    projectChildren(
+        output_->children(),
+        projectResults_,
+        resultProjections_,
+        size,
+        nullptr);
+    loadReusedLazyVectors(output_);
+    return output_;
   }
 
   // evaluate filter
@@ -258,38 +266,67 @@ RowVectorPtr FilterProject::getOutput() {
   }
 
   const bool allRowsSelected = (numOut == size);
+
+  // Fast path: filter + identity projection + all rows selected.
+  if (isIdentityProjection_ && allRowsSelected) {
+    return std::move(input_);
+  }
+
   // evaluate projections (if present)
-  std::vector<VectorPtr> results;
   if (!isIdentityProjection_) {
     if (!allRowsSelected) {
       rows->setFromBits(filterEvalCtx_.selectedBits->as<uint64_t>(), size);
     }
-    results = project(*rows, evalCtx);
+    project(*rows, evalCtx);
   }
 
-  auto output = fillOutput(
+  const auto mapping =
+      allRowsSelected ? nullptr : filterEvalCtx_.selectedIndices;
+  bool wrapResults = !allRowsSelected;
+
+  prepareOutput(numOut);
+  projectChildren(
+      output_->children(),
+      input_,
+      identityProjections_,
       numOut,
-      allRowsSelected ? nullptr : filterEvalCtx_.selectedIndices,
-      results);
-  loadReusedLazyVectors(output);
-  return output;
+      wrapResults ? mapping : nullptr);
+  projectChildren(
+      output_->children(),
+      projectResults_,
+      resultProjections_,
+      numOut,
+      wrapResults ? mapping : nullptr);
+  loadReusedLazyVectors(output_);
+  return output_;
 }
 
-std::vector<VectorPtr> FilterProject::project(
-    const SelectivityVector& rows,
-    EvalCtx& evalCtx) {
-  std::vector<VectorPtr> results;
+void FilterProject::project(const SelectivityVector& rows, EvalCtx& evalCtx) {
   exprs_->eval(
-      hasFilter_ ? 1 : 0, numExprs_, !hasFilter_, rows, evalCtx, results);
-  return results;
+      hasFilter_ ? 1 : 0,
+      numExprs_,
+      !hasFilter_,
+      rows,
+      evalCtx,
+      projectResults_);
+}
+
+void FilterProject::prepareOutput(vector_size_t size) {
+  output_ = checkoutOutput(size);
+  // Clear identity-projection children to break cross-pool reference chains.
+  // Without this, stale children from the previous batch keep upstream
+  // reader's FlatVector pool entries at use_count >= 2.
+  for (const auto& proj : identityProjections_) {
+    output_->childAt(proj.outputChannel) = nullptr;
+  }
 }
 
 vector_size_t FilterProject::filter(
     EvalCtx& evalCtx,
     const SelectivityVector& allRows) {
-  std::vector<VectorPtr> results;
-  exprs_->eval(0, 1, true, allRows, evalCtx, results);
-  return processFilterResults(results[0], allRows, filterEvalCtx_, pool());
+  exprs_->eval(0, 1, true, allRows, evalCtx, filterResults_);
+  return processFilterResults(
+      filterResults_[0], allRows, filterEvalCtx_, pool());
 }
 
 OperatorStats FilterProject::stats(bool clear) {

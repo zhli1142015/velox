@@ -116,8 +116,7 @@ RowVectorPtr TopN::getOutput() {
       outputBatchSize_, rows_.size() - numRowsReturned_);
   VELOX_CHECK_GT(numRowsToReturn, 0);
 
-  auto result = BaseVector::create<RowVector>(
-      outputType_, numRowsToReturn, operatorCtx_->pool());
+  auto result = checkoutOutput(numRowsToReturn);
 
   for (auto i = 0; i < outputType_->size(); ++i) {
     data_->extractColumn(

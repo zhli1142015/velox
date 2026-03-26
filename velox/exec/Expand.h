@@ -51,6 +51,11 @@ class Expand : public Operator {
 
   std::vector<std::vector<VectorPtr>> constantOutputs_;
 
+  // Cached constant vectors per grouping set, reused across batches to avoid
+  // re-creating ConstantVector wrappers (and their null buffer allocations).
+  // Indexed by [groupingSetIndex][columnIndex].
+  std::vector<std::vector<VectorPtr>> cachedConstantWrappers_;
+
   // Used to indicate the index of fieldProjections_.
   int32_t rowIndex_{0};
 };

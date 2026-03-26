@@ -733,8 +733,7 @@ RowVectorPtr Window::getOutput() {
   }
 
   const auto numOutputRows = std::min(numRowsPerOutput_, numRowsLeft);
-  auto result = BaseVector::create<RowVector>(
-      outputType_, numOutputRows, operatorCtx_->pool());
+  auto result = checkoutOutput(numOutputRows);
 
   // Compute the output values of window functions.
   auto numResultRows = callApplyLoop(numOutputRows, result);

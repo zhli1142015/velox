@@ -55,6 +55,7 @@ add_executable(
   FilterToExpressionTest.cpp
   FunctionResolutionTest.cpp
   HashBitRangeTest.cpp
+  VectorReuseE2ETest.cpp
   HashJoinBridgeTest.cpp
   HashJoinTest.cpp
   HashPartitionFunctionTest.cpp

@@ -58,6 +58,8 @@ class FilterProject : public Operator {
 
   void close() override {
     Operator::close();
+    projectResults_.clear();
+    filterResults_.clear();
     if (exprs_ != nullptr) {
       exprs_->clear();
     } else {
@@ -96,11 +98,9 @@ class FilterProject : public Operator {
   // updated.
   vector_size_t filter(EvalCtx& evalCtx, const SelectivityVector& allRows);
 
-  // Evaluate projections on the specified rows and return the results.
+  // Evaluate projections on the specified rows into projectResults_.
   // pre-condition: !isIdentityProjection_
-  std::vector<VectorPtr> project(
-      const SelectivityVector& rows,
-      EvalCtx& evalCtx);
+  void project(const SelectivityVector& rows, EvalCtx& evalCtx);
 
   // If true exprs_[0] is a filter and the other expressions are projections
   const bool hasFilter_{false};
@@ -117,6 +117,21 @@ class FilterProject : public Operator {
   int32_t numExprs_;
 
   FilterEvalCtx filterEvalCtx_;
+
+  // Cached result vectors for expression evaluation reuse across batches.
+  // ExprSet::eval preserves existing elements on resize(), allowing
+  // ensureWritable to reuse buffers when use_count == 1.
+  std::vector<VectorPtr> projectResults_;
+  std::vector<VectorPtr> filterResults_;
+
+  // Pool for output RowVector shells. Auto-grows to pipeline depth so
+  // downstream operators can hold previous batches without blocking reuse.
+
+  // Current batch's output RowVector, set by prepareOutput from the pool.
+  RowVectorPtr output_;
+
+  // Prepares the output RowVector for reuse via the pool.
+  void prepareOutput(vector_size_t size);
 
   // Indices for fields/input columns that are both an identity projection and
   // are referenced by either a filter or project expression. This is used to

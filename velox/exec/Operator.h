@@ -24,6 +24,7 @@
 #include "velox/exec/OperatorStats.h"
 #include "velox/exec/SpillStats.h"
 #include "velox/exec/trace/TraceWriter.h"
+#include "velox/vector/VectorReusePool.h"
 
 namespace facebook::velox::exec {
 
@@ -670,6 +671,19 @@ class Operator : public BaseRuntimeStatWriter {
   /// True if the input and output rows have exactly the same fields, i.e. one
   /// could copy directly from input to output if no cardinality change.
   bool isIdentityProjection_ = false;
+
+  /// Shared pool for output RowVector shell reuse. Used by fillOutput()
+  /// and available to subclasses via checkoutOutput() for custom output
+  /// construction. Auto-grows to pipeline depth, capped at 8.
+  VectorReusePool outputPool_;
+
+ protected:
+  /// Checkout a reusable RowVector shell from the shared pool.
+  /// Uses prepareForReuse to reset children (keeping flat children for
+  /// extraction, replacing dict children with fresh flat ones).
+  RowVectorPtr checkoutOutput(vector_size_t size) {
+    return outputPool_.checkoutRowVector(outputType_, size, pool());
+  }
 
   /// Returns true if the driver should yield execution to prevent getting
   /// stuck in long processing loops that exceed their allocated CPU time

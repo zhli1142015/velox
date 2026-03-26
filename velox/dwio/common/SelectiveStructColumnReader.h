@@ -118,7 +118,7 @@ class SelectiveStructColumnReaderBase : public SelectiveColumnReader {
       FormatParams& params,
       velox::common::ScanSpec& scanSpec,
       bool isRoot = false,
-      bool generateLazyChildren = true)
+      bool generateLazyChildren = false)
       : SelectiveColumnReader(requestedType, fileType, params, scanSpec),
         debugString_(
             getExceptionContext().message(VeloxException::Type::kSystem)),
@@ -133,6 +133,11 @@ class SelectiveStructColumnReaderBase : public SelectiveColumnReader {
   // Returns true if the file doesn't have this child (in which case it will be
   // treated as null).
   bool isChildMissing(const velox::common::ScanSpec& childSpec) const;
+
+  // Releases eagerly-read child vectors from the previous batch so that
+  // leaf readers' internal buffers become uniquely owned, enabling
+  // in-place reuse during ensureValuesCapacity().
+  void releaseEagerChildren(VectorPtr& result);
 
   bool isChildConstant(const velox::common::ScanSpec& childSpec) const {
     return childSpec.isConstant() ||

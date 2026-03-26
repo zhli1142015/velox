@@ -40,6 +40,7 @@ add_executable(
   VectorTest.cpp
   VectorTestUtils.cpp
   VectorToStringTest.cpp
+  VectorReusePoolTest.cpp
 )
 
 add_test(velox_vector_test velox_vector_test)

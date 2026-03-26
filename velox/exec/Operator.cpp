@@ -258,6 +258,26 @@ RowVectorPtr Operator::fillOutput(
     wrapResults = false;
   }
 
+  auto& entry = outputPool_.checkout();
+  if (entry && entry.use_count() == 1) {
+    auto* row = entry->asChecked<RowVector>();
+    row->unsafeResize(size);
+    row->children().assign(outputType_->size(), nullptr);
+    projectChildren(
+        row->children(),
+        input_,
+        identityProjections_,
+        size,
+        wrapResults ? mapping : nullptr);
+    projectChildren(
+        row->children(),
+        results,
+        resultProjections_,
+        size,
+        wrapResults ? mapping : nullptr);
+    return std::static_pointer_cast<RowVector>(entry);
+  }
+
   std::vector<VectorPtr> projectedChildren(outputType_->size());
   projectChildren(
       projectedChildren,
@@ -272,12 +292,13 @@ RowVectorPtr Operator::fillOutput(
       size,
       wrapResults ? mapping : nullptr);
 
-  return std::make_shared<RowVector>(
+  entry = std::make_shared<RowVector>(
       operatorCtx_->pool(),
       outputType_,
       nullptr,
       size,
       std::move(projectedChildren));
+  return std::static_pointer_cast<RowVector>(entry);
 }
 
 RowVectorPtr Operator::fillOutput(
@@ -301,6 +322,11 @@ OperatorStats Operator::stats(bool clear) {
 }
 
 void Operator::close() {
+  // Report pool metrics before clearing.
+  outputPool_.reportMetrics("output", [&](const auto& name, const auto& val) {
+    addRuntimeStat(name, val);
+  });
+  outputPool_.clear();
   input_ = nullptr;
   results_.clear();
   recordSpillStats();
