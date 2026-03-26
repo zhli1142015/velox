@@ -22,6 +22,7 @@
 #include "velox/dwio/parquet/RegisterParquetReader.h" // @manual
 #include "velox/dwio/parquet/reader/PageReader.h" // @manual
 #include "velox/dwio/parquet/reader/ParquetReader.h" // @manual=//velox/connectors/hive:velox_hive_connector_parquet
+#include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h" // @manual
 #include "velox/exec/tests/utils/PlanBuilder.h"
@@ -1646,6 +1647,274 @@ TEST_F(ParquetTableScanTest, reusedLazyVectors) {
   AssertQueryBuilder(plan)
       .split(makeSplit(filePath->getPath()))
       .assertResults(expectedRowVector);
+}
+
+// =========================================================================
+// Parquet Scan + Pipeline Vector Reuse Tests
+// =========================================================================
+
+struct ParquetPoolMetrics {
+  int64_t hits{0};
+  int64_t misses{0};
+  int64_t highWater{0};
+  bool found{false};
+};
+
+static ParquetPoolMetrics getParquetPoolMetrics(
+    const exec::TaskStats& stats,
+    const std::string& operatorType) {
+  ParquetPoolMetrics m;
+  for (const auto& pipeline : stats.pipelineStats) {
+    for (const auto& op : pipeline.operatorStats) {
+      if (op.operatorType == operatorType) {
+        m.found = true;
+        auto hitIt = op.runtimeStats.find("outputPoolHits");
+        auto missIt = op.runtimeStats.find("outputPoolMisses");
+        auto hwIt = op.runtimeStats.find("outputPoolHighWater");
+        if (hitIt != op.runtimeStats.end())
+          m.hits += hitIt->second.sum;
+        if (missIt != op.runtimeStats.end())
+          m.misses += missIt->second.sum;
+        if (hwIt != op.runtimeStats.end())
+          m.highWater = std::max(m.highWater, hwIt->second.max);
+      }
+    }
+  }
+  return m;
+}
+
+static void assertParquetColdOnly(
+    const ParquetPoolMetrics& m,
+    int maxColdMisses,
+    const std::string& testName) {
+  ASSERT_TRUE(m.found) << testName << ": operator not found";
+  ASSERT_GT(m.hits, 0) << testName << ": zero hits — reuse not working";
+  ASSERT_GT(m.hits, m.misses) << testName << ": hits should exceed misses";
+  ASSERT_LE(m.highWater, 3)
+      << testName << ": pool depth " << m.highWater << " too high";
+}
+
+// Parquet scan (20 RGs) → project (expr + identity) → agg.
+TEST_F(ParquetTableScanTest, scanProjectPoolReuse) {
+  auto rowType = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), DOUBLE()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .project({"a + 1 as a2", "b", "c"})
+                  .singleAggregation({}, {"sum(a2) as sa", "count(1) as cnt"})
+                  .planNode();
+
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_int_multi_rg.parquet")))
+          .copyResults(pool(), task);
+  ASSERT_EQ(result->size(), 1);
+  // 20 RGs × 500 rows = 10000 rows
+  ASSERT_EQ(result->childAt(1)->asFlatVector<int64_t>()->valueAt(0), 10000);
+
+  auto m = getParquetPoolMetrics(task->taskStats(), "FilterProject");
+  LOG(INFO) << "scanProject: hits=" << m.hits << " misses=" << m.misses
+            << " hw=" << m.highWater;
+  ASSERT_TRUE(m.found);
+  assertParquetColdOnly(m, 3, "scanProjectPoolReuse");
+}
+
+// Parquet scan (20 RGs) → filter (10%) → project → agg.
+TEST_F(ParquetTableScanTest, scanFilterProjectAggReuse) {
+  auto rowType = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), DOUBLE()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .filter("a % 10 = 0") // 10% selectivity
+                  .project({"a", "b * 2 as b2"})
+                  .singleAggregation({}, {"count(1) as cnt"})
+                  .planNode();
+
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_int_multi_rg.parquet")))
+          .copyResults(pool(), task);
+  ASSERT_EQ(result->size(), 1);
+  ASSERT_EQ(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 1000);
+
+  auto m = getParquetPoolMetrics(task->taskStats(), "FilterProject");
+  LOG(INFO) << "scanFilterProject: hits=" << m.hits << " misses=" << m.misses;
+  ASSERT_TRUE(m.found);
+  assertParquetColdOnly(m, 3, "scanFilterProjectAggReuse");
+}
+
+// Parquet scan (20 RGs) → HashJoin → project → agg.
+TEST_F(ParquetTableScanTest, scanJoinProjectAggReuse) {
+  auto factType = ROW({"fk", "fv"}, {INTEGER(), BIGINT()});
+  auto dimData = makeRowVector(
+      {"dk", "dv"},
+      {makeFlatVector<int32_t>(50, [](auto i) { return i; }),
+       makeFlatVector<int64_t>(50, [](auto i) { return i * 100; })});
+
+  auto gen = std::make_shared<core::PlanNodeIdGenerator>();
+  core::PlanNodeId scanNodeId;
+  auto plan = PlanBuilder(gen)
+                  .tableScan(factType)
+                  .capturePlanNodeId(scanNodeId)
+                  .hashJoin(
+                      {"fk"},
+                      {"dk"},
+                      PlanBuilder(gen).values({dimData}).planNode(),
+                      "",
+                      {"fk", "fv", "dv"})
+                  .singleAggregation({}, {"count(1) as cnt"})
+                  .planNode();
+
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(
+              scanNodeId,
+              makeSplit(getExampleFilePath("reuse_fact_multi_rg.parquet")))
+          .copyResults(pool(), task);
+  ASSERT_EQ(result->size(), 1);
+  ASSERT_EQ(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 10000);
+
+  auto hp = getParquetPoolMetrics(task->taskStats(), "HashProbe");
+  LOG(INFO) << "scanJoin HP: hits=" << hp.hits << " misses=" << hp.misses;
+  if (hp.found) {
+    assertParquetColdOnly(hp, 3, "scanJoinProjectAggReuse");
+  }
+}
+
+// Parquet scan with VARCHAR (15 RGs) → filter → project → agg.
+TEST_F(ParquetTableScanTest, scanStringColumnsReuse) {
+  auto rowType = ROW({"name", "id", "value"}, {VARCHAR(), BIGINT(), DOUBLE()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .filter("id > 100")
+                  .project({"name", "id + 1 as id2"})
+                  .singleAggregation({}, {"count(1) as cnt"})
+                  .planNode();
+
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_str_multi_rg.parquet")))
+          .copyResults(pool(), task);
+  ASSERT_EQ(result->size(), 1);
+  ASSERT_GT(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 0);
+
+  auto m = getParquetPoolMetrics(task->taskStats(), "FilterProject");
+  LOG(INFO) << "scanString: hits=" << m.hits << " misses=" << m.misses;
+  ASSERT_TRUE(m.found);
+  assertParquetColdOnly(m, 3, "scanStringColumnsReuse");
+}
+
+// Parquet scan (20 RGs) → Expand → Agg.
+TEST_F(ParquetTableScanTest, scanExpandAggReuse) {
+  auto rowType = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), DOUBLE()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .project({"a", "b", "cast(c as bigint) as ci"})
+                  .expand(
+                      {{"a", "null::bigint as b", "ci", "0 as gid"},
+                       {"null::bigint as a", "b", "ci", "1 as gid"}})
+                  .singleAggregation({"gid"}, {"sum(ci) as total"})
+                  .planNode();
+
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_int_multi_rg.parquet")))
+          .copyResults(pool());
+  ASSERT_EQ(result->size(), 2);
+}
+
+// Parquet scan (20 RGs) → OrderBy.
+TEST_F(ParquetTableScanTest, scanOrderByReuse) {
+  auto rowType = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), DOUBLE()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .orderBy({"a ASC"}, false)
+                  .singleAggregation({}, {"count(1) as cnt"})
+                  .planNode();
+
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_int_multi_rg.parquet")))
+          .copyResults(pool());
+  ASSERT_EQ(result->size(), 1);
+  ASSERT_EQ(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 10000);
+}
+
+// Parquet scan (20 RGs) → TopN.
+TEST_F(ParquetTableScanTest, scanTopNReuse) {
+  auto rowType = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), DOUBLE()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .topN({"a ASC"}, 1000, false)
+                  .singleAggregation({}, {"count(1) as cnt"})
+                  .planNode();
+
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_int_multi_rg.parquet")))
+          .copyResults(pool());
+  ASSERT_EQ(result->size(), 1);
+  ASSERT_EQ(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 1000);
+}
+
+// Parquet scan with mixed types (20 RGs) → filter → project.
+TEST_F(ParquetTableScanTest, scanMixedTypesReuse) {
+  auto rowType = ROW(
+      {"i32", "i64", "dbl", "str"}, {INTEGER(), BIGINT(), DOUBLE(), VARCHAR()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .project({"i32", "i64 + 1 as i64b", "dbl", "str"})
+                  .singleAggregation({}, {"count(1) as cnt"})
+                  .planNode();
+
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_mixed_multi_rg.parquet")))
+          .copyResults(pool(), task);
+  ASSERT_EQ(result->size(), 1);
+  ASSERT_EQ(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 4000);
+
+  auto m = getParquetPoolMetrics(task->taskStats(), "FilterProject");
+  LOG(INFO) << "scanMixed: hits=" << m.hits << " misses=" << m.misses;
+  ASSERT_TRUE(m.found);
+  assertParquetColdOnly(m, 3, "scanMixedTypesReuse");
+}
+
+// Parquet scan (wide 8-col table, 10 RGs) → project (1 expr + 7 identity).
+TEST_F(ParquetTableScanTest, scanWideProjectReuse) {
+  auto rowType =
+      ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"},
+          {BIGINT(),
+           BIGINT(),
+           BIGINT(),
+           BIGINT(),
+           BIGINT(),
+           BIGINT(),
+           BIGINT(),
+           BIGINT()});
+  auto plan =
+      PlanBuilder()
+          .tableScan(rowType)
+          .project({"c0 + 1 as expr", "c1", "c2", "c3", "c4", "c5", "c6", "c7"})
+          .singleAggregation({}, {"sum(expr) as s0", "sum(c7) as s7"})
+          .planNode();
+
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .split(makeSplit(getExampleFilePath("reuse_wide_multi_rg.parquet")))
+          .copyResults(pool(), task);
+  ASSERT_EQ(result->size(), 1);
+  ASSERT_GT(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 0);
+
+  auto m = getParquetPoolMetrics(task->taskStats(), "FilterProject");
+  LOG(INFO) << "scanWide: hits=" << m.hits << " misses=" << m.misses
+            << " hw=" << m.highWater;
+  ASSERT_TRUE(m.found);
+  assertParquetColdOnly(m, 3, "scanWideProjectReuse");
 }
 
 int main(int argc, char** argv) {
