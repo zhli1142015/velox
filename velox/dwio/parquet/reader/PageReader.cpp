@@ -73,32 +73,61 @@ void PageReader::seekToPage(int64_t row) {
       numRowsInPage_ = 0;
       break;
     }
-    PageHeader pageHeader = readPageHeader();
-    const uint32_t compressedPageSize = checkedPageSize(
-        *pageHeader.compressed_page_size(), "compressed page size");
-    pageStart_ = pageDataStart_ + compressedPageSize;
-
-    switch (*pageHeader.type()) {
-      case thrift::PageType::DATA_PAGE:
-        prepareDataPageV1(pageHeader, row);
-        break;
-      case thrift::PageType::DATA_PAGE_V2:
-        prepareDataPageV2(pageHeader, row);
-        break;
-      case thrift::PageType::DICTIONARY_PAGE:
-        if (row == kRepDefOnly) {
-          skipBytes(
-              static_cast<int32_t>(compressedPageSize),
-              inputStream_.get(),
-              bufferStart_,
-              bufferEnd_);
-          continue;
+    bool pageSkipped = false;
+    size_t pageIndex = columnPageIndexPosition_++;
+    if (columnPageIndex_) {
+      auto streamIndex = columnPageIndex_->getPageStreamIndex(pageIndex);
+      if (pageIndex == 0 && streamIndex == -1) {
+        pageIndex = columnPageIndexPosition_++;
+        streamIndex = columnPageIndex_->getPageStreamIndex(pageIndex);
+      }
+      if (streamIndex != -1) {
+        // If this is the first page or the stream index changed, update
+        // inputStream_.
+        if (pageIndex == 0 ||
+            streamIndex !=
+                columnPageIndex_->getPageStreamIndex(pageIndex - 1)) {
+          inputStream_ = std::move(pageStreams_[streamIndex]);
         }
-        prepareDictionary(pageHeader);
-        continue;
-      default:
-        break; // ignore INDEX page type and any other custom extensions
+      } else {
+        pageSkipped = true;
+      }
     }
+    if (pageSkipped) {
+      dataPageSkipped_ = true;
+      pageStart_ =
+          pageStart_ + columnPageIndex_->compressedPageSize(pageIndex - 1);
+      numRowsInPage_ = columnPageIndex_->pageRowCount(pageIndex - 1);
+    } else {
+      dataPageSkipped_ = false;
+      PageHeader pageHeader = readPageHeader();
+      const uint32_t compressedPageSize = checkedPageSize(
+          *pageHeader.compressed_page_size(), "compressed page size");
+      pageStart_ = pageDataStart_ + compressedPageSize;
+
+      switch (*pageHeader.type()) {
+        case thrift::PageType::DATA_PAGE:
+          prepareDataPageV1(pageHeader, row);
+          break;
+        case thrift::PageType::DATA_PAGE_V2:
+          prepareDataPageV2(pageHeader, row);
+          break;
+        case thrift::PageType::DICTIONARY_PAGE:
+          if (row == kRepDefOnly) {
+            skipBytes(
+                static_cast<int32_t>(compressedPageSize),
+                inputStream_.get(),
+                bufferStart_,
+                bufferEnd_);
+            continue;
+          }
+          prepareDictionary(pageHeader);
+          continue;
+        default:
+          break; // ignore INDEX page type and any other custom extensions
+      }
+    }
+
     if (row == kRepDefOnly || row < rowOfPage_ + numRowsInPage_) {
       break;
     }
@@ -1036,6 +1065,9 @@ void PageReader::skip(int64_t numRows) {
   }
   firstUnvisited_ += numRows;
 
+  if (dataPageSkipped_) {
+    return;
+  }
   if (toSkip == 0) {
     return;
   }

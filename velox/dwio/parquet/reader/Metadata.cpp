@@ -420,6 +420,11 @@ bool ColumnChunkMetaDataPtr::hasDictionaryPageOffset() const {
           .has_value();
 }
 
+bool ColumnChunkMetaDataPtr::hasColumnAndOffsetIndexOffset() const {
+  return thriftColumnChunkPtr(ptr_)->offset_index_offset_ref().has_value() &&
+      thriftColumnChunkPtr(ptr_)->column_index_offset_ref().has_value();
+}
+
 std::unique_ptr<dwio::common::ColumnStatistics>
 ColumnChunkMetaDataPtr::getColumnStatistics(
     const TypePtr type,
@@ -513,6 +518,22 @@ int64_t ColumnChunkMetaDataPtr::totalUncompressedSize() const {
   return apache::thrift::can_throw(
       *apache::thrift::can_throw(thriftColumnChunkPtr(ptr_)->meta_data())
            ->total_uncompressed_size());
+}
+
+int64_t ColumnChunkMetaDataPtr::offsetIndexOffset() const {
+  return thriftColumnChunkPtr(ptr_)->offset_index_offset_ref().value_or(0);
+}
+
+int32_t ColumnChunkMetaDataPtr::offsetIndexLength() const {
+  return thriftColumnChunkPtr(ptr_)->offset_index_length_ref().value_or(0);
+}
+
+int64_t ColumnChunkMetaDataPtr::columnIndexOffset() const {
+  return thriftColumnChunkPtr(ptr_)->column_index_offset_ref().value_or(0);
+}
+
+int32_t ColumnChunkMetaDataPtr::columnIndexLength() const {
+  return thriftColumnChunkPtr(ptr_)->column_index_length_ref().value_or(0);
 }
 
 FOLLY_ALWAYS_INLINE const thrift::RowGroup* thriftRowGroupPtr(

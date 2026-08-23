@@ -30,6 +30,7 @@ velox_add_library(
   BooleanColumnReader.h
   BooleanDecoder.h
   ByteStreamSplitDecoder.h
+  ColumnPageIndex.h
   DeltaBpDecoder.h
   DeltaByteArrayDecoder.h
   FloatingPointColumnReader.h

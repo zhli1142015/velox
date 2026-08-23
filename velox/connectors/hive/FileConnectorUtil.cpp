@@ -131,6 +131,8 @@ void configureReaderOptions(
           fileConfig->orcFooterSpeculativeIoSize(sessionProperties));
       break;
     case dwio::common::FileFormat::PARQUET:
+      readerOptions.setParquetFilterColumnIndexEnabled(
+          fileConfig->parquetFilterColumnIndexEnabled(sessionProperties));
       break;
     case dwio::common::FileFormat::NIMBLE:
       readerOptions.setFooterSpeculativeIoSize(

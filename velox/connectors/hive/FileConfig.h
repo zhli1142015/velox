@@ -325,6 +325,16 @@ class FileConfig {
             kUseColumnNamesSessionProperty::defaultValue));
   }
 
+  VELOX_HIVE_CONFIG(
+      kParquetFilterColumnIndexEnabledSession,
+      parquetFilterColumnIndexEnabled,
+      "parquet_filter_column_index_enabled",
+      bool,
+      true,
+      "Use the Parquet page index (column and offset index pages) to prune "
+      "data pages that cannot match the pushdown filters. Reduces data read "
+      "but adds per-file index page reads.")
+
   // Returns the timestamp unit used when reading timestamps from files.
   uint8_t readTimestampUnit(const config::ConfigBase* session) const;
 

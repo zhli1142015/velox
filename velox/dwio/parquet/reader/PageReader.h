@@ -26,6 +26,7 @@
 #include "velox/dwio/parquet/common/RleEncodingInternal.h"
 #include "velox/dwio/parquet/reader/BooleanDecoder.h"
 #include "velox/dwio/parquet/reader/ByteStreamSplitDecoder.h"
+#include "velox/dwio/parquet/reader/ColumnPageIndex.h"
 #include "velox/dwio/parquet/reader/DeltaBpDecoder.h"
 #include "velox/dwio/parquet/reader/DeltaByteArrayDecoder.h"
 #include "velox/dwio/parquet/reader/ParquetTypeWithId.h"
@@ -65,6 +66,31 @@ class PageReader {
         nullConcatenation_(pool_),
         stats_(stats),
         sessionTimezone_(sessionTimezone) {
+    type_->makeLevelInfo(leafInfo_);
+  }
+
+  PageReader(
+      std::vector<std::unique_ptr<dwio::common::SeekableInputStream>>&&
+          pageStreams,
+      memory::MemoryPool& pool,
+      ParquetTypeWithIdPtr fileType,
+      common::CompressionKind codec,
+      int64_t chunkSize,
+      dwio::common::ColumnRuntimeStats& stats,
+      const tz::TimeZone* sessionTimezone,
+      std::unique_ptr<ColumnPageIndex> pageIndex)
+      : pool_(pool),
+        pageStreams_(std::move(pageStreams)),
+        type_(std::move(fileType)),
+        maxRepeat_(type_->maxRepeat_),
+        maxDefine_(type_->maxDefine_),
+        isTopLevel_(maxRepeat_ == 0 && maxDefine_ <= 1),
+        codec_(codec),
+        chunkSize_(chunkSize),
+        nullConcatenation_(pool_),
+        stats_(stats),
+        sessionTimezone_(sessionTimezone),
+        columnPageIndex_(std::move(pageIndex)) {
     type_->makeLevelInfo(leafInfo_);
   }
 
@@ -415,6 +441,7 @@ class PageReader {
   memory::MemoryPool& pool_;
 
   std::unique_ptr<dwio::common::SeekableInputStream> inputStream_;
+  std::vector<std::unique_ptr<dwio::common::SeekableInputStream>> pageStreams_;
   ParquetTypeWithIdPtr type_;
   const int32_t maxRepeat_;
   const int32_t maxDefine_;
@@ -478,6 +505,9 @@ class PageReader {
 
   // Number of rows in current page.
   int32_t numRowsInPage_{0};
+
+  // True if the current page is skipped.
+  bool dataPageSkipped_{false};
 
   // Number of repdefs in page. Not the same as number of rows for a non-top
   // level column.
@@ -567,6 +597,8 @@ class PageReader {
   // decompressedData_ to avoid overwriting the source when the page is
   // compressed.
   BufferPtr bssDecodedData_;
+  std::unique_ptr<ColumnPageIndex> columnPageIndex_{nullptr};
+  size_t columnPageIndexPosition_{0};
 };
 
 FOLLY_ALWAYS_INLINE dwio::common::compression::CompressionOptions

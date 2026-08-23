@@ -115,6 +115,7 @@ velox_add_library(
   Reader.h
   ReaderFactory.h
   Retry.h
+  RowRanges.h
   ScanSpec.h
   SeekableInputStream.h
   SelectiveByteRleColumnReader.h

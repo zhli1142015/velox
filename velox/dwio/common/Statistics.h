@@ -588,6 +588,12 @@ struct RuntimeStats {
   // Counts stripes observed in the file.
   int64_t numStripes{0};
 
+  // Number of data pages skipped using the page index.
+  int64_t skippedPages{0};
+
+  // Number of data pages processed (read) after page-index filtering.
+  int64_t processedPages{0};
+
   // Stores unit-loader runtime metrics.
   UnitLoaderStats unitLoaderStats;
 

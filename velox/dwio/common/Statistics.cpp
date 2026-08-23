@@ -343,6 +343,12 @@ RuntimeStats::toRuntimeMetricMap() const {
   if (numStripes > 0) {
     result.emplace("numStripes", RuntimeMetric(numStripes));
   }
+  if (skippedPages > 0) {
+    result.emplace("skippedPages", RuntimeMetric(skippedPages));
+  }
+  if (processedPages > 0) {
+    result.emplace("processedPages", RuntimeMetric(processedPages));
+  }
   for (const auto& [format, metrics] : formatSpecificStats) {
     for (const auto& [name, metric] : metrics) {
       result.emplace(

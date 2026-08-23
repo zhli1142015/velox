@@ -46,6 +46,10 @@ class ColumnChunkMetaDataPtr {
   /// ranges) for this column chunk.
   bool hasOffsetIndex() const;
 
+  /// Check the presence of column and offset index page offset in the
+  /// ColumnChunk metadata.
+  bool hasColumnAndOffsetIndexOffset() const;
+
   /// Return the ColumnChunk statistics. Timestamp columns require
   /// convertedType and logicalType to produce min/max statistics.
   std::unique_ptr<dwio::common::ColumnStatistics> getColumnStatistics(
@@ -102,6 +106,18 @@ class ColumnChunkMetaDataPtr {
   /// it is not measured from the allocator and may over- or
   /// under-report by a small fraction.
   size_t estimateColumnMetadataSize() const;
+
+  /// Returns the offset of the offset index for this column chunk.
+  int64_t offsetIndexOffset() const;
+
+  /// Returns the length of the offset index for this column chunk.
+  int32_t offsetIndexLength() const;
+
+  /// Returns the offset of the column index for this column chunk.
+  int64_t columnIndexOffset() const;
+
+  /// Returns the length of the column index for this column chunk.
+  int32_t columnIndexLength() const;
 
  private:
   const void* ptr_;

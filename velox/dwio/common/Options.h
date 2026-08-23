@@ -763,6 +763,13 @@ class ReaderOptions : public io::ReaderOptions {
     return *this;
   }
 
+  /// Sets whether the Parquet reader may use the page index to prune data
+  /// pages.
+  ReaderOptions& setParquetFilterColumnIndexEnabled(bool flag) {
+    parquetFilterColumnIndexEnabled_ = flag;
+    return *this;
+  }
+
   /// Sets the requested (table) schema field ids for
   /// ColumnMappingMode::kFieldId, one ParquetFieldId tree per top-level column,
   /// aligned to fileSchema().
@@ -864,6 +871,10 @@ class ReaderOptions : public io::ReaderOptions {
 
   ColumnMappingMode columnMappingMode() const {
     return columnMappingMode_;
+  }
+
+  bool parquetFilterColumnIndexEnabled() const {
+    return parquetFilterColumnIndexEnabled_;
   }
 
   const std::shared_ptr<random::RandomSkipTracker>& randomSkip() const {
@@ -1063,6 +1074,7 @@ class ReaderOptions : public io::ReaderOptions {
   bool preloadIndex_{false};
   bool loadChunkStats_{true};
   bool allowEmptyFile_{false};
+  bool parquetFilterColumnIndexEnabled_{false};
   const FileHandle* fileHandle_{nullptr};
   cache::AsyncDataCache* cache_{nullptr};
 };
